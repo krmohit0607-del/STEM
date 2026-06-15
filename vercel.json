@@ -1,5 +1,8 @@
 {
   "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api/|Account/|Home/|Search/|Admin/|Report/|swagger/|MicrosoftIdentity/|signin-microsoft|interimhub|assets/).*)",
+      "destination": "/index.html"
+    }
   ]
 }
