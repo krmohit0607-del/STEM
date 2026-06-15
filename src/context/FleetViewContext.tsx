@@ -86,10 +86,16 @@ export function FleetViewProvider({ children }: { children: ReactNode }) {
       if (u && typeof u.currentPortal === 'number') setCurrentPortal(u.currentPortal);
     } catch (err) {
       const apiErr = err instanceof ApiError ? err : new ApiError(0, String(err), err);
-      if (import.meta.env.DEV) {
+      // Allow the stub user when there is no real backend reachable. This is
+      // gated by `import.meta.env.DEV` for local dev and by the
+      // `VITE_ALLOW_STUB_USER` flag for hosted demo builds (e.g. Vercel)
+      // where the .NET backend is not (yet) deployed.
+      const allowStub =
+        import.meta.env.DEV || import.meta.env.VITE_ALLOW_STUB_USER === 'true';
+      if (allowStub) {
         // eslint-disable-next-line no-console
         console.warn(
-          '[FleetView WebApp] /api/security/users/current failed — using DEV stub user.',
+          '[FleetView WebApp] /api/security/users/current failed — using stub user.',
           apiErr,
         );
         setUser(DEV_STUB_USER);
