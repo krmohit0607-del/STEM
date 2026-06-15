@@ -1,0 +1,1053 @@
+/* Phase 1 baseline styling. The legacy app uses ~30 stylesheets in
+   `wwwroot/css/`; we deliberately do **not** copy them in Phase 1 because
+   they target jQuery widgets (jQuery UI dialog, Tabulator, Select2, etc.)
+   that are not ported. Per-component CSS will be added as features land.
+*/
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, sans-serif;
+  background: #0e1626;
+  color: #e6edf3;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+#page-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#main-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+}
+
+/* Top side-nav --------------------------------------------------------- */
+#menu-sidenav.sidenav {
+  width: 56px;
+  background: #1b2434;
+  border-right: 1px solid #2a3447;
+  display: flex;
+  flex-direction: column;
+}
+
+#notifications-header nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#notifications-header nav li {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+}
+
+#notifications-header nav a {
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  line-height: 32px;
+  text-align: center;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #c9d1d9;
+}
+
+#notifications-header nav a:hover {
+  background: #2a3447;
+  color: #fff;
+}
+
+.notify-bubble {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: #d73a49;
+  display: none;
+}
+
+#user-submenu {
+  position: absolute;
+  top: 0;
+  left: 56px;
+  background: #1b2434;
+  border: 1px solid #2a3447;
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px;
+  min-width: 200px;
+  z-index: 1000;
+}
+
+#user-submenu li {
+  padding: 6px 0;
+}
+
+#user-submenu hr {
+  border: none;
+  border-top: 1px solid #2a3447;
+}
+
+/* Portal area ---------------------------------------------------------- */
+#portal.portal-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fv-portal-selector {
+  padding: 8px 12px;
+  background: #141c2b;
+  border-bottom: 1px solid #2a3447;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fv-portal-selector__label {
+  font-weight: 600;
+}
+
+.fv-portal-selector select {
+  background: #1b2434;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  padding: 4px 8px;
+  border-radius: 3px;
+}
+
+.fv-portal-selector__hint {
+  margin: 0 0 0 auto;
+  font-size: 12px;
+  color: #8b949e;
+}
+
+.fv-map-container {
+  flex: 1;
+  min-height: 0;
+}
+
+/* States --------------------------------------------------------------- */
+.fv-loading,
+.fv-unauthenticated {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+}
+
+.fv-unauthenticated a {
+  color: #58a6ff;
+  text-decoration: underline;
+}
+
+.fv-dev-banner {
+  background: #4a3c00;
+  color: #ffe699;
+  border-bottom: 1px solid #6b5800;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.fv-dev-banner code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* Collapsible left sidebar -------------------------------------------- */
+.fv-left-sidebar {
+  position: relative;
+  width: 240px;
+  background: #141c2b;
+  border-right: 1px solid #2a3447;
+  display: flex;
+  flex-direction: column;
+  transition: width 150ms ease;
+  flex-shrink: 0;
+}
+
+.fv-left-sidebar--collapsed {
+  /* Just the icon strip when collapsed. */
+  width: 40px;
+}
+
+.fv-left-sidebar__toggle {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid #3a4557;
+  background: #243049;
+  color: #e6edf3;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  z-index: 1000;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.fv-left-sidebar__toggle:hover {
+  background: #2f3d5c;
+  color: #fff;
+  border-color: #58a6ff;
+}
+
+.fv-left-sidebar__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.fv-left-tabs {
+  list-style: none;
+  margin: 0;
+  padding: 6px 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 40px;
+  flex-shrink: 0;
+  border-right: 1px solid #2a3447;
+  background: #141c2b;
+}
+
+.fv-left-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 36px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #c9d1d9;
+  cursor: pointer;
+}
+
+.fv-left-tab:hover {
+  background: #1b2434;
+  color: #fff;
+}
+
+.fv-left-tab--active {
+  background: #243049;
+  border-color: #2f3d5c;
+  color: #fff;
+}
+
+.fv-left-tab i {
+  font-size: 14px;
+  color: #8b949e;
+}
+
+.fv-left-tab--active i,
+.fv-left-tab:hover i {
+  color: #58a6ff;
+}
+
+.fv-left-tab__label {
+  /* Visually hidden — kept for accessibility / screen readers. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+}
+
+.fv-left-tab-panel {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  /* Reserve space on the right so the absolute toggle button does not
+     overlap the panel header. */
+  padding-right: 32px;
+  overflow-y: auto;
+}
+
+.fv-left-tab-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #fff;
+  margin: 0 0 4px;
+}
+
+.fv-left-tab-panel__hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #6e7681;
+  line-height: 1.4;
+}
+
+.fv-left-tab-panel__list {
+  list-style: disc;
+  padding-left: 18px;
+  margin: 0;
+  font-size: 12px;
+  color: #c9d1d9;
+  line-height: 1.5;
+}
+
+.fv-left-tab-panel__list li + li {
+  margin-top: 2px;
+}
+
+/* Top nav -------------------------------------------------------------- */
+.fv-topnav {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  height: 48px;
+  background: #1b2434;
+  border-bottom: 1px solid #2a3447;
+  flex-shrink: 0;
+}
+
+.fv-topnav__left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  flex: 1;
+}
+
+.fv-topnav__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.fv-topnav__vessel {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fv-topnav__vessel-name {
+  font-weight: 600;
+  color: #fff;
+}
+
+.fv-topnav__vessel-sep {
+  color: #6e7681;
+}
+
+.fv-topnav__client {
+  color: #c9d1d9;
+}
+
+.fv-topnav__client-type {
+  margin-left: 4px;
+  font-size: 12px;
+  color: #8b949e;
+  text-transform: lowercase;
+}
+
+.fv-topnav__voyage {
+  position: relative;
+  min-width: 0;
+}
+
+.fv-topnav__voyage-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #141c2b;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  max-width: 100%;
+}
+
+.fv-topnav__voyage-button:hover {
+  background: #2a3447;
+}
+
+.fv-topnav__voyage-route {
+  font-weight: 600;
+}
+
+.fv-topnav__voyage-meta {
+  color: #8b949e;
+  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fv-topnav__caret {
+  margin-left: 4px;
+  color: #8b949e;
+}
+
+.fv-topnav__voyage-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 320px;
+  background: #1b2434;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  z-index: 50;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.fv-topnav__voyage-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.fv-topnav__voyage-item:hover {
+  background: #2a3447;
+}
+
+.fv-topnav__voyage-item--active {
+  background: #243049;
+  border-left-color: #58a6ff;
+}
+
+.fv-topnav__voyage-item-route {
+  font-weight: 600;
+  font-size: 13px;
+  color: #fff;
+}
+
+.fv-topnav__voyage-item-meta {
+  font-size: 11px;
+  color: #8b949e;
+  margin-top: 2px;
+}
+
+.fv-topnav__icon-button {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #2a3447;
+  background: #141c2b;
+  color: #c9d1d9;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.fv-topnav__icon-button:hover {
+  background: #2a3447;
+  color: #fff;
+}
+
+.fv-topnav__action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid #2a3447;
+  background: #141c2b;
+  color: #e6edf3;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fv-topnav__action-button:hover:not(:disabled) {
+  background: #2a3447;
+}
+
+.fv-topnav__action-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fv-topnav__action-button--primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+}
+
+.fv-topnav__action-button--primary:hover:not(:disabled) {
+  background: #2a7bf3;
+  border-color: #2a7bf3;
+}
+
+/* Bottom panel (Tracksheet / Route Simulator) ------------------------- */
+.fv-bottom-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #2a3447;
+  background: #141c2b;
+  position: relative;
+  z-index: 800;
+}
+
+.fv-bottom-panel__tabs {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  background: #1b2434;
+  border-bottom: 1px solid #2a3447;
+}
+
+.fv-bottom-panel__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid #2a3447;
+  border-bottom: 2px solid transparent;
+  color: #c9d1d9;
+  font-size: 13px;
+  cursor: pointer;
+  height: 100%;
+}
+
+.fv-bottom-panel__tab:hover {
+  background: #243049;
+  color: #fff;
+}
+
+.fv-bottom-panel__tab--active {
+  background: #243049;
+  color: #fff;
+  border-bottom-color: #58a6ff;
+}
+
+.fv-bottom-panel__toggle {
+  margin-left: auto;
+  width: 36px;
+  background: transparent;
+  border: none;
+  color: #c9d1d9;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.fv-bottom-panel__toggle:hover {
+  background: #243049;
+  color: #fff;
+}
+
+.fv-bottom-panel__resizer {
+  height: 4px;
+  background: transparent;
+  cursor: ns-resize;
+  flex-shrink: 0;
+}
+
+.fv-bottom-panel__resizer:hover {
+  background: #2a3447;
+}
+
+.fv-bottom-panel__body {
+  background: #0e1626;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.fv-bottom-panel__placeholder {
+  padding: 16px 20px;
+  color: #c9d1d9;
+}
+
+.fv-bottom-panel__placeholder h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.fv-bottom-panel__placeholder p {
+  margin: 0;
+  font-size: 13px;
+  color: #8b949e;
+  line-height: 1.5;
+}
+
+.fv-bottom-panel__placeholder code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 12px;
+}
+
+/* Fleet List View page (/main) ---------------------------------------- */
+.fv-fleet-list {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #0e1626;
+  color: #e6edf3;
+  overflow: hidden;
+}
+
+.fv-fleet-list__topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 16px;
+  background: #1b2434;
+  border-bottom: 1px solid #2a3447;
+  flex-wrap: wrap;
+}
+
+.fv-fleet-list__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.fv-fleet-list__date {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+}
+
+.fv-fleet-list__date label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #c9d1d9;
+}
+
+.fv-fleet-list__date input {
+  background: #141c2b;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.fv-fleet-list__scope {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px;
+  background: #141c2b;
+  border-bottom: 1px solid #2a3447;
+}
+
+.fv-fleet-list__scope-btn {
+  background: transparent;
+  color: #c9d1d9;
+  border: 1px solid #2a3447;
+  padding: 4px 12px;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fv-fleet-list__scope-btn--active {
+  background: #243049;
+  border-color: #58a6ff;
+  color: #fff;
+}
+
+.fv-fleet-list__filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: #fff8b0;
+  color: #2b2400;
+  border-bottom: 1px solid #d8c860;
+}
+
+.fv-fleet-list__filters-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+}
+
+.fv-fleet-list__filters input {
+  flex: 1;
+  background: #fff;
+  border: 1px solid #c9b860;
+  color: #1b1500;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  max-width: 360px;
+}
+
+.fv-fleet-list__grid-scroll {
+  flex: 1;
+  overflow: auto;
+  background: #0e1626;
+}
+
+.fv-fleet-list__grid {
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+  min-width: 100%;
+}
+
+.fv-fleet-list__grid thead th {
+  position: sticky;
+  top: 0;
+  background: #1b2434;
+  color: #e6edf3;
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 8px;
+  border: 1px solid #2a3447;
+  vertical-align: bottom;
+  z-index: 1;
+}
+
+.fv-fleet-list__grid td {
+  padding: 6px 8px;
+  border: 1px solid #2a3447;
+  vertical-align: top;
+  color: #c9d1d9;
+}
+
+.fv-fleet-list__grid tr:nth-child(even) td {
+  background: #141c2b;
+}
+
+.fv-fleet-list__multi {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.fv-fleet-list__multi li + li {
+  margin-top: 2px;
+}
+
+.fv-fleet-list__edit-cell {
+  text-align: center;
+}
+
+.fv-fleet-list__edit-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid #2a3447;
+  background: #1b2434;
+  color: #c9d1d9;
+  border-radius: 3px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fv-fleet-list__edit-btn:hover {
+  background: #243049;
+  color: #fff;
+  border-color: #58a6ff;
+}
+
+.fv-fleet-list__footer {
+  padding: 12px 16px;
+  border-top: 1px solid #2a3447;
+  background: #141c2b;
+  color: #c1503a;
+  font-size: 12px;
+}
+
+.fv-fleet-list__footer-title {
+  font-weight: 700;
+  margin: 0 0 4px;
+}
+
+.fv-fleet-list__footer ol {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.6;
+}
+
+/* Tracksheet grid (bottom panel) -------------------------------------- */
+.fv-tracksheet {
+  height: 100%;
+  overflow: auto;
+  background: #0e1626;
+}
+
+.fv-tracksheet__table {
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+  min-width: 100%;
+}
+
+.fv-tracksheet__table th,
+.fv-tracksheet__table td {
+  border: 1px solid #2a3447;
+  padding: 4px 8px;
+  color: #c9d1d9;
+}
+
+.fv-tracksheet__group-row th {
+  position: sticky;
+  top: 0;
+  background: #243049;
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  z-index: 2;
+}
+
+.fv-tracksheet__head-row th {
+  position: sticky;
+  top: 26px;
+  background: #1b2434;
+  color: #e6edf3;
+  font-weight: 600;
+  text-align: left;
+  z-index: 1;
+}
+
+.fv-tracksheet__table tbody tr:nth-child(even) td {
+  background: #141c2b;
+}
+
+.fv-tracksheet__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fv-tracksheet__perf-gain {
+  color: #3fb950;
+}
+
+.fv-tracksheet__perf-loss {
+  color: #f85149;
+}
+
+/* Map controls (right-side floating bar) ----------------------------- */
+.fv-map-container {
+  position: relative;
+}
+
+.fv-map-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.fv-map-controls > * {
+  pointer-events: auto;
+}
+
+.fv-map-controls__bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #1b2434;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.fv-map-controls__btn {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: #c9d1d9;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.fv-map-controls__btn:hover {
+  background: #243049;
+  color: #fff;
+}
+
+.fv-map-controls__btn--active {
+  background: #243049;
+  color: #fff;
+  border-color: #58a6ff;
+}
+
+.fv-map-controls__badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: #58a6ff;
+  color: #0e1626;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px #1b2434;
+}
+
+.fv-map-controls__panel {
+  width: 260px;
+  max-height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+  background: #1b2434;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.fv-map-controls__panel-header {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #243049;
+  border-bottom: 1px solid #2a3447;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.fv-map-controls__panel-footer {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #8b949e;
+  border-top: 1px solid #2a3447;
+  background: #141c2b;
+}
+
+.fv-map-controls__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+}
+
+.fv-map-controls__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #c9d1d9;
+}
+
+.fv-map-controls__item:hover {
+  background: #243049;
+  color: #fff;
+}
+
+.fv-map-controls__item--selected {
+  color: #fff;
+}
+
+.fv-map-controls__item--selected .fv-map-controls__item-icon {
+  color: #58a6ff;
+}
+
+.fv-map-controls__item-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  margin-top: 2px;
+  color: #8b949e;
+}
+
+.fv-map-controls__item-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.fv-map-controls__item-detail {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8b949e;
+}
+
+.fv-map-controls__stub-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #d29922;
+  border: 1px solid #d29922;
+  border-radius: 3px;
+  vertical-align: 1px;
+}
