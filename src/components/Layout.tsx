@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import { useFleetView } from '../context/FleetViewContext';
 import { LeftSidebar } from './LeftSidebar';
 import { MapView } from './MapView';
@@ -14,8 +16,12 @@ import { BottomPanel } from './BottomPanel';
  * In Phase 1 the sidenav is fully React; the portal area shows a portal
  * selector + the map. Per-portal grids (Voyages, Vessels, Clients...) are
  * not yet ported.
+ *
+ * Pages can swap the default map view by passing `children`. The shell
+ * (TopNav, LeftSidebar, BottomPanel) stays the same so the user can keep
+ * navigating between pages without losing their dashboard chrome.
  */
-export function Layout() {
+export function Layout({ children }: { children?: ReactNode }) {
   const { isLoading, error, user, isStubbed } = useFleetView();
 
   if (isLoading) {
@@ -53,7 +59,7 @@ export function Layout() {
       <div id="main-wrapper">
         <LeftSidebar />
         <div id="portal" className="portal-container">
-          <MapView />
+          {children ?? <MapView />}
           <BottomPanel />
         </div>
       </div>

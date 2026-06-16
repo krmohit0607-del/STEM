@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 
@@ -20,6 +21,12 @@ type TabId =
   | 'history'
   | 'reports';
 
+interface PlannedItem {
+  label: string;
+  /** Optional in-app route. When set, the bullet renders as a clickable link. */
+  route?: string;
+}
+
 interface TabDef {
   id: TabId;
   /** FontAwesome class (no leading "fa-"). */
@@ -29,7 +36,9 @@ interface TabDef {
   /** Fallback label when the dictionary is missing the key. */
   labelFallback: string;
   /** Bullet list of planned contents for this tab. */
-  planned: string[];
+  planned: (string | PlannedItem)[];
+  /** Optional route to navigate to when the icon-tab is clicked. */
+  route?: string;
 }
 
 const TABS: TabDef[] = [
@@ -38,9 +47,10 @@ const TABS: TabDef[] = [
     icon: 'fa-gauge-high',
     labelKey: 'dashboard',
     labelFallback: 'Dashboard',
+    route: '/',
     planned: [
       'Create new voyage',
-      'Voyage details',
+      { label: 'Voyage details', route: '/voyage' },
       'Vessel details',
       'Client details',
       'Email details',
@@ -53,7 +63,11 @@ const TABS: TabDef[] = [
     icon: 'fa-bolt',
     labelKey: 'interimDashboard',
     labelFallback: 'Interim Dashboard',
-    planned: ['Interim dashboard', 'Optimization details'],
+    route: '/interim',
+    planned: [
+      { label: 'Interim dashboard', route: '/interim' },
+      'Optimization details',
+    ],
   },
   {
     id: 'route',
@@ -93,7 +107,11 @@ const TABS: TabDef[] = [
     icon: 'fa-compass-drafting',
     labelKey: 'routeExplorer',
     labelFallback: 'Route Explorer / Simulator',
-    planned: ['Route explorer', 'Route simulator'],
+    route: '/route-explorer',
+    planned: [
+      { label: 'Route explorer', route: '/route-explorer' },
+      { label: 'Route simulator', route: '/route-simulator' },
+    ],
   },
   {
     id: 'history',
@@ -141,6 +159,7 @@ function readActiveTab(): TabId {
 
 export function LeftSidebar() {
   const l = useL();
+  const navigate = useNavigate();
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
@@ -191,13 +210,15 @@ export function LeftSidebar() {
                   if (collapsed) {
                     setActiveTab(tab.id);
                     setCollapsed(false);
-                    return;
-                  }
-                  if (tab.id === activeTab) {
+                  } else if (tab.id === activeTab) {
                     setCollapsed(true);
-                    return;
+                  } else {
+                    setActiveTab(tab.id);
                   }
-                  setActiveTab(tab.id);
+                  // Tabs with a dedicated page navigate to it; every other
+                  // tab returns to the dashboard map so the user always
+                  // ends up on a real page.
+                  navigate(tab.route ?? '/');
                 }}
                 title={t(tab.labelKey, tab.labelFallback)}
               >
@@ -225,13 +246,26 @@ export function LeftSidebar() {
             <h3 className="fv-left-tab-panel__title">
               {t(active.labelKey, active.labelFallback)}
             </h3>
-            <p className="fv-left-tab-panel__hint">
-              {t('tabPlannedHint', 'Planned contents — not implemented yet.')}
-            </p>
             <ul className="fv-left-tab-panel__list">
-              {active.planned.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
+              {active.planned.map((item) => {
+                const entry: PlannedItem =
+                  typeof item === 'string' ? { label: item } : item;
+                return (
+                  <li key={entry.label}>
+                    {entry.route ? (
+                      <button
+                        type="button"
+                        className="fv-left-tab-panel__link"
+                        onClick={() => navigate(entry.route!)}
+                      >
+                        {entry.label}
+                      </button>
+                    ) : (
+                      entry.label
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

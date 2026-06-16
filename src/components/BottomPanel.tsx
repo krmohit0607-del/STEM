@@ -1,23 +1,23 @@
 import { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { TracksheetGrid } from './TracksheetGrid';
 
 /**
  * Bottom panel — collapsible drawer at the bottom of the page that hosts
- * either the Tracksheet grid or the Route Simulator. Two tab buttons sit
- * **above** the panel so they remain visible even when the panel is
- * collapsed (so users can pick a view and expand in one motion).
+ * the Tracksheet grid. Two tab buttons sit **above** the panel so they
+ * remain visible even when the panel is collapsed:
+ *   - Tracksheet: toggles this drawer.
+ *   - Route Simulator: navigates to the dedicated `/route-simulator`
+ *     page (the simulator is no longer rendered inline in the drawer).
  *
  * Matches the legacy `#tracksheetDiv` show/hide behavior from
- * `ManageDailyOperations.js` (toggle-tracksheet button), but the actual
- * grid + simulator content are not ported. The panel body shows a
- * placeholder describing what will live there.
+ * `ManageDailyOperations.js` (toggle-tracksheet button).
  */
 
-type PanelView = 'tracksheet' | 'simulator';
+type PanelView = 'tracksheet';
 
-const VIEW_KEY = 'fv.bottomPanel.view';
 const COLLAPSED_KEY = 'fv.bottomPanel.collapsed';
 const HEIGHT_KEY = 'fv.bottomPanel.height';
 
@@ -45,35 +45,20 @@ function readNumber(key: string, fallback: number): number {
   }
 }
 
-function readView(): PanelView {
-  try {
-    const v = window.localStorage.getItem(VIEW_KEY);
-    return v === 'simulator' ? 'simulator' : 'tracksheet';
-  } catch {
-    return 'tracksheet';
-  }
-}
-
 export function BottomPanel() {
   const l = useL();
+  const navigate = useNavigate();
+  const location = useLocation();
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
   };
 
-  const [view, setView] = useState<PanelView>(() => readView());
+  const view: PanelView = 'tracksheet';
   const [collapsed, setCollapsed] = useState(() => readBool(COLLAPSED_KEY, false));
   const [height, setHeight] = useState(() =>
     Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, readNumber(HEIGHT_KEY, DEFAULT_HEIGHT))),
   );
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(VIEW_KEY, view);
-    } catch {
-      /* ignore */
-    }
-  }, [view]);
 
   useEffect(() => {
     try {
@@ -113,18 +98,15 @@ export function BottomPanel() {
     window.addEventListener('pointerup', onUp);
   };
 
-  const handleTabClick = (next: PanelView) => {
-    if (collapsed) {
-      setView(next);
-      setCollapsed(false);
-      return;
-    }
-    if (view === next) {
-      setCollapsed(true);
-      return;
-    }
-    setView(next);
+  const handleTracksheetClick = () => {
+    setCollapsed((prev) => !prev);
   };
+
+  const handleSimulatorClick = () => {
+    navigate('/route-simulator');
+  };
+
+  const isSimulatorRoute = location.pathname === '/route-simulator';
 
   return (
     <div className="fv-bottom-panel" style={{ height: collapsed ? 36 : 36 + height }}>
@@ -136,7 +118,7 @@ export function BottomPanel() {
           className={`fv-bottom-panel__tab${
             !collapsed && view === 'tracksheet' ? ' fv-bottom-panel__tab--active' : ''
           }`}
-          onClick={() => handleTabClick('tracksheet')}
+          onClick={handleTracksheetClick}
         >
           <i className="fas fa-table" aria-hidden="true" />
           <span>{t('tracksheet', 'Tracksheet')}</span>
@@ -145,11 +127,12 @@ export function BottomPanel() {
         <button
           type="button"
           role="tab"
-          aria-selected={!collapsed && view === 'simulator'}
+          aria-selected={isSimulatorRoute}
           className={`fv-bottom-panel__tab${
-            !collapsed && view === 'simulator' ? ' fv-bottom-panel__tab--active' : ''
+            isSimulatorRoute ? ' fv-bottom-panel__tab--active' : ''
           }`}
-          onClick={() => handleTabClick('simulator')}
+          onClick={handleSimulatorClick}
+          title={t('openRouteSimulator', 'Open Route Simulator')}
         >
           <i className="fas fa-route" aria-hidden="true" />
           <span>{t('routeSimulator', 'Route Simulator')}</span>
@@ -175,17 +158,7 @@ export function BottomPanel() {
             aria-orientation="horizontal"
           />
           <div className="fv-bottom-panel__body" style={{ height }}>
-            {view === 'tracksheet' ? (
-              <TracksheetGrid />
-            ) : (
-              <div className="fv-bottom-panel__placeholder">
-                <h3>{t('routeSimulator', 'Route Simulator')}</h3>
-                <p>
-                  Route simulator (waypoint editor + ETA / fuel estimates) will
-                  render here. Not ported yet.
-                </p>
-              </div>
-            )}
+            <TracksheetGrid />
           </div>
         </>
       )}
