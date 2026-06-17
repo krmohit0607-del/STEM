@@ -49,7 +49,7 @@ const TABS: TabDef[] = [
     labelFallback: 'Dashboard',
     route: '/',
     planned: [
-      'Create new voyage',
+      { label: 'Create new voyage', route: '/voyage/new' },
       { label: 'Voyage details', route: '/voyage' },
       'Vessel details',
       'Client details',

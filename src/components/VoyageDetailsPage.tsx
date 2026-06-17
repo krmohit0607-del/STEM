@@ -424,20 +424,136 @@ function formatNumber(n: number, fractionDigits = 2): string {
   });
 }
 
-export function VoyageDetailsPage() {
+// Empty-form defaults used when the page is opened in "create" mode.
+// Selects keep a valid first-option value (TS unions don't allow ""),
+// every text / number field is blank or zero so the user starts from a
+// clean slate.
+
+const EMPTY_ORDER: OrderDetails = {
+  serviceType: 'RPM',
+  clientName: '',
+  clientType: 'Owner',
+  price: 0,
+  pricingBasis: 'Per Day',
+  clientEmailList: '',
+  dailyFleetSummary: '',
+  sameAsClientEmail: false,
+  clientNotes: '',
+};
+
+const EMPTY_VESSEL: VesselDetails = {
+  name: '',
+  imo: '',
+  type: 'Bulk Carrier',
+  email: '',
+  ecdisModel: '',
+};
+
+const EMPTY_LIMITS: OperatingLimits = {
+  minRpm: 0,
+  maxRpm: 0,
+  minMcr: 0,
+  maxMcr: 0,
+  minSpeed: 0,
+  maxSpeed: 0,
+  minPowerFraction: 0,
+  maxPowerFraction: 0,
+  nominalPowerFraction: 0,
+  blowerOnOffMin: 0,
+  blowerOnOffMax: 0,
+  ballast: { minSwh: 0, maxSwh: 0, maxWind: 0, maxSea: 0 },
+  laden: { minSwh: 0, maxSwh: 0, maxWind: 0, maxSea: 0 },
+  criticalRpmMin: 0,
+  criticalRpmMax: 0,
+  scrubber: 'No',
+  egcs: 'Open',
+  safety: { maxSwhMt: 0, maxWindSpeed: 0 },
+};
+
+const EMPTY_TELEGRAPH: TelegraphRow[] = [
+  { label: 'Beam Anchor RPM', rpm: 0 },
+  { label: 'Slow Ahead RPM', rpm: 0 },
+  { label: 'Half Ahead RPM', rpm: 0 },
+  { label: 'Full Ahead RPM', rpm: 0 },
+];
+
+const EMPTY_ME: MeDetails = {
+  type: '',
+  mode: '',
+  beams: 0,
+  draftBallast: 0,
+  draftLaden: 0,
+  summerDraft: 0,
+  summerDisplacement: 0,
+  seaTrimHeight: 0,
+};
+
+const EMPTY_SPEED_CONS: SpeedConsRow[] = [
+  { description: 'ECO', speed: 0, fuelType: 'VLSFO', isEca: false, dailyCons: 0 },
+  { description: 'FULL', speed: 0, fuelType: 'VLSFO', isEca: false, dailyCons: 0 },
+  { description: 'CUSTOM', speed: 0, fuelType: 'VLSFO', isEca: false, dailyCons: 0 },
+];
+
+const EMPTY_LEGS: LegData[] = [
+  {
+    id: 'leg-1',
+    legNumber: 1,
+    legType: 'Delivery',
+    portFrom: '',
+    portTo: '',
+    etd: '',
+    autoRoute: true,
+    draft: 0,
+    displacement: 0,
+    gm: 0,
+    rollPeriod: 0,
+    maxSwh: 0,
+    maxWindSpeed: 0,
+    cpDetails: {
+      windsBf: 0,
+      dssCode: 0,
+      swh: 0,
+      minHours: 0,
+      currents: '',
+      allowableFuelMethod: '',
+      aboutSpeed: '',
+      timeGain: '',
+      timeLoss: '',
+      selection: '',
+    },
+    speedCons: EMPTY_SPEED_CONS,
+    marketFactors: { dailyHireRate: 0, foCost: 0, doCost: 0, euaCost: 0 },
+    cpSameAsPrevious: false,
+  },
+];
+
+interface VoyageDetailsPageProps {
+  /** "edit" loads the stub voyage; "create" starts with a blank form. */
+  mode?: 'edit' | 'create';
+}
+
+export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}) {
   const l = useL();
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
   };
 
-  const [order, setOrder] = useState<OrderDetails>(STUB_ORDER);
-  const [vessel, setVessel] = useState<VesselDetails>(STUB_VESSEL);
-  const [limits] = useState<OperatingLimits>(STUB_LIMITS);
-  const [telegraph] = useState<TelegraphRow[]>(STUB_TELEGRAPH);
-  const [me] = useState<MeDetails>(STUB_ME);
-  const [legs, setLegs] = useState<LegData[]>(STUB_LEGS);
-  const [activeLegId, setActiveLegId] = useState<string>(STUB_LEGS[0].id);
+  const isCreate = mode === 'create';
+  const initialOrder = isCreate ? EMPTY_ORDER : STUB_ORDER;
+  const initialVessel = isCreate ? EMPTY_VESSEL : STUB_VESSEL;
+  const initialLimits = isCreate ? EMPTY_LIMITS : STUB_LIMITS;
+  const initialTelegraph = isCreate ? EMPTY_TELEGRAPH : STUB_TELEGRAPH;
+  const initialMe = isCreate ? EMPTY_ME : STUB_ME;
+  const initialLegs = isCreate ? EMPTY_LEGS : STUB_LEGS;
+
+  const [order, setOrder] = useState<OrderDetails>(initialOrder);
+  const [vessel, setVessel] = useState<VesselDetails>(initialVessel);
+  const [limits] = useState<OperatingLimits>(initialLimits);
+  const [telegraph] = useState<TelegraphRow[]>(initialTelegraph);
+  const [me] = useState<MeDetails>(initialMe);
+  const [legs, setLegs] = useState<LegData[]>(initialLegs);
+  const [activeLegId, setActiveLegId] = useState<string>(initialLegs[0].id);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [selectedForMerge, setSelectedForMerge] = useState<string[]>([]);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -476,8 +592,9 @@ export function VoyageDetailsPage() {
   };
 
   const addLeg = () => {
+    const template = EMPTY_LEGS[0];
     const next: LegData = {
-      ...STUB_LEGS[0],
+      ...template,
       id: `leg-${legs.length + 1}-${Date.now()}`,
       legNumber: legs.length + 1,
       legType: 'Laden',
@@ -550,9 +667,15 @@ export function VoyageDetailsPage() {
     <div className="fv-voyage">
       <header className="fv-voyage__header">
         <div>
-          <h1>{t('voyageDetails', 'Voyage Details')}</h1>
+          <h1>
+            {isCreate
+              ? t('createNewVoyage', 'New voyage')
+              : t('voyageDetails', 'Voyage Details')}
+          </h1>
           <p className="fv-voyage__sub">
-            {vessel.name} · IMO {vessel.imo} · {legs.length} leg{legs.length === 1 ? '' : 's'}
+            {vessel.name || (isCreate ? t('newVessel', 'New vessel') : '—')}
+            {vessel.imo ? ` · IMO ${vessel.imo}` : ''}
+            {` · ${legs.length} leg${legs.length === 1 ? '' : 's'}`}
             {totalDuration ? ` · ${totalDuration}` : ''}
             {totalCost ? ` · Total daily hire ${formatNumber(totalCost, 0)}` : ''}
           </p>

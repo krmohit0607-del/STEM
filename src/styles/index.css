@@ -684,6 +684,28 @@ a {
   font-size: 12px;
 }
 
+.fv-fleet-list__new-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #238636;
+  color: #fff;
+  border: 1px solid #2ea043;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+.fv-fleet-list__new-btn:hover {
+  background: #2ea043;
+}
+.fv-fleet-list__new-btn i {
+  font-size: 11px;
+}
+
 .fv-fleet-list__scope {
   display: flex;
   gap: 4px;
@@ -734,6 +756,20 @@ a {
   border-radius: 3px;
   font-size: 12px;
   max-width: 360px;
+}
+
+.fv-fleet-list__filters-count {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5a4a00;
+}
+
+.fv-fleet-list__empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: #8b949e;
+  font-style: italic;
 }
 
 .fv-fleet-list__grid-scroll {
@@ -1431,7 +1467,7 @@ a {
   display: flex;
   flex-direction: column;
 }
-/* Interim dashboard — dummy vessel card + chart ------------------------ */
+/* Interim dashboard ï¿½ dummy vessel card + chart ------------------------ */
 .fv-interim__vessel-card {
   margin: 12px 16px 0;
   padding: 10px 12px;
@@ -2758,4 +2794,259 @@ a {
   background: #fff;
   border: 2px solid #1f6feb;
   cursor: grab;
+}
+/* ---------- Route Simulator map view ---------- */
+.fv-route__sim-map {
+  position: relative;
+  height: 460px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #2a3447;
+  background: #0a1422;
+}
+.fv-route__sim-map .leaflet-container {
+  background: #0a1422;
+}
+.fv-route__sim-chart-wrap > .fv-route__sim-map {
+  flex: 1 1 auto;
+}
+
+.fv-route__ship-icon-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+.fv-route__ship-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6), 0 4px 10px rgba(0, 0, 0, 0.4);
+  transition: transform 200ms ease;
+}
+.fv-route__ship-icon i {
+  font-size: 12px;
+}
+.fv-route__ship-icon--active {
+  box-shadow: 0 0 0 3px #fff, 0 0 0 6px rgba(88, 166, 255, 0.5),
+    0 4px 14px rgba(0, 0, 0, 0.5);
+  animation: fv-route-ship-pulse 1.8s ease-in-out infinite;
+}
+.fv-route__ship-icon--active i {
+  font-size: 14px;
+}
+@keyframes fv-route-ship-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+.fv-route__ship-tooltip {
+  background: #141c2b !important;
+  color: #e6edf3 !important;
+  border: 1px solid #2a3447 !important;
+  border-radius: 6px !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+}
+.fv-route__ship-tooltip::before {
+  border-top-color: #141c2b !important;
+}
+
+.fv-route__map-legend {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(20, 28, 43, 0.92);
+  border: 1px solid #2a3447;
+  border-radius: 8px;
+  padding: 8px 10px;
+  backdrop-filter: blur(4px);
+  min-width: 220px;
+}
+.fv-route__map-legend-item {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  color: #e6edf3;
+  font: inherit;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fv-route__map-legend-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.fv-route__map-legend-item--active {
+  background: rgba(88, 166, 255, 0.15);
+}
+.fv-route__map-legend-label {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fv-route__map-legend-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: #e6edf3;
+}
+
+
+/* Fleet List voyage link --------------------------------------------- */
+.fv-fleet-list__voyage-link {
+  color: #58a6ff;
+  text-decoration: none;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.fv-fleet-list__voyage-link:hover {
+  text-decoration: underline;
+}
+.fv-fleet-list__voyage-link .fa-external-link-alt {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+/* Voyage Overview (/?voyage=ID) -------------------------------------- */
+.fv-voyage-overview {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  height: 100%;
+  background: #0e1626;
+  color: #e6edf3;
+}
+.fv-voyage-overview--missing {
+  display: block;
+  padding: 24px;
+}
+.fv-voyage-overview--missing code {
+  background: #141c2b;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #f0b429;
+}
+.fv-voyage-overview__panel {
+  overflow-y: auto;
+  border-right: 1px solid #2a3447;
+  background: #141c2b;
+  padding: 14px 16px 18px;
+}
+.fv-voyage-overview__panel-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: #c9d1d9;
+}
+.fv-voyage-overview__panel-header p {
+  margin: 0;
+  font-size: 12px;
+  color: #8b949e;
+}
+.fv-voyage-overview__panel-header strong {
+  color: #58a6ff;
+}
+.fv-voyage-overview__status {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.fv-voyage-overview__status li {
+  background: #1b2434;
+  border: 1px solid #2a3447;
+  color: #56d364;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.fv-voyage-overview__section {
+  margin-top: 14px;
+  border-top: 1px solid #2a3447;
+  padding-top: 10px;
+}
+.fv-voyage-overview__section h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b949e;
+}
+.fv-voyage-overview__section dl {
+  margin: 0;
+}
+.fv-voyage-overview__field {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.fv-voyage-overview__field dt {
+  color: #8b949e;
+}
+.fv-voyage-overview__field dd {
+  margin: 0;
+  color: #c9d1d9;
+  word-break: break-word;
+}
+.fv-voyage-overview__map {
+  position: relative;
+  height: 100%;
+}
+.fv-voyage-overview__ship-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+.fv-voyage-overview__ship {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #58a6ff;
+  color: #0e1626;
+  font-size: 16px;
+  box-shadow: 0 0 0 3px #fff, 0 0 0 6px rgba(88, 166, 255, 0.5),
+    0 4px 14px rgba(0, 0, 0, 0.5);
+  animation: fv-voyage-overview-pulse 1.8s ease-in-out infinite;
+}
+@keyframes fv-voyage-overview-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+.fv-voyage-overview__port-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+.fv-voyage-overview__port {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #f0b429;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+.fv-voyage-overview__ship-tooltip,
+.fv-voyage-overview__port-tooltip {
+  background: #141c2b !important;
+  color: #e6edf3 !important;
+  border: 1px solid #2a3447 !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
 }

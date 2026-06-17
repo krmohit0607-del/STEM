@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 
@@ -92,6 +93,7 @@ function todoHandler(label: string) {
 
 export function TopNav() {
   const l = useL();
+  const navigate = useNavigate();
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
@@ -209,7 +211,7 @@ export function TopNav() {
         <button
           type="button"
           className="fv-topnav__action-button fv-topnav__action-button--primary"
-          onClick={todoHandler('Create new voyage')}
+          onClick={() => navigate('/voyage/new')}
         >
           <i className="fas fa-plus" aria-hidden="true" />
           <span>{t('createNewVoyage', 'New voyage')}</span>

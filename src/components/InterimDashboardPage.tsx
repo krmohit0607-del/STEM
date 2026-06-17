@@ -754,8 +754,8 @@ function PerformanceChart({ rows, visibleKeys }: PerformanceChartProps) {
     return (
       <svg
         viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-        className="fv-interim__chart-svg"
         preserveAspectRatio="none"
+        className="fv-interim__chart-svg"
         role="presentation"
       >
         <rect
@@ -797,9 +797,8 @@ function PerformanceChart({ rows, visibleKeys }: PerformanceChartProps) {
     <>
       <svg
         viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-        className="fv-interim__chart-svg"
         preserveAspectRatio="none"
-        role="img"
+        className="fv-interim__chart-svg"
       >
         {gridLines.map((t) => (
           <line
@@ -824,7 +823,7 @@ function PerformanceChart({ rows, visibleKeys }: PerformanceChartProps) {
             />
             <text
               x={xScale(i)}
-              y={CHART_PAD.top + innerH + 16}
+              y={CHART_PAD.top + innerH + 14}
               fill="#8b949e"
               fontSize="10"
               textAnchor="middle"
@@ -833,7 +832,7 @@ function PerformanceChart({ rows, visibleKeys }: PerformanceChartProps) {
             </text>
             <text
               x={xScale(i)}
-              y={CHART_PAD.top + innerH + 30}
+              y={CHART_PAD.top + innerH + 26}
               fill="#6e7681"
               fontSize="9"
               textAnchor="middle"

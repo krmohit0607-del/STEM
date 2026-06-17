@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
+import { STUB_ROWS, type FleetRow } from '../data/fleet';
 
 /**
  * Fleet List View page — `/main`.
@@ -20,99 +22,6 @@ import { useL } from '../i18n/LocalizationProvider';
  */
 
 type Scope = 'all' | 'mine';
-
-interface FleetRow {
-  voyageId: string;
-  vesselName: string;
-  clientName: string;
-  pic: string;
-  serviceTypes: string[];
-  statuses: string[];
-  legLB: string[];
-  departurePort: string;
-  etd: string;
-  atd: string;
-  interimPort: string;
-  ataInterim: string;
-  atdInterim: string;
-  arrivalPort: string;
-  eta: string;
-  ataArrival: string;
-  lastNN: string;
-  optimizationTypes: string[];
-  cpSpeed: number;
-  cpCons: number;
-  instSpeed: number;
-  instCons: number;
-  avgSpdSinceCOSP: number;
-  perfSpeedSinceCOSP: number;
-  costPerDay: number;
-  foCost: number;
-  goCost: number;
-  euaCostPerMt: number;
-  performance: string[];
-  rrRiSent: string;
-  weatherSent: string;
-  interimSent: string;
-  eovReportSent: string;
-  fileStatus: string[];
-  voyageTags: string;
-}
-
-const STUB_ROWS: FleetRow[] = [
-  {
-    voyageId: 'some unique id',
-    vesselName: 'amit yadav',
-    clientName: '',
-    pic: 'amit',
-    serviceTypes: [
-      'RPM',
-      'PMO',
-      'Optimization',
-      'Safety Optimization',
-      'Weather Only',
-      'PVA',
-      'Waypoint only optimization',
-    ],
-    statuses: [
-      'Active at sea',
-      'Stdby for arrival',
-      'Stdby for Departure',
-      'at port',
-      'bunkering',
-      'arrived',
-    ],
-    legLB: ['Laden', 'Ballast'],
-    departurePort: 'santos',
-    etd: '14-06-2026 04:50',
-    atd: '14-06-2026 04:55',
-    interimPort: 'singapore',
-    ataInterim: '###',
-    atdInterim: '###',
-    arrivalPort: 'qingdao',
-    eta: '###',
-    ataArrival: '###',
-    lastNN: '14-06-2026 04:55',
-    optimizationTypes: ['RTA', 'Speed', 'Cons', 'Least Cost', 'Least Emission'],
-    cpSpeed: 12,
-    cpCons: 30,
-    instSpeed: 12,
-    instCons: 30,
-    avgSpdSinceCOSP: 11,
-    perfSpeedSinceCOSP: 11.25,
-    costPerDay: 55000,
-    foCost: 765,
-    goCost: 1120,
-    euaCostPerMt: 74.5,
-    performance: ['Gain', 'Loss'],
-    rrRiSent: '',
-    weatherSent: '',
-    interimSent: '',
-    eovReportSent: '',
-    fileStatus: ['open', 'closed', 'dispute', 'claim'],
-    voyageTags: '',
-  },
-];
 
 const COLUMNS: { key: keyof FleetRow | 'edit'; label: string; width?: number }[] = [
   { key: 'edit', label: '', width: 32 },
@@ -182,7 +91,57 @@ export function FleetListPage() {
   const [to, setTo] = useState('');
   const [filterText, setFilterText] = useState('');
 
-  const visibleRows = useMemo(() => STUB_ROWS, []);
+  /**
+   * Stub assignment for the "My assigned vessels" scope. Replace with
+   * the logged-in user once auth is wired up.
+   */
+  const MY_PIC = 'amit';
+
+  /** Parse the page's "DD-MM-YYYY HH:mm" strings into a Date for range filtering. */
+  const parseEtd = (s: string): Date | null => {
+    if (!s) return null;
+    const m = s.match(/^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    const [, dd, mm, yyyy, hh, mi] = m;
+    const d = new Date(
+      Number(yyyy),
+      Number(mm) - 1,
+      Number(dd),
+      Number(hh),
+      Number(mi),
+    );
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const visibleRows = useMemo(() => {
+    const needle = filterText.trim().toLowerCase();
+    const fromDate = from ? new Date(from) : null;
+    const toDate = to ? new Date(to) : null;
+
+    return STUB_ROWS.filter((row) => {
+      // Scope filter (All / Mine).
+      if (scope === 'mine' && row.pic.toLowerCase() !== MY_PIC) return false;
+
+      // Date range filter — matches if the row's ETD lies inside [from, to].
+      if (fromDate || toDate) {
+        const etd = parseEtd(row.etd);
+        if (!etd) return false;
+        if (fromDate && etd < fromDate) return false;
+        if (toDate && etd > toDate) return false;
+      }
+
+      // Free-text filter — searches every primitive / array field on the row.
+      if (needle) {
+        const haystack = Object.values(row)
+          .map((v) => (Array.isArray(v) ? v.join(' ') : String(v)))
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(needle)) return false;
+      }
+
+      return true;
+    });
+  }, [scope, from, to, filterText]);
 
   return (
     <div className="fv-fleet-list">
@@ -209,6 +168,17 @@ export function FleetListPage() {
             />
           </label>
         </div>
+
+        <Link
+          to="/voyage/new"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="fv-fleet-list__new-btn"
+          title={t('createNewVoyage', 'New voyage')}
+        >
+          <i className="fas fa-plus" aria-hidden="true" />
+          <span>{t('createNewVoyage', 'New voyage')}</span>
+        </Link>
       </div>
 
       <div className="fv-fleet-list__scope" role="tablist">
@@ -246,6 +216,10 @@ export function FleetListPage() {
           value={filterText}
           onChange={(e) => setFilterText(e.target.value)}
         />
+        <span className="fv-fleet-list__filters-count">
+          {visibleRows.length} / {STUB_ROWS.length}{' '}
+          {visibleRows.length === 1 ? t('vessel', 'vessel') : t('vessels', 'vessels')}
+        </span>
       </div>
 
       <div className="fv-fleet-list__grid-scroll">
@@ -263,6 +237,13 @@ export function FleetListPage() {
             </tr>
           </thead>
           <tbody>
+            {visibleRows.length === 0 && (
+              <tr>
+                <td colSpan={COLUMNS.length} className="fv-fleet-list__empty">
+                  {t('noVesselsMatch', 'No vessels match the current filters.')}
+                </td>
+              </tr>
+            )}
             {visibleRows.map((row, idx) => (
               <tr key={`${row.voyageId}-${idx}`}>
                 {COLUMNS.map((col) => {
@@ -281,6 +262,25 @@ export function FleetListPage() {
                         >
                           <i className="fas fa-pen" aria-hidden="true" />
                         </button>
+                      </td>
+                    );
+                  }
+                  if (col.key === 'voyageId') {
+                    return (
+                      <td key="voyageId">
+                        <a
+                          className="fv-fleet-list__voyage-link"
+                          href={`/?voyage=${encodeURIComponent(row.voyageId)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={`Open ${row.voyageId} on the live map (new tab)`}
+                        >
+                          {row.voyageId}
+                          <i
+                            className="fas fa-external-link-alt"
+                            aria-hidden="true"
+                          />
+                        </a>
                       </td>
                     );
                   }

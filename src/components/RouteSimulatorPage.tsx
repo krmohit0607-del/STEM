@@ -1,19 +1,23 @@
 import {
   type CSSProperties,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
+import { MapContainer, Marker, Polyline, TileLayer, Tooltip } from 'react-leaflet';
+import L, { type LatLngExpression } from 'leaflet';
 
 import { useL } from '../i18n/LocalizationProvider';
 
 /**
  * Route Simulator page — `/route-simulator`.
  *
- * Compares every available route on the same parameter using a
- * multi-route overlay chart. A play / pause button and a timeline
- * slider scrub through each voyage day-by-day so users can see how
- * the parameter evolves across all candidate routes simultaneously.
+ * Compares every available route by drawing each one on a Leaflet
+ * map and animating a vessel marker along the route. The selected
+ * parameter (wave height, wind, SOG, fuel cost …) is shown in the
+ * route cards and as a tooltip on each ship icon, so you can see how
+ * the comparison value changes for every route at the same voyage day.
  *
  * Stub data only — replace `STUB_ROUTES` / `TIMELINE_DAYS` /
  * `OBSERVED_LAST_IDX` with API responses when the routing /
@@ -36,6 +40,12 @@ interface RouteSummary {
   color: string;
   /** Per-day samples keyed by parameter id. */
   series: Record<ParamId, number[]>;
+  /**
+   * Polyline of geographic waypoints for the route, sampled to one
+   * coordinate per timeline day so `path[playbackIdx]` is the vessel
+   * position at that day.
+   */
+  path: Array<[number, number]>;
 }
 
 type ParamId =
@@ -147,6 +157,24 @@ const STUB_ROUTES: RouteSummary[] = [
         297_460, 326_260, 355_060, 383_860,
       ],
     },
+    // Singapore → around the Cape of Good Hope → Rotterdam.
+    path: [
+      [1.27, 103.83],
+      [3.0, 96.0],
+      [5.0, 80.0],
+      [3.0, 70.0],
+      [-3.0, 60.0],
+      [-15.0, 55.0],
+      [-25.0, 50.0],
+      [-35.0, 22.0],
+      [-25.0, 12.0],
+      [-10.0, 0.0],
+      [5.0, -15.0],
+      [20.0, -25.0],
+      [40.0, -10.0],
+      [50.0, 0.0],
+      [51.95, 4.0],
+    ],
   },
   {
     id: 'route-eco',
@@ -178,6 +206,25 @@ const STUB_ROUTES: RouteSummary[] = [
         251_600, 276_250, 300_900, 325_550,
       ],
     },
+    // Same overall track as the active route, slightly south so it
+    // can be told apart on the map.
+    path: [
+      [1.27, 103.83],
+      [2.5, 95.0],
+      [4.5, 79.0],
+      [2.0, 68.0],
+      [-4.0, 58.0],
+      [-17.0, 53.0],
+      [-27.0, 48.0],
+      [-37.0, 20.0],
+      [-26.0, 10.0],
+      [-12.0, -2.0],
+      [3.0, -17.0],
+      [18.0, -26.0],
+      [38.0, -12.0],
+      [49.0, -1.0],
+      [51.95, 4.0],
+    ],
   },
   {
     id: 'route-suez',
@@ -209,10 +256,29 @@ const STUB_ROUTES: RouteSummary[] = [
         211_300, 231_600, 251_920, 272_240,
       ],
     },
+    // Singapore → Indian Ocean → Bab-el-Mandeb → Suez Canal → Med →
+    // Gibraltar → Bay of Biscay → Rotterdam.
+    path: [
+      [1.27, 103.83],
+      [8.0, 95.0],
+      [5.0, 78.0],
+      [10.0, 65.0],
+      [12.5, 50.0],
+      [13.0, 43.0],
+      [20.0, 38.0],
+      [28.0, 33.0],
+      [30.0, 32.5],
+      [33.5, 27.0],
+      [35.5, 18.0],
+      [36.0, -5.5],
+      [38.0, -10.0],
+      [47.0, -5.0],
+      [51.95, 4.0],
+    ],
   },
 ];
 
-const PLAY_INTERVAL_MS = 600;
+const PLAY_DURATION_MS = 9000;
 
 const VESSEL_NAME = 'MV Atlantic Voyager';
 const VESSEL_CLIENT = 'Acme Shipping (owner)';
@@ -235,6 +301,37 @@ function formatParam(n: number, param: ParamDef): string {
   return `${formatNumber(n, param.fractionDigits)} ${param.unit}`;
 }
 
+/**
+ * Linearly interpolate a numeric series between adjacent samples at the
+ * fractional position `progress` (0..series.length-1). Returns 0 when the
+ * series is empty.
+ */
+function sampleSeries(series: number[] | undefined, progress: number): number {
+  if (!series || series.length === 0) return 0;
+  const last = series.length - 1;
+  const p = Math.max(0, Math.min(last, progress));
+  const i0 = Math.floor(p);
+  const i1 = Math.min(last, i0 + 1);
+  const t = p - i0;
+  return series[i0] * (1 - t) + series[i1] * t;
+}
+
+/** Linearly interpolate a `[lat, lon]` polyline at fractional `progress`. */
+function samplePath(
+  path: Array<[number, number]>,
+  progress: number,
+): [number, number] {
+  const last = path.length - 1;
+  if (last < 0) return [0, 0];
+  const p = Math.max(0, Math.min(last, progress));
+  const i0 = Math.floor(p);
+  const i1 = Math.min(last, i0 + 1);
+  const t = p - i0;
+  const [lat0, lon0] = path[i0];
+  const [lat1, lon1] = path[i1];
+  return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
+}
+
 export function RouteSimulatorPage() {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -244,36 +341,52 @@ export function RouteSimulatorPage() {
 
   const [activeRouteId, setActiveRouteId] = useState<string>(STUB_ROUTES[0].id);
   const [paramId, setParamId] = useState<ParamId>('waveHeight');
-  const [playbackIdx, setPlaybackIdx] = useState<number>(0);
+  /**
+   * Continuous playback position in `[0, TIMELINE_DAYS.length - 1]`. Integer
+   * values land on a timeline day; fractional values are interpolated between
+   * adjacent days to give the marker / values a smooth motion.
+   */
+  const [progress, setProgress] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const playTimerRef = useRef<number | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const lastTsRef = useRef<number | null>(null);
 
-  // Auto-play loop. Advances `playbackIdx` every PLAY_INTERVAL_MS while
-  // `isPlaying` is true, looping back to 0 at the end.
+  const lastIdx = TIMELINE_DAYS.length - 1;
+
+  // Auto-play loop driven by requestAnimationFrame so the marker and values
+  // animate at display refresh rate instead of jumping in discrete day steps.
   useEffect(() => {
     if (!isPlaying) {
-      if (playTimerRef.current != null) {
-        window.clearInterval(playTimerRef.current);
-        playTimerRef.current = null;
+      if (rafRef.current != null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
       }
+      lastTsRef.current = null;
       return;
     }
-    playTimerRef.current = window.setInterval(() => {
-      setPlaybackIdx((prev) => {
-        const next = prev + 1;
-        if (next >= TIMELINE_DAYS.length) {
-          return 0;
-        }
-        return next;
+    const speed = lastIdx / PLAY_DURATION_MS; // progress units per ms
+    const tick = (ts: number) => {
+      if (lastTsRef.current == null) lastTsRef.current = ts;
+      const dt = ts - lastTsRef.current;
+      lastTsRef.current = ts;
+      setProgress((prev) => {
+        const next = prev + dt * speed;
+        return next >= lastIdx ? 0 : next;
       });
-    }, PLAY_INTERVAL_MS);
-    return () => {
-      if (playTimerRef.current != null) {
-        window.clearInterval(playTimerRef.current);
-        playTimerRef.current = null;
-      }
+      rafRef.current = window.requestAnimationFrame(tick);
     };
-  }, [isPlaying]);
+    rafRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current != null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      lastTsRef.current = null;
+    };
+  }, [isPlaying, lastIdx]);
+
+  /** Snap progress to the nearest day for day-label / observed-vs-forecast. */
+  const dayIdx = Math.min(lastIdx, Math.max(0, Math.round(progress)));
 
   const activeParam = PARAMS.find((p) => p.id === paramId) ?? PARAMS[0];
 
@@ -327,8 +440,8 @@ export function RouteSimulatorPage() {
         <div className="fv-route__sim-grid">
           <div className="fv-route__sim-cards">
             {STUB_ROUTES.map((route) => {
-              const value = route.series[paramId][playbackIdx] ?? 0;
-              const final = route.series[paramId][TIMELINE_DAYS.length - 1] ?? 0;
+              const value = sampleSeries(route.series[paramId], progress);
+              const final = route.series[paramId][lastIdx] ?? 0;
               const start = route.series[paramId][0] ?? 0;
               const delta = value - start;
               const isActive = route.id === activeRouteId;
@@ -390,14 +503,12 @@ export function RouteSimulatorPage() {
           </div>
 
           <div className="fv-route__sim-chart-wrap">
-            <SimulationChart
+            <RouteMap
               routes={STUB_ROUTES}
-              days={TIMELINE_DAYS}
               param={activeParam}
-              activeIdx={playbackIdx}
-              onPick={setPlaybackIdx}
+              progress={progress}
               activeRouteId={activeRouteId}
-              observedLastIdx={OBSERVED_LAST_IDX}
+              onSelectRoute={setActiveRouteId}
             />
 
             <div className="fv-route__sim-controls">
@@ -406,7 +517,7 @@ export function RouteSimulatorPage() {
                 className="fv-route__icon-btn"
                 onClick={() => {
                   setIsPlaying(false);
-                  setPlaybackIdx(0);
+                  setProgress(0);
                 }}
                 title={t('first', 'First')}
                 aria-label={t('first', 'First')}
@@ -432,7 +543,7 @@ export function RouteSimulatorPage() {
                 className="fv-route__icon-btn"
                 onClick={() => {
                   setIsPlaying(false);
-                  setPlaybackIdx(TIMELINE_DAYS.length - 1);
+                  setProgress(lastIdx);
                 }}
                 title={t('last', 'Last')}
                 aria-label={t('last', 'Last')}
@@ -443,30 +554,28 @@ export function RouteSimulatorPage() {
               <input
                 type="range"
                 min={0}
-                max={TIMELINE_DAYS.length - 1}
-                step={1}
-                value={playbackIdx}
+                max={lastIdx}
+                step={0.001}
+                value={progress}
                 onChange={(e) => {
                   setIsPlaying(false);
-                  setPlaybackIdx(Number(e.target.value));
+                  setProgress(Number(e.target.value));
                 }}
                 className="fv-route__slider"
                 aria-label={t('timelineSlider', 'Timeline')}
                 style={
                   {
-                    '--fv-progress': `${
-                      (playbackIdx / (TIMELINE_DAYS.length - 1)) * 100
-                    }%`,
+                    '--fv-progress': `${(progress / lastIdx) * 100}%`,
                   } as CSSProperties
                 }
               />
 
               <span className="fv-route__playback-label">
-                {TIMELINE_DAYS[playbackIdx]} ·{' '}
-                {playbackIdx <= OBSERVED_LAST_IDX
+                {TIMELINE_DAYS[dayIdx]} ·{' '}
+                {dayIdx <= OBSERVED_LAST_IDX
                   ? t('observed', 'observed')
                   : t('forecast', 'forecast')}{' '}
-                · {t('day', 'day')} {playbackIdx + 1} / {TIMELINE_DAYS.length}
+                · {t('day', 'day')} {dayIdx + 1} / {TIMELINE_DAYS.length}
               </span>
             </div>
           </div>
@@ -476,236 +585,154 @@ export function RouteSimulatorPage() {
   );
 }
 
-interface SimulationChartProps {
+interface RouteMapProps {
   routes: RouteSummary[];
-  days: string[];
   param: ParamDef;
-  activeIdx: number;
-  onPick: (idx: number) => void;
+  /** Continuous timeline position (0..path.length-1, fractional). */
+  progress: number;
   activeRouteId: string;
-  /** Last index that is observed; everything after is forecast (dashed). */
-  observedLastIdx: number;
+  onSelectRoute: (id: string) => void;
 }
 
-const CHART_W = 880;
-const CHART_H = 240;
-const CHART_PAD = { top: 22, right: 16, bottom: 40, left: 56 };
+/** Shared bounds so the map fits all three routes the first time. */
+const MAP_BOUNDS: L.LatLngBoundsExpression = [
+  [-45, -40],
+  [55, 115],
+];
 
-function SimulationChart({
+function shipIcon(color: string, isActive: boolean): L.DivIcon {
+  const size = isActive ? 30 : 24;
+  return L.divIcon({
+    className: 'fv-route__ship-icon-wrap',
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    html: `
+      <span class="fv-route__ship-icon${
+        isActive ? ' fv-route__ship-icon--active' : ''
+      }" style="background:${color};width:${size}px;height:${size}px">
+        <i class="fas fa-ship" aria-hidden="true"></i>
+      </span>
+    `,
+  });
+}
+
+function formatTooltip(
+  route: RouteSummary,
+  param: ParamDef,
+  progress: number,
+): string {
+  const value = sampleSeries(route.series[param.id], progress);
+  return `${route.label} — ${formatParam(value, param)}`;
+}
+
+function RouteMap({
   routes,
-  days,
   param,
-  activeIdx,
-  onPick,
+  progress,
   activeRouteId,
-  observedLastIdx,
-}: SimulationChartProps) {
-  if (days.length === 0 || routes.length === 0) return null;
-
-  const innerW = CHART_W - CHART_PAD.left - CHART_PAD.right;
-  const innerH = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
-
-  const allValues = routes.flatMap((r) => r.series[param.id] ?? []);
-  const dataMin = Math.min(...allValues);
-  const dataMax = Math.max(...allValues);
-  const tickMin = param.ticks ? Math.min(...param.ticks) : dataMin;
-  const tickMax = param.ticks ? Math.max(...param.ticks) : dataMax;
-  let min = Math.min(dataMin, tickMin);
-  let max = Math.max(dataMax, tickMax);
-  if (min === max) {
-    max = min + 1;
-  }
-  const pad = (max - min) * 0.08;
-  min -= pad;
-  max += pad;
-  const range = max - min;
-
-  const xAt = (i: number) =>
-    days.length === 1
-      ? CHART_PAD.left + innerW / 2
-      : CHART_PAD.left + (i / (days.length - 1)) * innerW;
-  const yAt = (v: number) =>
-    CHART_PAD.top + innerH - ((v - min) / range) * innerH;
-
-  const ticks = (param.ticks ?? [min, (min + max) / 2, max]).filter(
-    (tick) => tick >= min - 1e-6 && tick <= max + 1e-6,
-  );
-
-  const formatTick = (tick: number) => {
-    if (param.id === 'fuelCostCum') {
-      if (Math.abs(tick) >= 1000) return `$${Math.round(tick / 1000)}k`;
-      return `$${Math.round(tick)}`;
-    }
-    if (Math.abs(tick) >= 1000) return `${Math.round(tick / 1000)}k`;
-    return tick.toLocaleString(undefined, {
-      minimumFractionDigits: param.fractionDigits,
-      maximumFractionDigits: param.fractionDigits,
+  onSelectRoute,
+}: RouteMapProps) {
+  // Memoize icons so we don't recreate them on every render.
+  const icons = useMemo(() => {
+    const map = new Map<string, { active: L.DivIcon; inactive: L.DivIcon }>();
+    routes.forEach((r) => {
+      map.set(r.id, {
+        active: shipIcon(r.color, true),
+        inactive: shipIcon(r.color, false),
+      });
     });
-  };
+    return map;
+  }, [routes]);
 
   return (
-    <svg
-      viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-      className="fv-route__chart"
-      role="img"
-      aria-label={`${param.label} along route, multi-route comparison`}
-    >
-      {observedLastIdx >= 0 && observedLastIdx < days.length - 1 && (
-        <rect
-          x={xAt(observedLastIdx)}
-          y={CHART_PAD.top}
-          width={xAt(days.length - 1) - xAt(observedLastIdx)}
-          height={innerH}
-          fill="#58a6ff"
-          fillOpacity={0.05}
+    <div className="fv-route__sim-map">
+      <MapContainer
+        bounds={MAP_BOUNDS}
+        minZoom={2}
+        maxZoom={10}
+        worldCopyJump
+        scrollWheelZoom
+        style={{ height: '100%', width: '100%' }}
+      >
+        <TileLayer
+          attribution="Tiles &copy; Esri"
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
+          maxNativeZoom={10}
         />
-      )}
 
-      {ticks.map((tick) => (
-        <g key={`y-${tick}`}>
-          <line
-            x1={CHART_PAD.left}
-            x2={CHART_W - CHART_PAD.right}
-            y1={yAt(tick)}
-            y2={yAt(tick)}
-            stroke="#2a3447"
-          />
-          <text
-            x={CHART_PAD.left - 8}
-            y={yAt(tick) + 3}
-            fill="#8b949e"
-            fontSize="10"
-            textAnchor="end"
-          >
-            {formatTick(tick)}
-          </text>
-        </g>
-      ))}
+        {routes.map((route) => {
+          const isActive = route.id === activeRouteId;
+          const positions: LatLngExpression[] = route.path.map(
+            ([lat, lon]) => [lat, lon],
+          );
+          return (
+            <Polyline
+              key={`line-${route.id}`}
+              positions={positions}
+              pathOptions={{
+                color: route.color,
+                weight: isActive ? 4 : 2.5,
+                opacity: isActive ? 0.95 : 0.55,
+                dashArray: isActive ? undefined : '6 6',
+              }}
+              eventHandlers={{ click: () => onSelectRoute(route.id) }}
+            />
+          );
+        })}
 
-      {param.threshold != null &&
-        param.threshold >= min &&
-        param.threshold <= max && (
-          <line
-            x1={CHART_PAD.left}
-            x2={CHART_W - CHART_PAD.right}
-            y1={yAt(param.threshold)}
-            y2={yAt(param.threshold)}
-            stroke="#ff7b72"
-            strokeDasharray="6,4"
-          />
-        )}
+        {routes.map((route) => {
+          const isActive = route.id === activeRouteId;
+          const pos = samplePath(route.path, progress);
+          const icon = icons.get(route.id);
+          if (!icon) return null;
+          return (
+            <Marker
+              key={`ship-${route.id}`}
+              position={pos}
+              icon={isActive ? icon.active : icon.inactive}
+              eventHandlers={{ click: () => onSelectRoute(route.id) }}
+              zIndexOffset={isActive ? 1000 : 0}
+            >
+              <Tooltip
+                direction="top"
+                offset={[0, -12]}
+                opacity={1}
+                permanent={isActive}
+                className="fv-route__ship-tooltip"
+              >
+                {formatTooltip(route, param, progress)}
+              </Tooltip>
+            </Marker>
+          );
+        })}
+      </MapContainer>
 
-      {days.map((day, i) =>
-        i % 2 === 0 || i === days.length - 1 ? (
-          <text
-            key={`x-${i}`}
-            x={xAt(i)}
-            y={CHART_PAD.top + innerH + 18}
-            fill="#8b949e"
-            fontSize="10"
-            textAnchor="middle"
-          >
-            {day}
-          </text>
-        ) : null,
-      )}
-
-      <line
-        x1={xAt(activeIdx)}
-        x2={xAt(activeIdx)}
-        y1={CHART_PAD.top}
-        y2={CHART_PAD.top + innerH}
-        stroke="#58a6ff"
-        strokeWidth={1.5}
-        strokeDasharray="3,3"
-      />
-
-      {routes.map((route) => {
-        const series = route.series[param.id] ?? [];
-        if (series.length === 0) return null;
-        const isActive = route.id === activeRouteId;
-        const observedSeg: string[] = [];
-        const forecastSeg: string[] = [];
-        for (let i = 0; i < days.length; i += 1) {
-          const v = series[i];
-          if (v == null) continue;
-          const coord = `${xAt(i)},${yAt(v)}`;
-          if (i <= observedLastIdx) observedSeg.push(coord);
-          if (i >= observedLastIdx) forecastSeg.push(coord);
-        }
-        const stroke = route.color;
-        const opacity = isActive ? 1 : 0.55;
-        return (
-          <g key={route.id}>
-            {observedSeg.length > 1 && (
-              <polyline
-                points={observedSeg.join(' ')}
-                fill="none"
-                stroke={stroke}
-                strokeOpacity={opacity}
-                strokeWidth={isActive ? 3 : 2}
-                strokeLinejoin="round"
-                strokeLinecap="round"
+      <div className="fv-route__map-legend">
+        {routes.map((route) => {
+          const value = sampleSeries(route.series[param.id], progress);
+          const isActive = route.id === activeRouteId;
+          return (
+            <button
+              type="button"
+              key={`legend-${route.id}`}
+              className={`fv-route__map-legend-item${
+                isActive ? ' fv-route__map-legend-item--active' : ''
+              }`}
+              onClick={() => onSelectRoute(route.id)}
+            >
+              <span
+                className="fv-route__swatch"
+                style={{ background: route.color }}
+                aria-hidden="true"
               />
-            )}
-            {forecastSeg.length > 1 && (
-              <polyline
-                points={forecastSeg.join(' ')}
-                fill="none"
-                stroke={stroke}
-                strokeOpacity={opacity * 0.85}
-                strokeWidth={isActive ? 3 : 2}
-                strokeDasharray="4,4"
-                strokeLinejoin="round"
-                strokeLinecap="round"
-              />
-            )}
-            {series.map((value, i) => {
-              if (value == null) return null;
-              const isMarker = i === activeIdx;
-              return (
-                <circle
-                  key={`${route.id}-pt-${i}`}
-                  cx={xAt(i)}
-                  cy={yAt(value)}
-                  r={isMarker ? (isActive ? 5.5 : 4) : isActive ? 3.5 : 2.5}
-                  fill={stroke}
-                  fillOpacity={opacity}
-                  stroke={isMarker ? '#fff' : 'none'}
-                  strokeWidth={isMarker ? 2 : 0}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => onPick(i)}
-                >
-                  <title>
-                    {`${route.label} · ${days[i]}: ${formatParam(value, param)}`}
-                  </title>
-                </circle>
-              );
-            })}
-          </g>
-        );
-      })}
-
-      <g pointerEvents="none">
-        <rect
-          x={xAt(activeIdx) - 36}
-          y={CHART_PAD.top - 18}
-          width={72}
-          height={18}
-          rx={9}
-          fill="#1f6feb"
-        />
-        <text
-          x={xAt(activeIdx)}
-          y={CHART_PAD.top - 4}
-          fill="#fff"
-          fontSize="10"
-          fontWeight="700"
-          textAnchor="middle"
-        >
-          {days[activeIdx]}
-        </text>
-      </g>
-    </svg>
+              <span className="fv-route__map-legend-label">{route.label}</span>
+              <span className="fv-route__map-legend-value">
+                {formatParam(value, param)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
