@@ -47,7 +47,7 @@ const TABS: TabDef[] = [
     icon: 'fa-gauge-high',
     labelKey: 'dashboard',
     labelFallback: 'Dashboard',
-    route: '/',
+    route: '/voyage',
     planned: [
       { label: 'Create new voyage', route: '/voyage/new' },
       { label: 'Voyage details', route: '/voyage' },
@@ -74,7 +74,10 @@ const TABS: TabDef[] = [
     icon: 'fa-route',
     labelKey: 'routeEditing',
     labelFallback: 'Route Editing',
+    route: '/route-explorer',
     planned: [
+      { label: 'Open route editor', route: '/route-explorer' },
+      { label: 'Plot route on map', route: '/route-explorer' },
       'Import / export',
       'Add leg',
       'Update leg',

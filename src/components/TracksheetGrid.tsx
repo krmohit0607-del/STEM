@@ -16,6 +16,8 @@
  * is exposed for the React app.
  */
 
+import { useSelectedVoyage } from '../data/selectedVoyage';
+
 interface TrackRow {
   date: string;
   time: string;
@@ -228,8 +230,17 @@ function n(value: number, digits = 2): string {
 }
 
 export function TracksheetGrid() {
+  const selectedVoyage = useSelectedVoyage();
+  const vesselName = selectedVoyage?.vessel ?? 'MV Atlantic Voyager';
+  const routeLabel = selectedVoyage
+    ? `${selectedVoyage.portFrom} → ${selectedVoyage.portTo}`
+    : 'Singapore → Rotterdam';
   return (
     <div className="fv-tracksheet">
+      <div className="fv-tracksheet__header">
+        <span className="fv-tracksheet__vessel">{vesselName}</span>
+        <span className="fv-tracksheet__route">{routeLabel}</span>
+      </div>
       <table className="fv-tracksheet__table">
         <thead>
           <tr className="fv-tracksheet__group-row">

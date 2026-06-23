@@ -1,6 +1,8 @@
 import { Fragment, useMemo, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
+import { useSelectedVoyage } from '../data/selectedVoyage';
+import type { Voyage } from '../data/voyages';
 
 /**
  * Interim Dashboard page — `/interim`.
@@ -411,12 +413,30 @@ const NOON_COLUMNS: { key: keyof NoonReportRow | 'expand'; label: string; width?
   { key: 'delayedBy', label: 'Delayed by', width: 100 },
 ];
 
+/** Build the Interim vessel-info card from a shared voyage. */
+function voyageToVesselInfo(v: Voyage): VesselInfo {
+  return {
+    name: v.vessel,
+    imo: `IMO ${v.imo}`,
+    type: v.vesselType,
+    flag: v.flag,
+    dwt: v.dwt,
+    built: v.built,
+    loa: v.loa,
+    beam: v.beam,
+    enginePower: v.enginePower,
+  };
+}
+
 export function InterimDashboardPage() {
   const l = useL();
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
   };
+
+  const selectedVoyage = useSelectedVoyage();
+  const vessel = selectedVoyage ? voyageToVesselInfo(selectedVoyage) : STUB_VESSEL;
 
   const [legId, setLegId] = useState<string>(LEGS[0].id);
   const [visibleSeries, setVisibleSeries] = useState<Record<string, boolean>>(() =>
@@ -538,9 +558,9 @@ export function InterimDashboardPage() {
       <div className="fv-interim__vessel-card">
         <div className="fv-interim__vessel-head">
           <div>
-            <h3>{STUB_VESSEL.name}</h3>
+            <h3>{vessel.name}</h3>
             <p className="fv-interim__vessel-sub">
-              {STUB_VESSEL.imo} · {STUB_VESSEL.type} · {STUB_VESSEL.flag}
+              {vessel.imo} · {vessel.type} · {vessel.flag}
             </p>
           </div>
           <span className="fv-interim__vessel-tag">{t('demoVessel', 'Demo Vessel')}</span>
@@ -548,23 +568,23 @@ export function InterimDashboardPage() {
         <dl>
           <div className="fv-interim__vessel-item">
             <dt>DWT</dt>
-            <dd>{STUB_VESSEL.dwt}</dd>
+            <dd>{vessel.dwt}</dd>
           </div>
           <div className="fv-interim__vessel-item">
             <dt>Built</dt>
-            <dd>{STUB_VESSEL.built}</dd>
+            <dd>{vessel.built}</dd>
           </div>
           <div className="fv-interim__vessel-item">
             <dt>LOA</dt>
-            <dd>{STUB_VESSEL.loa}</dd>
+            <dd>{vessel.loa}</dd>
           </div>
           <div className="fv-interim__vessel-item">
             <dt>Beam</dt>
-            <dd>{STUB_VESSEL.beam}</dd>
+            <dd>{vessel.beam}</dd>
           </div>
           <div className="fv-interim__vessel-item">
             <dt>M/E</dt>
-            <dd>{STUB_VESSEL.enginePower}</dd>
+            <dd>{vessel.enginePower}</dd>
           </div>
         </dl>
       </div>
@@ -610,7 +630,7 @@ export function InterimDashboardPage() {
               {t('noonReportSummary', 'Noon Report Summary')}
             </h3>
             <span className="fv-interim__noon-vessel">
-              {STUB_VESSEL.name} · {activeLeg.label}
+              {vessel.name} · {activeLeg.label}
             </span>
           </div>
           <ul className="fv-interim__noon-kpis">

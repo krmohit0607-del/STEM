@@ -9,6 +9,7 @@ import { MapContainer, Marker, Polyline, TileLayer, Tooltip } from 'react-leafle
 import L, { type LatLngExpression } from 'leaflet';
 
 import { useL } from '../i18n/LocalizationProvider';
+import { useSelectedVoyage } from '../data/selectedVoyage';
 
 /**
  * Route Simulator page — `/route-simulator`.
@@ -280,10 +281,10 @@ const STUB_ROUTES: RouteSummary[] = [
 
 const PLAY_DURATION_MS = 9000;
 
-const VESSEL_NAME = 'MV Atlantic Voyager';
-const VESSEL_CLIENT = 'Acme Shipping (owner)';
-const VOYAGE_LABEL = 'Singapore → Rotterdam';
-const VOYAGE_REF = 'BL-88421';
+const DEFAULT_VESSEL_NAME = 'MV Atlantic Voyager';
+const DEFAULT_VESSEL_CLIENT = 'Acme Shipping (owner)';
+const DEFAULT_VOYAGE_LABEL = 'Singapore → Rotterdam';
+const DEFAULT_VOYAGE_REF = 'BL-88421';
 
 function formatNumber(n: number, fractionDigits = 0): string {
   return n.toLocaleString(undefined, {
@@ -338,6 +339,14 @@ export function RouteSimulatorPage() {
     const v = l(key);
     return v === key ? fallback : v;
   };
+
+  const selectedVoyage = useSelectedVoyage();
+  const VESSEL_NAME = selectedVoyage?.vessel ?? DEFAULT_VESSEL_NAME;
+  const VESSEL_CLIENT = selectedVoyage ? `${selectedVoyage.client} (owner)` : DEFAULT_VESSEL_CLIENT;
+  const VOYAGE_LABEL = selectedVoyage
+    ? `${selectedVoyage.portFrom} → ${selectedVoyage.portTo}`
+    : DEFAULT_VOYAGE_LABEL;
+  const VOYAGE_REF = selectedVoyage?.routeRef ?? DEFAULT_VOYAGE_REF;
 
   const [activeRouteId, setActiveRouteId] = useState<string>(STUB_ROUTES[0].id);
   const [paramId, setParamId] = useState<ParamId>('waveHeight');
