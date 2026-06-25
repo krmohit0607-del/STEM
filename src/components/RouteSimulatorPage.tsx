@@ -10,6 +10,8 @@ import L, { type LatLngExpression } from 'leaflet';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { WeatherOverlay } from './WeatherOverlay';
+import { WeatherControls } from './WeatherControls';
 
 /**
  * Route Simulator page — `/route-simulator`.
@@ -333,6 +335,16 @@ function samplePath(
   return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
 }
 
+/** Parse a "37 d 4 h" style duration into total hours. */
+function durationToHours(s: string): number {
+  const d = /([\d.]+)\s*d/.exec(s);
+  const h = /([\d.]+)\s*h/.exec(s);
+  const days = d ? parseFloat(d[1]) : 0;
+  const hours = h ? parseFloat(h[1]) : 0;
+  const total = days * 24 + hours;
+  return total > 0 ? total : 1;
+}
+
 export function RouteSimulatorPage() {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -351,16 +363,47 @@ export function RouteSimulatorPage() {
   const [activeRouteId, setActiveRouteId] = useState<string>(STUB_ROUTES[0].id);
   const [paramId, setParamId] = useState<ParamId>('waveHeight');
   /**
-   * Continuous playback position in `[0, TIMELINE_DAYS.length - 1]`. Integer
-   * values land on a timeline day; fractional values are interpolated between
-   * adjacent days to give the marker / values a smooth motion.
+   * Global playback clock in `[0, 1]` representing elapsed voyage time as a
+   * fraction of the *longest* route's duration. Each route converts this
+   * shared clock into its own position using its ETA/duration, so a faster
+   * vessel (shorter duration) advances along its path quicker and reaches
+   * its destination earlier — every parameter then follows that movement.
    */
-  const [progress, setProgress] = useState<number>(0);
+  const [clock, setClock] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const rafRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
 
   const lastIdx = TIMELINE_DAYS.length - 1;
+
+  // Per-route voyage durations (hours) and the longest one, which sets the
+  // length of the global clock so the slowest vessel finishes at clock = 1.
+  const routeHours = useMemo(
+    () =>
+      STUB_ROUTES.reduce<Record<string, number>>((acc, r) => {
+        acc[r.id] = durationToHours(r.durationToGo);
+        return acc;
+      }, {}),
+    [],
+  );
+  const maxHours = useMemo(
+    () => Math.max(...Object.values(routeHours)),
+    [routeHours],
+  );
+
+  /**
+   * Convert the global clock into a route's own fractional path index
+   * (0..lastIdx). The vessel arrives (reaches lastIdx) when elapsed voyage
+   * time equals its own duration, i.e. at its ETA.
+   */
+  const progressById = useMemo(() => {
+    const out: Record<string, number> = {};
+    STUB_ROUTES.forEach((r) => {
+      const frac = Math.min(1, (clock * maxHours) / routeHours[r.id]);
+      out[r.id] = frac * lastIdx;
+    });
+    return out;
+  }, [clock, maxHours, routeHours, lastIdx]);
 
   // Auto-play loop driven by requestAnimationFrame so the marker and values
   // animate at display refresh rate instead of jumping in discrete day steps.
@@ -373,14 +416,14 @@ export function RouteSimulatorPage() {
       lastTsRef.current = null;
       return;
     }
-    const speed = lastIdx / PLAY_DURATION_MS; // progress units per ms
+    const speed = 1 / PLAY_DURATION_MS; // clock units per ms
     const tick = (ts: number) => {
       if (lastTsRef.current == null) lastTsRef.current = ts;
       const dt = ts - lastTsRef.current;
       lastTsRef.current = ts;
-      setProgress((prev) => {
+      setClock((prev) => {
         const next = prev + dt * speed;
-        return next >= lastIdx ? 0 : next;
+        return next >= 1 ? 0 : next;
       });
       rafRef.current = window.requestAnimationFrame(tick);
     };
@@ -392,10 +435,12 @@ export function RouteSimulatorPage() {
       }
       lastTsRef.current = null;
     };
-  }, [isPlaying, lastIdx]);
+  }, [isPlaying]);
 
+  // Timeline labels follow the active route's own progress along its path.
+  const activeProgress = progressById[activeRouteId] ?? 0;
   /** Snap progress to the nearest day for day-label / observed-vs-forecast. */
-  const dayIdx = Math.min(lastIdx, Math.max(0, Math.round(progress)));
+  const dayIdx = Math.min(lastIdx, Math.max(0, Math.round(activeProgress)));
 
   const activeParam = PARAMS.find((p) => p.id === paramId) ?? PARAMS[0];
 
@@ -449,11 +494,13 @@ export function RouteSimulatorPage() {
         <div className="fv-route__sim-grid">
           <div className="fv-route__sim-cards">
             {STUB_ROUTES.map((route) => {
-              const value = sampleSeries(route.series[paramId], progress);
+              const routeProgress = progressById[route.id] ?? 0;
+              const value = sampleSeries(route.series[paramId], routeProgress);
               const final = route.series[paramId][lastIdx] ?? 0;
               const start = route.series[paramId][0] ?? 0;
               const delta = value - start;
               const isActive = route.id === activeRouteId;
+              const arrived = routeProgress >= lastIdx - 1e-6;
               return (
                 <button
                   type="button"
@@ -503,7 +550,16 @@ export function RouteSimulatorPage() {
                     </div>
                     <div>
                       <dt>{t('eta', 'ETA')}</dt>
-                      <dd>{route.eta}</dd>
+                      <dd>
+                        {route.eta}
+                        {arrived && (
+                          <span className="fv-route__arrived" title={t('arrived', 'Arrived')}>
+                            {' '}
+                            <i className="fas fa-flag-checkered" aria-hidden="true" />{' '}
+                            {t('arrived', 'Arrived')}
+                          </span>
+                        )}
+                      </dd>
                     </div>
                   </dl>
                 </button>
@@ -515,7 +571,7 @@ export function RouteSimulatorPage() {
             <RouteMap
               routes={STUB_ROUTES}
               param={activeParam}
-              progress={progress}
+              progressById={progressById}
               activeRouteId={activeRouteId}
               onSelectRoute={setActiveRouteId}
             />
@@ -526,7 +582,7 @@ export function RouteSimulatorPage() {
                 className="fv-route__icon-btn"
                 onClick={() => {
                   setIsPlaying(false);
-                  setProgress(0);
+                  setClock(0);
                 }}
                 title={t('first', 'First')}
                 aria-label={t('first', 'First')}
@@ -552,7 +608,7 @@ export function RouteSimulatorPage() {
                 className="fv-route__icon-btn"
                 onClick={() => {
                   setIsPlaying(false);
-                  setProgress(lastIdx);
+                  setClock(1);
                 }}
                 title={t('last', 'Last')}
                 aria-label={t('last', 'Last')}
@@ -563,18 +619,18 @@ export function RouteSimulatorPage() {
               <input
                 type="range"
                 min={0}
-                max={lastIdx}
-                step={0.001}
-                value={progress}
+                max={1}
+                step={0.0001}
+                value={clock}
                 onChange={(e) => {
                   setIsPlaying(false);
-                  setProgress(Number(e.target.value));
+                  setClock(Number(e.target.value));
                 }}
                 className="fv-route__slider"
                 aria-label={t('timelineSlider', 'Timeline')}
                 style={
                   {
-                    '--fv-progress': `${(progress / lastIdx) * 100}%`,
+                    '--fv-progress': `${clock * 100}%`,
                   } as CSSProperties
                 }
               />
@@ -597,8 +653,8 @@ export function RouteSimulatorPage() {
 interface RouteMapProps {
   routes: RouteSummary[];
   param: ParamDef;
-  /** Continuous timeline position (0..path.length-1, fractional). */
-  progress: number;
+  /** Per-route continuous timeline position (0..path.length-1, fractional). */
+  progressById: Record<string, number>;
   activeRouteId: string;
   onSelectRoute: (id: string) => void;
 }
@@ -637,7 +693,7 @@ function formatTooltip(
 function RouteMap({
   routes,
   param,
-  progress,
+  progressById,
   activeRouteId,
   onSelectRoute,
 }: RouteMapProps) {
@@ -691,7 +747,8 @@ function RouteMap({
 
         {routes.map((route) => {
           const isActive = route.id === activeRouteId;
-          const pos = samplePath(route.path, progress);
+          const routeProgress = progressById[route.id] ?? 0;
+          const pos = samplePath(route.path, routeProgress);
           const icon = icons.get(route.id);
           if (!icon) return null;
           return (
@@ -709,16 +766,23 @@ function RouteMap({
                 permanent={isActive}
                 className="fv-route__ship-tooltip"
               >
-                {formatTooltip(route, param, progress)}
+                {formatTooltip(route, param, routeProgress)}
               </Tooltip>
             </Marker>
           );
         })}
+
+        <WeatherOverlay
+          points={routes.map((route) => samplePath(route.path, progressById[route.id] ?? 0))}
+          maxPoints={6}
+        />
       </MapContainer>
+
+      <WeatherControls />
 
       <div className="fv-route__map-legend">
         {routes.map((route) => {
-          const value = sampleSeries(route.series[param.id], progress);
+          const value = sampleSeries(route.series[param.id], progressById[route.id] ?? 0);
           const isActive = route.id === activeRouteId;
           return (
             <button

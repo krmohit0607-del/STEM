@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { MapContainer, TileLayer } from 'react-leaflet';
 import type { LatLngBoundsLiteral, Map as LeafletMap } from 'leaflet';
 
+import { WeatherOverlay } from './WeatherOverlay';
+import { WeatherControls } from './WeatherControls';
+
 /**
  * Leaflet map with floating right-side control bar.
  *
@@ -228,7 +231,10 @@ export function MapView() {
             maxZoom={18}
           />
         ))}
+        <WeatherOverlay />
       </MapContainer>
+
+      <WeatherControls />
 
       <div className="fv-map-controls" ref={controlsRef}>
         <div className="fv-map-controls__bar">

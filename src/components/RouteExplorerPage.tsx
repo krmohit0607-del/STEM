@@ -5,6 +5,7 @@ import { useSelectedVoyage } from '../data/selectedVoyage';
 import { PORT_COORDS } from '../data/fleet';
 import { generateSeaRoute } from '../data/seaRoute';
 import { RouteEditorMap, type EditorPoint } from './RouteEditorMap';
+import { WeatherControls } from './WeatherControls';
 
 /**
  * Route Explorer page — `/route-explorer`.
@@ -731,26 +732,98 @@ export function RouteExplorerPage() {
           </div>
         </header>
 
-        <div className="fv-route__map-wrap">
-          <RouteEditorMap
-            points={mapPoints}
-            plotMode={plotMode}
-            selected={selected}
-            onAddPoint={addPointFromMap}
-            onInsertPoint={insertPointFromMap}
-            onMovePoint={moveWaypoint}
-            onSelectPoint={toggleSelected}
-            onDeletePoint={deletePoint}
-          />
-          {plotMode && (
-            <div className="fv-route__map-hint">
-              <i className="fas fa-info-circle" aria-hidden="true" />{' '}
-              {t(
-                'plotBanner',
-                'Click empty sea to add a waypoint at the end, or click the route line to insert one in between. Drag pins to adjust.',
+        <div className="fv-route__map-layout">
+          <div className="fv-route__map-wrap">
+            <RouteEditorMap
+              points={mapPoints}
+              plotMode={plotMode}
+              selected={selected}
+              onAddPoint={addPointFromMap}
+              onInsertPoint={insertPointFromMap}
+              onMovePoint={moveWaypoint}
+              onSelectPoint={toggleSelected}
+              onDeletePoint={deletePoint}
+            />
+            <WeatherControls />
+            {plotMode && (
+              <div className="fv-route__map-hint">
+                <i className="fas fa-info-circle" aria-hidden="true" />{' '}
+                {t(
+                  'plotBanner',
+                  'Click empty sea to add a waypoint at the end, or click the route line to insert one in between. Drag pins to adjust.',
+                )}
+              </div>
+            )}
+          </div>
+
+          <aside className="fv-route__side-panel" aria-label={t('expectedRoute', 'Expected Route')}>
+            <header className="fv-route__side-head">
+              <h3>
+                <i className="fas fa-route" aria-hidden="true" />{' '}
+                {t('expectedRoute', 'Expected Route')}
+              </h3>
+              <span className="fv-route__side-count">{waypoints.length}</span>
+            </header>
+            <div className="fv-route__side-scroll">
+              {waypoints.length === 0 ? (
+                <p className="fv-route__side-empty">{t('noPoints', 'No points yet.')}</p>
+              ) : (
+                <table className="fv-route__side-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>{t('lat', 'Lat')}</th>
+                      <th>{t('lon', 'Lon')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {waypoints.map((wp, idx) => (
+                      <tr
+                        key={wp.id}
+                        className={selected.includes(wp.id) ? 'fv-route__side-row--selected' : ''}
+                        onClick={() => toggleSelected(wp.id)}
+                      >
+                        <td className="fv-route__side-row-num">
+                          {wp.isPort ? (
+                            <i
+                              className={`fas ${
+                                idx === 0 ? 'fa-anchor-circle-check' : 'fa-anchor'
+                              }`}
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            idx + 1
+                          )}
+                        </td>
+                        <td>
+                          <input
+                            type="text"
+                            className="fv-route__side-input"
+                            value={wp.lat}
+                            aria-label={`${wp.name} latitude`}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => updateWaypoint(wp.id, 'lat', e.target.value)}
+                            onBlur={() => setWaypoints((prev) => recomputeGeometry(prev))}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            type="text"
+                            className="fv-route__side-input"
+                            value={wp.lon}
+                            aria-label={`${wp.name} longitude`}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => updateWaypoint(wp.id, 'lon', e.target.value)}
+                            onBlur={() => setWaypoints((prev) => recomputeGeometry(prev))}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               )}
             </div>
-          )}
+          </aside>
         </div>
 
         {savedRoutes.length > 0 && (

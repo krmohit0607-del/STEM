@@ -1243,6 +1243,314 @@ a {
   pointer-events: auto;
 }
 
+/* --- Live marine weather overlay (Storm Glass) ------------------------ */
+/* Floating control, placed in each map's positioned wrapper. */
+.fv-weather-control {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+/* On the world MapView the top-right corner already holds the layer bar,
+   so move the weather control to the top-left (no zoom control there). */
+.fv-map-container > .fv-weather-control {
+  right: auto;
+  left: 12px;
+  align-items: flex-start;
+}
+
+.fv-weather-control__btn {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  border: 1px solid #2a3447;
+  background: #0d1626;
+  color: #9fb4d4;
+  font-size: 16px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.fv-weather-control__btn:hover {
+  color: #cde3ff;
+  border-color: #3d4d68;
+}
+.fv-weather-control__btn--on {
+  color: #58a6ff;
+  border-color: #58a6ff;
+  background: #0e1d33;
+}
+.fv-weather-control__badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #58a6ff;
+  color: #04101f;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.fv-weather-control__panel {
+  width: 264px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #0d1626;
+  border: 1px solid #2a3447;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  padding: 12px;
+  color: #cdd9ec;
+  font-size: 13px;
+}
+.fv-weather-control__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+  color: #e6eefb;
+  margin-bottom: 8px;
+}
+.fv-weather-control__head i {
+  color: #58a6ff;
+  margin-right: 4px;
+}
+.fv-weather-control__source {
+  font-size: 11px;
+  color: #7e8fab;
+  margin-bottom: 10px;
+}
+
+/* Toggle switch */
+.fv-weather-control__switch {
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 20px;
+  flex: none;
+}
+.fv-weather-control__switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.fv-weather-control__slider {
+  position: absolute;
+  inset: 0;
+  background: #2a3447;
+  border-radius: 20px;
+  transition: background 0.15s;
+}
+.fv-weather-control__slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: #9fb4d4;
+  border-radius: 50%;
+  transition: transform 0.15s, background 0.15s;
+}
+.fv-weather-control__switch input:checked + .fv-weather-control__slider {
+  background: #1f6feb;
+}
+.fv-weather-control__switch input:checked + .fv-weather-control__slider::before {
+  transform: translateX(18px);
+  background: #fff;
+}
+
+.fv-weather-control__key {
+  margin-bottom: 12px;
+}
+.fv-weather-control__key > label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9fb4d4;
+  margin-bottom: 4px;
+}
+.fv-weather-control__key-row {
+  display: flex;
+  gap: 6px;
+}
+.fv-weather-control__key-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #0a1422;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  color: #e6eefb;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.fv-weather-control__key-row input:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+.fv-weather-control__save {
+  flex: none;
+  background: #1f6feb;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.fv-weather-control__save:disabled {
+  background: #243248;
+  color: #6b7c98;
+  cursor: default;
+}
+.fv-weather-control__status {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #f0b429;
+}
+.fv-weather-control__status i {
+  margin-right: 2px;
+}
+.fv-weather-control__status--ok {
+  color: #56d364;
+}
+
+.fv-weather-control__factors-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9fb4d4;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+}
+.fv-weather-control__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.fv-weather-control__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-weather-control__item:hover {
+  background: #14233a;
+}
+.fv-weather-control__item--on {
+  color: #e6eefb;
+}
+.fv-weather-control__check {
+  color: #58a6ff;
+  width: 14px;
+  text-align: center;
+}
+.fv-weather-control__item:not(.fv-weather-control__item--on) .fv-weather-control__check {
+  color: #4a5a76;
+}
+.fv-weather-control__factor-icon {
+  color: #7e8fab;
+  width: 16px;
+  text-align: center;
+}
+
+/* Weather data markers drawn on the map. */
+.fv-weather-pin-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+.fv-weather-pin {
+  position: relative;
+}
+.fv-weather-pin__dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #fff;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.35);
+}
+.fv-weather-pin__card {
+  position: absolute;
+  left: 9px;
+  bottom: 6px;
+  min-width: 64px;
+  background: rgba(8, 16, 28, 0.86);
+  border: 1px solid rgba(88, 166, 255, 0.5);
+  border-radius: 6px;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  backdrop-filter: blur(2px);
+}
+.fv-weather-pin__row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.2;
+  color: #dbe7f7;
+}
+.fv-weather-pin__icon,
+.fv-weather-pin__arrow {
+  color: #58a6ff;
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+}
+.fv-weather-pin__arrow {
+  color: #f0b429;
+}
+.fv-weather-pin__short {
+  color: #8fa4c2;
+  min-width: 30px;
+}
+.fv-weather-pin__val {
+  margin-left: auto;
+  font-weight: 700;
+  color: #fff;
+}
+
+.fv-weather-tip {
+  font-size: 12px;
+}
+.fv-weather-tip strong {
+  display: block;
+  margin-bottom: 2px;
+}
+.fv-weather-tip span {
+  display: block;
+}
+.fv-weather-tip i {
+  color: #58a6ff;
+  width: 14px;
+}
+
+
 .fv-map-controls__bar {
   display: flex;
   flex-direction: column;
@@ -3050,6 +3358,53 @@ select.fv-voyage__input {
   color: #6e7781;
 }
 
+/* --- Route editor: import/export + hints ------------------------- */
+.fv-route__io-text {
+  width: 100%;
+  min-height: 110px;
+  margin-top: 10px;
+  background: #0e1626;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.fv-route__io-text:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+
+.fv-route__io-msg {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #58a6ff;
+}
+
+.fv-route__hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #8b98ad;
+}
+
+.fv-route__section--flash {
+  animation: fv-route-flash 1.2s ease-out;
+}
+
+@keyframes fv-route-flash {
+  0% {
+    box-shadow: 0 0 0 2px #58a6ff, 0 0 18px #1f6feb88;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
 .fv-route__name-input {
   width: 150px;
   background: #0e1626;
@@ -3068,6 +3423,221 @@ select.fv-voyage__input {
 /* --- Route editor map -------------------------------------------- */
 .fv-route__map-wrap {
   position: relative;
+}
+
+/* Map + side details panel layout. */
+.fv-route__map-layout {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.fv-route__map-layout .fv-route__map-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fv-route__side-panel {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  max-height: 420px;
+  background: #0d1626;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.fv-route__side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #2a3447;
+  background: #11192a;
+}
+
+.fv-route__side-head h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #cde3ff;
+}
+
+.fv-route__side-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: #8b98ad;
+  background: #0e1626;
+  border: 1px solid #2a3447;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.fv-route__side-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.fv-route__side-empty {
+  margin: 8px;
+  font-size: 12px;
+  color: #6e7781;
+}
+
+/* Compact lat/lon table inside the side panel. */
+.fv-route__side-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.fv-route__side-table thead th {
+  position: sticky;
+  top: 0;
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #8b98ad;
+  background: #11192a;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a3447;
+}
+
+.fv-route__side-table td {
+  padding: 5px 8px;
+  color: #cdd9e5;
+  border-bottom: 1px solid #1f2937;
+  white-space: nowrap;
+}
+
+.fv-route__side-table tbody tr {
+  cursor: pointer;
+}
+
+.fv-route__side-table tbody tr:hover td {
+  background: #16202f;
+}
+
+.fv-route__side-row--selected td {
+  background: #11293f;
+  color: #cde3ff;
+}
+
+.fv-route__side-row-num {
+  width: 32px;
+  color: #58a6ff;
+  font-weight: 700;
+  text-align: center;
+}
+
+.fv-route__side-input {
+  width: 100%;
+  min-width: 96px;
+  background: #0e1626;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.fv-route__side-input:focus {
+  outline: none;
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 2px #1f6feb33;
+}
+
+.fv-route__side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fv-route__side-item {
+  background: #0e1626;
+  border: 1px solid #2a3447;
+  border-radius: 5px;
+  padding: 8px 10px;
+}
+
+.fv-route__side-item--selected {
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 1px #1f6feb55;
+}
+
+.fv-route__side-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fv-route__side-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #11293f;
+  color: #58a6ff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.fv-route__side-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e6edf3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fv-route__side-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  margin: 8px 0 0;
+}
+
+.fv-route__side-meta div {
+  display: flex;
+  flex-direction: column;
+}
+
+.fv-route__side-meta dt {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #6e7781;
+}
+
+.fv-route__side-meta dd {
+  margin: 0;
+  font-size: 12px;
+  color: #cdd9e5;
+}
+
+@media (max-width: 900px) {
+  .fv-route__map-layout {
+    flex-direction: column;
+  }
+  .fv-route__side-panel {
+    flex-basis: auto;
+    max-height: 280px;
+  }
 }
 
 .fv-route-map__canvas {
@@ -3658,6 +4228,18 @@ select.fv-voyage__input {
   color: #f0b429;
 }
 .fv-route__delta--down {
+  color: #56d364;
+}
+
+.fv-route__arrived {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   color: #56d364;
 }
 

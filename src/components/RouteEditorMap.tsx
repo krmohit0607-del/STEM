@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   MapContainer,
   Marker,
@@ -9,6 +9,8 @@ import {
   useMapEvents,
 } from 'react-leaflet';
 import L, { type LatLngExpression } from 'leaflet';
+
+import { WeatherOverlay } from './WeatherOverlay';
 
 /**
  * Interactive route editor map.
@@ -103,18 +105,24 @@ function ClickCapture({
   return null;
 }
 
-/** Fits the map to the current waypoints whenever the count changes. */
+/**
+ * Fits the map to the waypoints once, on the first render that has any
+ * points. After that the user's zoom/pan is left untouched so editing,
+ * adding, deleting or dragging waypoints never resets the view.
+ */
 function FitBounds({ points }: { points: EditorPoint[] }) {
   const map = useMap();
+  const hasFit = useRef(false);
   useEffect(() => {
-    if (points.length === 0) return;
+    if (hasFit.current || points.length === 0) return;
+    hasFit.current = true;
     if (points.length === 1) {
       map.setView([points[0].lat, points[0].lon], Math.max(map.getZoom(), 4));
       return;
     }
     const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
     map.fitBounds(bounds, { padding: [40, 40], maxZoom: 9 });
-    // Only refit when the number of points changes, not on every drag.
+    // Only the first non-empty render fits; deliberately ignore later changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points.length]);
   return null;
@@ -153,6 +161,8 @@ export function RouteEditorMap({
 
       <ClickCapture plotMode={plotMode} onAddPoint={onAddPoint} />
       <FitBounds points={points} />
+
+      <WeatherOverlay points={points.map((p) => [p.lat, p.lon])} maxPoints={6} />
 
       {/* Each segment is clickable so a waypoint can be inserted between
           its two endpoints. A wide transparent line gives a forgiving
