@@ -67,6 +67,7 @@ export const PORT_COORDS: Record<string, [number, number]> = {
   Mumbai: [19.07, 72.88],
   Fujairah: [25.12, 56.32],
   'Long Beach': [33.77, -118.19],
+  'New York': [40.67, -74.04],
 };
 
 /** Build the polyline coordinates for a row (departure → interim → arrival). */

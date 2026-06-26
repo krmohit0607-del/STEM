@@ -18,6 +18,7 @@ import { RouteEditorPage } from './components/RouteEditorPage';
 import { PlotRoutePage } from './components/PlotRoutePage';
 import { RouteSimulatorPage } from './components/RouteSimulatorPage';
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
+import { VesselRoutePage } from './components/VesselRoutePage';
 import { PageShell } from './components/PageShell';
 
 /**
@@ -151,6 +152,7 @@ export function App() {
                 </Layout>
               }
             />
+            <Route path="/vessel-route" element={<VesselRoutePage />} />
             {/* Unknown paths fall back to the Fleet List View. */}
             <Route path="*" element={<Navigate to="/main" replace />} />
           </Routes>

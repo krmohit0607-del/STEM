@@ -163,7 +163,7 @@ function readActiveTab(): TabId {
   return 'dashboard';
 }
 
-export function LeftSidebar() {
+export function LeftSidebar({ iconOnly = false }: { iconOnly?: boolean } = {}) {
   const l = useL();
   const navigate = useNavigate();
   const t = (key: string, fallback: string) => {
@@ -171,16 +171,19 @@ export function LeftSidebar() {
     return v === key ? fallback : v;
   };
 
-  const [collapsed, setCollapsed] = useState(() => readBool(COLLAPSED_KEY, false));
+  const [collapsed, setCollapsed] = useState(() =>
+    iconOnly ? true : readBool(COLLAPSED_KEY, false),
+  );
   const [activeTab, setActiveTab] = useState<TabId>(() => readActiveTab());
 
   useEffect(() => {
+    if (iconOnly) return;
     try {
       window.localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0');
     } catch {
       /* ignore */
     }
-  }, [collapsed]);
+  }, [collapsed, iconOnly]);
 
   useEffect(() => {
     try {
@@ -210,6 +213,12 @@ export function LeftSidebar() {
                   !collapsed && tab.id === activeTab ? ' fv-left-tab--active' : ''
                 }`}
                 onClick={() => {
+                  if (iconOnly) {
+                    // Focused views keep the rail icon-only; clicking an
+                    // icon just navigates to that feature's page.
+                    navigate(tab.route ?? '/');
+                    return;
+                  }
                   // Clicking an icon while collapsed expands the panel and
                   // selects that tab. Clicking the active tab while open
                   // collapses again (so the icon strip becomes a quick toggle).

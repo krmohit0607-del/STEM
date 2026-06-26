@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
+import { FleetMapView, type MapVessel } from './FleetMapView';
 
 /**
  * Fleet List View page — `/main`.
@@ -36,14 +37,19 @@ interface TaskRow {
   remaining: string;
   orderId: string;
   vessel: string;
+  createdDate: string;
   pic: string;
   client: string;
   service: string;
   status: string;
   portFrom: string;
   portTo: string;
+  etd: string;
   eta: string;
-  lastNoon: string;
+  /** Hours since the last noon report was received. */
+  lastNoon: number;
+  /** Minutes since the last AIS position was fetched. */
+  lastAis: number;
   wx: string;
   int: string;
   eov: string;
@@ -64,14 +70,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '01:20',
     orderId: 'OPT001',
     vessel: 'MV ABC',
+    createdDate: '12-Jun-2026 09:15',
     pic: 'Amit',
     client: 'Cargill',
     service: 'PMO',
     status: 'At Sea',
     portFrom: 'Singapore',
     portTo: 'Santos',
+    etd: '14-Jun 0800',
     eta: '18-Jun 1200',
-    lastNoon: '0600 UTC',
+    lastNoon: 5,
+    lastAis: 125,
     wx: 'Y',
     int: 'Y',
     eov: 'N',
@@ -90,14 +99,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '02:35',
     orderId: 'OPT002',
     vessel: 'MV XYZ',
+    createdDate: '14-Jun-2026 11:40',
     pic: 'Rahul',
     client: 'Bunge',
     service: 'RPM',
     status: 'At Sea',
     portFrom: 'Fujairah',
     portTo: 'Rotterdam',
+    etd: '16-Jun 1000',
     eta: '22-Jun 0800',
-    lastNoon: '0500 UTC',
+    lastNoon: 8,
+    lastAis: 190,
     wx: 'Y',
     int: 'N',
     eov: 'N',
@@ -116,14 +128,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '05:10',
     orderId: 'OPT003',
     vessel: 'MV John',
+    createdDate: '10-Jun-2026 08:05',
     pic: 'John',
     client: 'WX',
     service: 'Monitoring',
     status: 'At Port',
     portFrom: 'Santos',
     portTo: 'Santos',
+    etd: '10-Jun 0600',
     eta: 'N/A',
-    lastNoon: '0000 UTC',
+    lastNoon: 30,
+    lastAis: 745,
     wx: 'Y',
     int: 'N/A',
     eov: 'N/A',
@@ -142,14 +157,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '00:45',
     orderId: 'OPT004',
     vessel: 'MV Pacific',
+    createdDate: '11-Jun-2026 14:30',
     pic: 'Sara',
     client: 'Trafigura',
     service: 'PMO',
     status: 'At Sea',
     portFrom: 'Houston',
     portTo: 'Rotterdam',
+    etd: '15-Jun 0900',
     eta: '20-Jun 1500',
-    lastNoon: '0600 UTC',
+    lastNoon: 3,
+    lastAis: 35,
     wx: 'Y',
     int: 'Y',
     eov: 'N',
@@ -168,14 +186,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '03:15',
     orderId: 'OPT005',
     vessel: 'MV Atlantic',
+    createdDate: '15-Jun-2026 16:50',
     pic: 'Amit',
     client: 'Cargill',
     service: 'RPM',
     status: 'At Sea',
     portFrom: 'Santos',
     portTo: 'Qingdao',
+    etd: '18-Jun 1100',
     eta: '28-Jun 0200',
-    lastNoon: '0500 UTC',
+    lastNoon: 10,
+    lastAis: 250,
     wx: 'Y',
     int: 'Y',
     eov: 'N',
@@ -194,14 +215,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '06:40',
     orderId: 'OPT006',
     vessel: 'MV Orient',
+    createdDate: '09-Jun-2026 07:20',
     pic: 'Rahul',
     client: 'Bunge',
     service: 'Optinav',
     status: 'At Port',
     portFrom: 'Qingdao',
     portTo: 'Qingdao',
+    etd: '09-Jun 0700',
     eta: 'N/A',
-    lastNoon: '0000 UTC',
+    lastNoon: 28,
+    lastAis: 1095,
     wx: 'N',
     int: 'N/A',
     eov: 'N/A',
@@ -220,14 +244,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '01:05',
     orderId: 'OPT007',
     vessel: 'MV Northern Star',
+    createdDate: '13-Jun-2026 10:55',
     pic: 'John',
     client: 'Vitol',
     service: 'PMO',
     status: 'At Sea',
     portFrom: 'Rotterdam',
     portTo: 'New York',
+    etd: '17-Jun 1300',
     eta: '24-Jun 1800',
-    lastNoon: '0600 UTC',
+    lastNoon: 6,
+    lastAis: 130,
     wx: 'Y',
     int: 'N',
     eov: 'N',
@@ -246,14 +273,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '02:50',
     orderId: 'OPT008',
     vessel: 'MV Southern Cross',
+    createdDate: '14-Jun-2026 13:10',
     pic: 'Sara',
     client: 'Glencore',
     service: 'Weather Only',
     status: 'At Sea',
     portFrom: 'Singapore',
     portTo: 'Fujairah',
+    etd: '16-Jun 0800',
     eta: '21-Jun 0900',
-    lastNoon: '0500 UTC',
+    lastNoon: 9,
+    lastAis: 320,
     wx: 'Y',
     int: 'N',
     eov: 'N',
@@ -272,14 +302,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '07:20',
     orderId: 'OPT009',
     vessel: 'MV Endeavour',
+    createdDate: '08-Jun-2026 06:45',
     pic: 'Amit',
     client: 'Trafigura',
     service: 'Shadow Monitoring',
     status: 'Completed',
     portFrom: 'New York',
     portTo: 'Houston',
+    etd: '08-Jun 0500',
     eta: '15-Jun 1000',
-    lastNoon: '0000 UTC',
+    lastNoon: 26,
+    lastAis: 555,
     wx: 'N',
     int: 'N/A',
     eov: 'Y',
@@ -298,14 +331,17 @@ const TASK_ROWS: TaskRow[] = [
     remaining: '00:30',
     orderId: 'OPT010',
     vessel: 'MV Voyager',
+    createdDate: '16-Jun-2026 18:25',
     pic: 'Rahul',
     client: 'Cargill',
     service: 'RPM',
     status: 'At Sea',
     portFrom: 'Fujairah',
     portTo: 'Singapore',
+    etd: '13-Jun 1200',
     eta: '19-Jun 0600',
-    lastNoon: '0600 UTC',
+    lastNoon: 4,
+    lastAis: 20,
     wx: 'Y',
     int: 'Y',
     eov: 'N',
@@ -371,7 +407,7 @@ function buildTaskHighlights(
     return mins !== null && mins <= 120;
   }).length;
   const forecastOverdue = rows.filter((r) => r.opt === 'N').length;
-  const noonMissing = rows.filter((r) => r.lastNoon.startsWith('0000')).length;
+  const noonMissing = rows.filter((r) => r.lastNoon >= 24).length;
   const etaRisks = rows.filter((r) => /eta/i.test(r.aiAlert)).length;
   const weatherRisks = rows.filter((r) => /weather|storm|typhoon/i.test(r.aiAlert)).length;
   const completed = rows.filter((r) => !isActiveRow(r)).length;
@@ -386,63 +422,36 @@ function buildTaskHighlights(
   ];
 }
 
-/** Build the footer rolled-up summary live from the current rows. */
-function buildFooterSummary(rows: TaskRow[]): { label: string; value: number }[] {
-  const highlights = buildTaskHighlights(rows);
-  const byLabel = (label: string) =>
-    highlights.find((h) => h.label === label)?.value ?? 0;
-  return [
-    { label: 'Active Vessels', value: rows.filter(isActiveRow).length },
-    { label: 'Due Next 2 Hrs', value: byLabel('Due in next 2 hrs') },
-    { label: 'Forecast Overdue', value: byLabel('Forecast overdue') },
-    { label: 'Noon Missing', value: byLabel('Noon Missing') },
-    { label: 'ETA Risks', value: byLabel('ETA Risks') },
-    { label: 'Weather Risks', value: byLabel('Weather Risks') },
-    { label: 'Open Tasks', value: byLabel('Open Tasks') },
-    { label: 'Completed', value: byLabel('Completed Tasks') },
-  ];
-}
-
-const COLUMNS: { key: keyof TaskRow; label: string; width?: number }[] = [
+const COLUMNS: { key: keyof TaskRow | 'actions'; label: string; width?: number }[] = [
   { key: 'priority', label: 'Priority', width: 90 },
   { key: 'dueLt', label: 'Due LT', width: 70 },
   { key: 'dueUtc', label: 'Due UTC', width: 80 },
   { key: 'remaining', label: 'Remaining', width: 90 },
   { key: 'orderId', label: 'Order ID', width: 90 },
   { key: 'vessel', label: 'Vessel', width: 110 },
+  { key: 'createdDate', label: 'Created On', width: 160 },
   { key: 'pic', label: 'PIC', width: 90 },
   { key: 'client', label: 'Client', width: 100 },
   { key: 'service', label: 'Service', width: 100 },
   { key: 'status', label: 'Status', width: 90 },
   { key: 'portFrom', label: 'Port From', width: 110 },
   { key: 'portTo', label: 'Port To', width: 110 },
+  { key: 'etd', label: 'ETD', width: 110 },
   { key: 'eta', label: 'ETA', width: 110 },
   { key: 'lastNoon', label: 'Last Noon', width: 100 },
-  { key: 'wx', label: 'Wx', width: 50 },
-  { key: 'int', label: 'Int', width: 50 },
-  { key: 'eov', label: 'EOV', width: 55 },
-  { key: 'opt', label: 'Opt', width: 50 },
-  { key: 'openTasks', label: 'Open Tasks', width: 90 },
+  { key: 'lastAis', label: 'Last AIS Position', width: 140 },
   { key: 'tags', label: 'Tags', width: 120 },
   { key: 'aiAlert', label: 'AI Alert', width: 120 },
   { key: 'health', label: 'Health', width: 110 },
-  { key: 'handoverNote', label: 'Handover Note', width: 200 },
-  { key: 'open', label: 'Open', width: 80 },
+  { key: 'handoverNote', label: 'Voyage Note', width: 200 },
+  { key: 'actions', label: 'Edit', width: 70 },
 ];
 
-/** Dropdown filter definitions: label + the row field they filter on. */
-const FILTER_FIELDS: { key: keyof TaskRow; label: string }[] = [
-  { key: 'pic', label: 'PIC' },
-  { key: 'client', label: 'Client' },
-  { key: 'service', label: 'Service' },
-  { key: 'status', label: 'Status' },
-  { key: 'priority', label: 'Priority' },
-  { key: 'portFrom', label: 'Port' },
-  { key: 'eta', label: 'ETA' },
-  { key: 'dueLt', label: 'Due LT' },
-  { key: 'tags', label: 'Tags' },
-  { key: 'aiAlert', label: 'AI Alert' },
-];
+/** Dropdown filter definitions — one per filterable table column, in column order. */
+const FILTER_FIELDS: { key: keyof TaskRow; label: string }[] = COLUMNS.filter(
+  (col): col is { key: keyof TaskRow; label: string; width?: number } =>
+    col.key !== 'actions',
+).map((col) => ({ key: col.key, label: col.label }));
 
 function uniqueValues(key: keyof TaskRow): string[] {
   return Array.from(new Set(TASK_ROWS.map((r) => String(r[key])))).sort();
@@ -450,6 +459,27 @@ function uniqueValues(key: keyof TaskRow): string[] {
 
 function priorityClass(p: Priority): string {
   return `fv-fleet-grid__priority fv-fleet-grid__priority--${p.toLowerCase()}`;
+}
+
+/** Render "how long ago" the last noon report was received. */
+function formatLastNoon(hours: number): string {
+  if (hours < 1) return 'just now';
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  const rem = hours % 24;
+  return rem === 0 ? `${days}d ago` : `${days}d ${rem}h ago`;
+}
+
+/** Render "how long ago" the last AIS position was fetched (minute precision). */
+function formatLastAis(minutes: number): string {
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours < 24) return mins === 0 ? `${hours}h ago` : `${hours}h ${mins}m ago`;
+  const days = Math.floor(hours / 24);
+  const remH = hours % 24;
+  return remH === 0 ? `${days}d ago` : `${days}d ${remH}h ago`;
 }
 
 function healthClass(h: number): string {
@@ -478,16 +508,43 @@ function renderCell(row: TaskRow, key: keyof TaskRow): React.ReactNode {
   if (key === 'open') {
     return <span className="fv-fleet-grid__open-badge">{row.open}</span>;
   }
+  if (key === 'lastNoon') {
+    const stale = row.lastNoon >= 24;
+    return (
+      <span
+        className={`fv-fleet-grid__last-noon${
+          stale ? ' fv-fleet-grid__last-noon--stale' : ''
+        }`}
+        title={`Last noon report received ${formatLastNoon(row.lastNoon)}`}
+      >
+        {formatLastNoon(row.lastNoon)}
+      </span>
+    );
+  }
+  if (key === 'lastAis') {
+    const stale = row.lastAis >= 1440;
+    return (
+      <span
+        className={`fv-fleet-grid__last-noon${
+          stale ? ' fv-fleet-grid__last-noon--stale' : ''
+        }`}
+        title={`Last AIS position fetched ${formatLastAis(row.lastAis)}`}
+      >
+        {formatLastAis(row.lastAis)}
+      </span>
+    );
+  }
   if (key === 'vessel') {
     return (
       <Link
-        className="fv-fleet-grid__vessel-link"
-        to={`/voyage?voyage=${encodeURIComponent(row.orderId)}`}
+        className={`fv-fleet-grid__vessel-link fv-fleet-grid__vessel-link--${row.priority.toLowerCase()}`}
+        to={`/vessel-route?voyage=${encodeURIComponent(row.orderId)}`}
         target="_blank"
         rel="noopener noreferrer"
         onClick={() => writeSelectedVoyageId(row.orderId)}
-        title={`Open ${row.vessel} voyage details`}
+        title={`${row.vessel} — ${row.priority} priority`}
       >
+        <span className="fv-fleet-grid__vessel-dot" aria-hidden="true" />
         {row.vessel}
         <i className="fas fa-arrow-right" aria-hidden="true" />
       </Link>
@@ -522,35 +579,96 @@ export function FleetListPage() {
   const [to, setTo] = useState('');
   const [pic, setPic] = useState('');
   const [view, setView] = useState<'list' | 'map'>('list');
-  const [showActiveOnly, setShowActiveOnly] = useState(true);
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  const [filters, setFilters] = useState<Record<string, string[]>>({});
+  const [openFilter, setOpenFilter] = useState<string | null>(null);
+  const [shiftView, setShiftView] = useState(false);
 
-  const setFilter = (label: string, value: string) => {
-    setFilters((prev) => ({ ...prev, [label]: value }));
+  // Toggle a single value within a column's multi-select filter.
+  const toggleFilterValue = (label: string, value: string) => {
+    setFilters((prev) => {
+      const current = prev[label] ?? [];
+      const next = current.includes(value)
+        ? current.filter((v) => v !== value)
+        : [...current, value];
+      if (next.length === 0) {
+        const { [label]: _omit, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [label]: next };
+    });
   };
+
+  const clearFilters = () => {
+    setFilters({});
+    setOpenFilter(null);
+  };
+
+  // Close the open filter popover on any outside click.
+  useEffect(() => {
+    if (!openFilter) return;
+    const onDocClick = () => setOpenFilter(null);
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [openFilter]);
 
   const visibleRows = useMemo(() => {
     return TASK_ROWS.filter((row) => {
-      if (showActiveOnly && row.open.toUpperCase() !== 'OPEN') return false;
       if (pic && row.pic.toLowerCase() !== pic.toLowerCase()) return false;
 
       for (const field of FILTER_FIELDS) {
         const selected = filters[field.label];
-        if (selected && String(row[field.key]) !== selected) return false;
+        if (
+          selected &&
+          selected.length > 0 &&
+          !selected.includes(String(row[field.key]))
+        ) {
+          return false;
+        }
       }
       return true;
     });
-  }, [showActiveOnly, pic, filters]);
+  }, [pic, filters]);
 
-  // KPI / highlight / footer strips are derived live from the rows in
+  // In Shift View the first four columns (Priority, Due LT, Due UTC,
+  // Remaining) are hidden and surfaced through the filter strip instead.
+  const visibleColumns = useMemo(
+    () =>
+      shiftView
+        ? COLUMNS.filter(
+            (col) =>
+              col.key !== 'priority' &&
+              col.key !== 'dueLt' &&
+              col.key !== 'dueUtc' &&
+              col.key !== 'remaining',
+          )
+        : COLUMNS,
+    [shiftView],
+  );
+
+  // KPI / highlight strips are derived live from the rows in
   // view so they always reflect the current filter selection.
   const kpiCards = useMemo(() => buildKpiCards(visibleRows), [visibleRows]);
   const taskHighlights = useMemo(
     () => buildTaskHighlights(visibleRows),
     [visibleRows],
   );
-  const footerSummary = useMemo(
-    () => buildFooterSummary(visibleRows),
+
+  // Vessels plotted on the Map view, derived live from the rows in view.
+  const mapVessels = useMemo<MapVessel[]>(
+    () =>
+      visibleRows.map((row) => ({
+        id: row.orderId,
+        vessel: row.vessel,
+        client: row.client,
+        service: row.service,
+        status: row.status,
+        priority: row.priority,
+        portFrom: row.portFrom,
+        portTo: row.portTo,
+        eta: row.eta,
+        health: row.health,
+        aiAlert: row.aiAlert,
+      })),
     [visibleRows],
   );
 
@@ -563,38 +681,45 @@ export function FleetListPage() {
           <span>FleetView</span>
         </div>
 
-        <div className="fv-fleet__topbar-fields">
-          <label>
-            <span>{t('timeFrom', 'Time From')}</span>
-            <input
-              type="datetime-local"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-            />
-          </label>
-          <label>
-            <span>{t('timeTo', 'Time To')}</span>
-            <input
-              type="datetime-local"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-            />
-          </label>
-          <label>
-            <span>{t('pic', 'PIC')}</span>
-            <select value={pic} onChange={(e) => setPic(e.target.value)}>
-              <option value="">{t('all', 'All')}</option>
-              {uniqueValues('pic').map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        {!shiftView && (
+          <div className="fv-fleet__topbar-fields">
+            <label>
+              <span>{t('timeFrom', 'Time From')}</span>
+              <input
+                type="datetime-local"
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>{t('timeTo', 'Time To')}</span>
+              <input
+                type="datetime-local"
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>{t('pic', 'PIC')}</span>
+              <select value={pic} onChange={(e) => setPic(e.target.value)}>
+                <option value="">{t('all', 'All')}</option>
+                {uniqueValues('pic').map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
 
         <div className="fv-fleet__topbar-actions">
-          <button type="button" className="fv-fleet__btn">
+          <button
+            type="button"
+            className={`fv-fleet__btn${shiftView ? ' fv-fleet__btn--active' : ''}`}
+            onClick={() => setShiftView((prev) => !prev)}
+            aria-pressed={shiftView}
+          >
             <i className="fas fa-right-left" aria-hidden="true" />
             <span>{t('shiftView', 'Shift View')}</span>
           </button>
@@ -652,102 +777,153 @@ export function FleetListPage() {
       </section>
 
       {/* TASKS HIGHLIGHT -------------------------------------------- */}
-      <section className="fv-fleet-tasks" aria-label="Task highlights">
-        <span className="fv-fleet-tasks__label">
-          {t('tasksHighlight', 'Tasks Highlight')}
-        </span>
-        <div className="fv-fleet-tasks__chips">
-          {taskHighlights.map((task) => (
-            <span
-              key={task.label}
-              className={`fv-fleet-tasks__chip fv-fleet-tasks__chip--${task.tone}`}
-            >
-              <strong>{task.value}</strong> {task.label}
-            </span>
-          ))}
-        </div>
-        <button type="button" className="fv-fleet__btn fv-fleet__btn--ghost">
-          <i className="fas fa-clipboard-list" aria-hidden="true" />
-          <span>{t('prepareHandover', 'Prepare Handover Summary')}</span>
-        </button>
-      </section>
+      {!shiftView && (
+        <section className="fv-fleet-tasks" aria-label="Task highlights">
+          <span className="fv-fleet-tasks__label">
+            {t('tasksHighlight', 'Tasks Highlight')}
+          </span>
+          <div className="fv-fleet-tasks__chips">
+            {taskHighlights.map((task) => (
+              <span
+                key={task.label}
+                className={`fv-fleet-tasks__chip fv-fleet-tasks__chip--${task.tone}`}
+              >
+                <strong>{task.value}</strong> {task.label}
+              </span>
+            ))}
+          </div>
+          <button type="button" className="fv-fleet__btn fv-fleet__btn--ghost">
+            <i className="fas fa-clipboard-list" aria-hidden="true" />
+            <span>{t('prepareHandover', 'Prepare Handover Summary')}</span>
+          </button>
+        </section>
+      )}
 
       {/* FILTER STRIP ----------------------------------------------- */}
       <section className="fv-fleet-filters" aria-label="Filters">
-        {FILTER_FIELDS.map((field) => (
-          <label key={field.label} className="fv-fleet-filters__item">
-            <select
-              value={filters[field.label] ?? ''}
-              onChange={(e) => setFilter(field.label, e.target.value)}
-            >
-              <option value="">{field.label}</option>
-              {uniqueValues(field.key).map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
-        <label className="fv-fleet-filters__check">
-          <input
-            type="checkbox"
-            checked={showActiveOnly}
-            onChange={(e) => setShowActiveOnly(e.target.checked)}
-          />
-          {t('showActiveOnly', 'Show Active Only')}
-        </label>
+        <button
+          type="button"
+          className="fv-fleet__btn fv-fleet__btn--ghost"
+          onClick={clearFilters}
+        >
+          <i className="fas fa-filter-circle-xmark" aria-hidden="true" />
+          <span>{t('clearFilters', 'Clear Filters')}</span>
+        </button>
         <span className="fv-fleet-filters__count">
           {visibleRows.length} / {TASK_ROWS.length}
         </span>
       </section>
 
-      {/* GRID ------------------------------------------------------- */}
-      <div className="fv-fleet__grid-scroll">
-        <table className="fv-fleet-grid">
-          <thead>
-            <tr>
-              {COLUMNS.map((col) => (
-                <th
-                  key={col.key}
-                  style={col.width ? { minWidth: col.width, width: col.width } : undefined}
-                >
-                  {col.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {visibleRows.length === 0 && (
+      {/* GRID / MAP ------------------------------------------------- */}
+      {view === 'map' ? (
+        <FleetMapView vessels={mapVessels} />
+      ) : (
+        <div className="fv-fleet__grid-scroll">
+          <table className="fv-fleet-grid">
+            <thead>
               <tr>
-                <td colSpan={COLUMNS.length} className="fv-fleet-grid__empty">
-                  {t('noVesselsMatch', 'No voyages match the current filters.')}
-                </td>
-              </tr>
-            )}
-            {visibleRows.map((row) => (
-              <tr key={row.orderId}>
-                {COLUMNS.map((col) => (
-                  <td key={col.key}>{renderCell(row, col.key)}</td>
+                {visibleColumns.map((col) => (
+                  <th
+                    key={col.key}
+                    style={col.width ? { minWidth: col.width, width: col.width } : undefined}
+                  >
+                    {col.label}
+                  </th>
                 ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* FOOTER SUMMARY --------------------------------------------- */}
-      <footer className="fv-fleet__footer">
-        <span className="fv-fleet__footer-label">{t('summary', 'Summary')}</span>
-        <ul className="fv-fleet__footer-summary">
-          {footerSummary.map((item) => (
-            <li key={item.label}>
-              <span className="fv-fleet__footer-value">{item.value}</span>
-              <span className="fv-fleet__footer-caption">{item.label}</span>
-            </li>
-          ))}
-        </ul>
-      </footer>
+              <tr className="fv-fleet-grid__filter-row">
+                {visibleColumns.map((col) => {
+                  if (col.key === 'actions') {
+                    return (
+                      <th key={col.key} className="fv-fleet-grid__filter-cell" />
+                    );
+                  }
+                  const selected = filters[col.label] ?? [];
+                  const isOpen = openFilter === col.label;
+                  return (
+                    <th
+                      key={col.key}
+                      className="fv-fleet-grid__filter-cell"
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        className={`fv-fleet-grid__filter-btn${
+                          selected.length > 0 ? ' fv-fleet-grid__filter-btn--active' : ''
+                        }`}
+                        onClick={() =>
+                          setOpenFilter(isOpen ? null : col.label)
+                        }
+                        aria-label={`Filter ${col.label}`}
+                        aria-expanded={isOpen}
+                      >
+                        <span className="fv-fleet-grid__filter-text">
+                          {selected.length > 0
+                            ? `${selected.length} ${t('selected', 'selected')}`
+                            : t('all', 'All')}
+                        </span>
+                        <i className="fas fa-caret-down" aria-hidden="true" />
+                      </button>
+                      {isOpen && (
+                        <div className="fv-fleet-grid__filter-panel">
+                          {uniqueValues(col.key).map((v) => (
+                            <label key={v} className="fv-fleet-grid__filter-opt">
+                              <input
+                                type="checkbox"
+                                checked={selected.includes(v)}
+                                onChange={() => toggleFilterValue(col.label, v)}
+                              />
+                              <span>
+                                {col.key === 'lastNoon'
+                                  ? formatLastNoon(Number(v))
+                                  : col.key === 'lastAis'
+                                  ? formatLastAis(Number(v))
+                                  : v}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.length === 0 && (
+                <tr>
+                  <td colSpan={visibleColumns.length} className="fv-fleet-grid__empty">
+                    {t('noVesselsMatch', 'No voyages match the current filters.')}
+                  </td>
+                </tr>
+              )}
+              {visibleRows.map((row) => (
+                <tr key={row.orderId}>
+                  {visibleColumns.map((col) =>
+                    col.key === 'actions' ? (
+                      <td key={col.key} className="fv-fleet-grid__actions">
+                        <Link
+                          className="fv-fleet-grid__edit-link"
+                          to={`/voyage?voyage=${encodeURIComponent(row.orderId)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => writeSelectedVoyageId(row.orderId)}
+                          title={t('editVoyage', 'Edit Voyage')}
+                          aria-label={`${t('editVoyage', 'Edit Voyage')} ${row.orderId}`}
+                        >
+                          <i className="fas fa-pen-to-square" aria-hidden="true" />
+                        </Link>
+                      </td>
+                    ) : (
+                      <td key={col.key}>{renderCell(row, col.key)}</td>
+                    ),
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

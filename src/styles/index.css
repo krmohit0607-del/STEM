@@ -698,6 +698,7 @@ a {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  margin-left: auto;
 }
 
 .fv-fleet__btn {
@@ -941,6 +942,216 @@ a {
   background: #0e1626;
 }
 
+.fv-fleet__map {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #0e1626;
+}
+
+.fv-fleet__map .leaflet-container {
+  height: 100%;
+  width: 100%;
+  background: #0e1626;
+}
+
+.fv-fleet-map__ship-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+
+.fv-fleet-map__ship {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
+}
+
+.fv-fleet-map__ship--port {
+  font-size: 15px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.9);
+}
+
+.fv-fleet-map__tooltip {
+  background: #141c2b !important;
+  color: #e6edf3 !important;
+  border: 1px solid #2a3447 !important;
+  font-size: 11px !important;
+  line-height: 1.5 !important;
+}
+
+.fv-fleet-map__alert {
+  color: #f0b429;
+  font-weight: 700;
+}
+
+.fv-fleet-map__ship-wrap {
+  cursor: pointer;
+}
+
+/* --- Vessel Route View (/vessel-route) ----------------------------- */
+.fv-vessel-route {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fv-vessel-route__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #1b2434;
+  border-bottom: 1px solid #2a3447;
+  flex-wrap: wrap;
+}
+
+.fv-vessel-route__heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.fv-vessel-route__heading > i {
+  color: #58a6ff;
+  font-size: 18px;
+}
+
+.fv-vessel-route__vessel {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.fv-vessel-route__itinerary {
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: #141c2b;
+  border: 1px solid #2a3447;
+  color: #9fb0c3;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+
+.fv-vessel-route__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fv-vessel-route__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #243049;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  padding: 6px 12px;
+  border-radius: 3px;
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.fv-vessel-route__btn:hover {
+  background: #2c3a57;
+}
+
+.fv-vessel-route__btn--primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+}
+
+.fv-vessel-route__btn--primary:hover {
+  background: #388bfd;
+}
+
+.fv-vessel-route__map {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #0e1626;
+}
+
+.fv-vessel-route__map .leaflet-container {
+  height: 100%;
+  width: 100%;
+  background: #0e1626;
+}
+
+.fv-vessel-route__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #9fb0c3;
+  font-size: 14px;
+}
+
+.fv-vessel-route__wp-wrap,
+.fv-vessel-route__ship-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+
+.fv-vessel-route__wp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0e1626;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+
+.fv-vessel-route__wp--start {
+  background: #3fb950;
+}
+
+.fv-vessel-route__wp--mid {
+  background: #f0b429;
+}
+
+.fv-vessel-route__wp--end {
+  background: #f85149;
+}
+
+.fv-vessel-route__ship {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #58a6ff;
+  color: #0e1626;
+  font-size: 14px;
+  box-shadow: 0 0 0 3px #fff, 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.fv-vessel-route__tooltip {
+  background: #141c2b !important;
+  color: #e6edf3 !important;
+  border: 1px solid #2a3447 !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+}
+
 .fv-fleet-grid {
   border-collapse: collapse;
   font-size: 12px;
@@ -959,6 +1170,106 @@ a {
   border: 1px solid #2a3447;
   vertical-align: bottom;
   z-index: 1;
+}
+
+.fv-fleet-grid__filter-row th {
+  position: sticky;
+  top: 31px;
+  padding: 4px 6px;
+  font-weight: 400;
+  z-index: 2;
+}
+
+.fv-fleet-grid__filter-cell {
+  position: relative;
+}
+
+.fv-fleet-grid__filter-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  min-width: 52px;
+  font-size: 11px;
+  padding: 3px 6px;
+  background: #101826;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.fv-fleet-grid__filter-btn--active {
+  border-color: #4c8dff;
+  color: #9ec5ff;
+}
+
+.fv-fleet-grid__filter-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fv-fleet-grid__filter-panel {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 100%;
+  max-width: 220px;
+  max-height: 220px;
+  overflow: auto;
+  background: #141c2b;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  z-index: 5;
+}
+
+.fv-fleet-grid__filter-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: #c9d1d9;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.fv-fleet-grid__filter-opt:hover {
+  background: #1d2740;
+}
+
+.fv-fleet-grid__last-noon--stale {
+  color: #ff8a80;
+  font-weight: 600;
+}
+
+.fv-fleet-grid__actions {
+  text-align: center;
+}
+
+.fv-fleet-grid__edit-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: #9ec5ff;
+  border: 1px solid #2a3447;
+  background: #101826;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.fv-fleet-grid__edit-link:hover {
+  background: #1d2740;
+  border-color: #4c8dff;
+  color: #fff;
 }
 
 .fv-fleet-grid td {
@@ -1076,6 +1387,30 @@ a {
 .fv-fleet-grid__vessel-link i {
   font-size: 9px;
   opacity: 0.7;
+}
+
+.fv-fleet-grid__vessel-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #6b7686;
+  flex: 0 0 auto;
+}
+
+.fv-fleet-grid__vessel-link--high .fv-fleet-grid__vessel-dot {
+  background: #f85149;
+  box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.25);
+}
+
+.fv-fleet-grid__vessel-link--medium .fv-fleet-grid__vessel-dot {
+  background: #d29922;
+  box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.25);
+}
+
+.fv-fleet-grid__vessel-link--low .fv-fleet-grid__vessel-dot {
+  background: #3fb950;
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.25);
 }
 
 .fv-fleet-grid__tags {
