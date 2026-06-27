@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
+import { useTheme } from '../theme';
 
 /**
  * Collapsible left sidebar (icon-tab edition).
@@ -45,17 +46,14 @@ const TABS: TabDef[] = [
   {
     id: 'dashboard',
     icon: 'fa-gauge-high',
-    labelKey: 'dashboard',
-    labelFallback: 'Dashboard',
+    labelKey: 'voyageDetails',
+    labelFallback: 'Voyage Details',
     route: '/voyage',
     planned: [
-      { label: 'Create new voyage', route: '/voyage/new' },
-      { label: 'Voyage details', route: '/voyage' },
-      { label: 'Vessel details', route: '/vessel' },
-      { label: 'Client details', route: '/client' },
-      { label: 'Email details', route: '/email' },
-      { label: 'Passage details', route: '/passage' },
-      'OC',
+      { label: 'Order details', route: '/voyage#order' },
+      { label: 'Vessel profile', route: '/voyage#vessel' },
+      { label: 'CP & leg details', route: '/voyage#legs' },
+      { label: 'Notes', route: '/voyage#voyageNotes' },
     ],
   },
   {
@@ -175,6 +173,8 @@ export function LeftSidebar({ iconOnly = false }: { iconOnly?: boolean } = {}) {
     iconOnly ? true : readBool(COLLAPSED_KEY, false),
   );
   const [activeTab, setActiveTab] = useState<TabId>(() => readActiveTab());
+  const [theme, toggleTheme] = useTheme();
+  const [profileOpen, setProfileOpen] = useState(false);
 
   useEffect(() => {
     if (iconOnly) return;
@@ -193,12 +193,22 @@ export function LeftSidebar({ iconOnly = false }: { iconOnly?: boolean } = {}) {
     }
   }, [activeTab]);
 
+  // Close the profile menu on any outside click.
+  useEffect(() => {
+    if (!profileOpen) return;
+    const onDocClick = () => setProfileOpen(false);
+    document.addEventListener('click', onDocClick);
+    return () => document.removeEventListener('click', onDocClick);
+  }, [profileOpen]);
+
   const active = TABS.find((tab) => tab.id === activeTab) ?? TABS[0];
 
   return (
     <aside
       id="fv-left-sidebar"
-      className={`fv-left-sidebar${collapsed ? ' fv-left-sidebar--collapsed' : ''}`}
+      className={`fv-left-sidebar${collapsed ? ' fv-left-sidebar--collapsed' : ''}${
+        theme === 'light' ? ' fv-left-sidebar--light' : ''
+      }`}
       aria-label="Tools"
     >
       <div id="fv-left-sidebar-body" className="fv-left-sidebar__body">
@@ -261,29 +271,106 @@ export function LeftSidebar({ iconOnly = false }: { iconOnly?: boolean } = {}) {
             <h3 className="fv-left-tab-panel__title">
               {t(active.labelKey, active.labelFallback)}
             </h3>
-            <ul className="fv-left-tab-panel__list">
-              {active.planned.map((item) => {
-                const entry: PlannedItem =
-                  typeof item === 'string' ? { label: item } : item;
-                return (
-                  <li key={entry.label}>
-                    {entry.route ? (
-                      <button
-                        type="button"
-                        className="fv-left-tab-panel__link"
-                        onClick={() => navigate(entry.route!)}
-                      >
-                        {entry.label}
-                      </button>
-                    ) : (
-                      entry.label
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+            {active.id === 'dashboard' ? (
+              <p className="fv-left-tab-panel__hint">
+                {t('useSectionTabs', 'Use the section tabs on the page to open each section.')}
+              </p>
+            ) : (
+              <ul className="fv-left-tab-panel__list">
+                {active.planned.map((item) => {
+                  const entry: PlannedItem =
+                    typeof item === 'string' ? { label: item } : item;
+                  return (
+                    <li key={entry.label}>
+                      {entry.route ? (
+                        <button
+                          type="button"
+                          className="fv-left-tab-panel__link"
+                          onClick={() => navigate(entry.route!)}
+                        >
+                          {entry.label}
+                        </button>
+                      ) : (
+                        entry.label
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
         )}
+      </div>
+
+      <div className="fv-left-sidebar__footer">
+        <button
+          type="button"
+          className="fv-left-sidebar__foot-btn"
+          onClick={toggleTheme}
+          aria-pressed={theme === 'light'}
+          title={
+            theme === 'dark'
+              ? t('switchToLight', 'Switch to Light Mode')
+              : t('switchToDark', 'Switch to Dark Mode')
+          }
+        >
+          <i
+            className={`fas ${theme === 'dark' ? 'fa-moon' : 'fa-sun'}`}
+            aria-hidden="true"
+          />
+        </button>
+
+        <button
+          type="button"
+          className="fv-left-sidebar__foot-btn"
+          title={t('settings', 'Settings')}
+        >
+          <i className="fas fa-gear" aria-hidden="true" />
+        </button>
+
+        <div className="fv-left-sidebar__profile" onMouseDown={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="fv-left-sidebar__foot-btn"
+            aria-label={t('profileSettings', 'Profile Settings')}
+            title={t('profileSettings', 'Profile Settings')}
+            aria-expanded={profileOpen}
+            onClick={(e) => {
+              e.stopPropagation();
+              setProfileOpen((prev) => !prev);
+            }}
+          >
+            <i className="fas fa-user-gear" aria-hidden="true" />
+          </button>
+          {profileOpen && (
+            <div className="fv-left-sidebar__profile-menu" role="menu">
+              <div className="fv-left-sidebar__profile-head">
+                <span className="fv-left-sidebar__profile-avatar" aria-hidden="true">
+                  <i className="fas fa-user" />
+                </span>
+                <div className="fv-left-sidebar__profile-id">
+                  <span className="fv-left-sidebar__profile-name">Amit Sharma</span>
+                  <span className="fv-left-sidebar__profile-role">
+                    {t('role', 'Role')}: Fleet Operator
+                  </span>
+                </div>
+              </div>
+              <button type="button" className="fv-left-sidebar__profile-item" role="menuitem">
+                <i className="fas fa-id-badge" aria-hidden="true" />
+                <span>{t('accountDetails', 'Account Details')}</span>
+              </button>
+              <button type="button" className="fv-left-sidebar__profile-item" role="menuitem">
+                <i className="fas fa-gear" aria-hidden="true" />
+                <span>{t('settings', 'Settings')}</span>
+              </button>
+              <div className="fv-left-sidebar__profile-divider" />
+              <button type="button" className="fv-left-sidebar__profile-logout" role="menuitem">
+                <i className="fas fa-right-from-bracket" aria-hidden="true" />
+                <span>{t('logout', 'Logout')}</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </aside>
   );

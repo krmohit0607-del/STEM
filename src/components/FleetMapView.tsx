@@ -31,6 +31,7 @@ export interface MapVessel {
 
 interface FleetMapViewProps {
   vessels: MapVessel[];
+  theme?: 'dark' | 'light';
 }
 
 /** Deterministic 0..1 pseudo-random from a string seed. */
@@ -105,7 +106,7 @@ interface PlacedVessel extends MapVessel {
   inPort: boolean;
 }
 
-export function FleetMapView({ vessels }: FleetMapViewProps) {
+export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // Real water-route geometry per vessel, computed lazily on first hover.
   const [routes, setRoutes] = useState<Record<string, [number, number][]>>({});
@@ -163,8 +164,11 @@ export function FleetMapView({ vessels }: FleetMapViewProps) {
         style={{ height: '100%', width: '100%' }}
       >
         <TileLayer
+          key={theme}
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          url={`https://{s}.basemaps.cartocdn.com/${
+            theme === 'light' ? 'light_all' : 'dark_all'
+          }/{z}/{x}/{y}{r}.png`}
         />
 
         {placed.map((v) =>

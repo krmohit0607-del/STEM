@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
+import { useTheme } from '../theme';
 import { FleetMapView, type MapVessel } from './FleetMapView';
 
 /**
@@ -30,6 +31,8 @@ import { FleetMapView, type MapVessel } from './FleetMapView';
 
 type Priority = 'HIGH' | 'MEDIUM' | 'LOW';
 
+type ClientType = 'Charter' | 'Owner';
+
 interface TaskRow {
   priority: Priority;
   dueLt: number;
@@ -40,9 +43,14 @@ interface TaskRow {
   createdDate: string;
   pic: string;
   client: string;
+  clientType: ClientType;
+  voyageType: string;
   service: string;
   status: string;
+  /** Leg-type code (e.g. `D+B+L+RD`); count is derived from the segments. */
+  legDesc: string;
   portFrom: string;
+  portVia: string;
   portTo: string;
   etd: string;
   eta: string;
@@ -73,9 +81,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '12-Jun-2026 09:15',
     pic: 'Amit',
     client: 'Cargill',
+    clientType: 'Charter',
+    voyageType: 'LT',
     service: 'PMO',
     status: 'At Sea',
+    legDesc: 'D+B+L+RD',
     portFrom: 'Singapore',
+    portVia: 'Cape Town',
     portTo: 'Santos',
     etd: '14-Jun 0800',
     eta: '18-Jun 1200',
@@ -102,9 +114,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '14-Jun-2026 11:40',
     pic: 'Rahul',
     client: 'Bunge',
+    clientType: 'Owner',
+    voyageType: 'TCIN-TCOUT',
     service: 'RPM',
     status: 'At Sea',
+    legDesc: 'B+L',
     portFrom: 'Fujairah',
+    portVia: 'Suez',
     portTo: 'Rotterdam',
     etd: '16-Jun 1000',
     eta: '22-Jun 0800',
@@ -131,9 +147,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '10-Jun-2026 08:05',
     pic: 'John',
     client: 'WX',
+    clientType: 'Charter',
+    voyageType: 'TCIN-VOUT',
     service: 'Monitoring',
     status: 'At Port',
+    legDesc: 'D',
     portFrom: 'Santos',
+    portVia: 'N/A',
     portTo: 'Santos',
     etd: '10-Jun 0600',
     eta: 'N/A',
@@ -160,9 +180,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '11-Jun-2026 14:30',
     pic: 'Sara',
     client: 'Trafigura',
+    clientType: 'Owner',
+    voyageType: 'TCTIN-TCTOUT',
     service: 'PMO',
     status: 'At Sea',
+    legDesc: 'D+B+L',
     portFrom: 'Houston',
+    portVia: 'Gibraltar',
     portTo: 'Rotterdam',
     etd: '15-Jun 0900',
     eta: '20-Jun 1500',
@@ -189,9 +213,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '15-Jun-2026 16:50',
     pic: 'Amit',
     client: 'Cargill',
+    clientType: 'Charter',
+    voyageType: 'VIN-VOUT',
     service: 'RPM',
     status: 'At Sea',
+    legDesc: 'B+L+RD',
     portFrom: 'Santos',
+    portVia: 'Cape Town',
     portTo: 'Qingdao',
     etd: '18-Jun 1100',
     eta: '28-Jun 0200',
@@ -218,9 +246,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '09-Jun-2026 07:20',
     pic: 'Rahul',
     client: 'Bunge',
+    clientType: 'Owner',
+    voyageType: 'OWN-TCOUT',
     service: 'Optinav',
     status: 'At Port',
+    legDesc: 'D',
     portFrom: 'Qingdao',
+    portVia: 'N/A',
     portTo: 'Qingdao',
     etd: '09-Jun 0700',
     eta: 'N/A',
@@ -247,9 +279,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '13-Jun-2026 10:55',
     pic: 'John',
     client: 'Vitol',
+    clientType: 'Charter',
+    voyageType: 'TCIN-TCTOUT',
     service: 'PMO',
     status: 'At Sea',
+    legDesc: 'D+B',
     portFrom: 'Rotterdam',
+    portVia: 'Azores',
     portTo: 'New York',
     etd: '17-Jun 1300',
     eta: '24-Jun 1800',
@@ -276,9 +312,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '14-Jun-2026 13:10',
     pic: 'Sara',
     client: 'Glencore',
+    clientType: 'Owner',
+    voyageType: 'VIN-TCOUT',
     service: 'Weather Only',
     status: 'At Sea',
+    legDesc: 'L',
     portFrom: 'Singapore',
+    portVia: 'Colombo',
     portTo: 'Fujairah',
     etd: '16-Jun 0800',
     eta: '21-Jun 0900',
@@ -305,9 +345,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '08-Jun-2026 06:45',
     pic: 'Amit',
     client: 'Trafigura',
+    clientType: 'Charter',
+    voyageType: 'OWN-VOUT',
     service: 'Shadow Monitoring',
     status: 'Completed',
+    legDesc: 'D+B+L+RD',
     portFrom: 'New York',
+    portVia: 'Miami',
     portTo: 'Houston',
     etd: '08-Jun 0500',
     eta: '15-Jun 1000',
@@ -334,9 +378,13 @@ const TASK_ROWS: TaskRow[] = [
     createdDate: '16-Jun-2026 18:25',
     pic: 'Rahul',
     client: 'Cargill',
+    clientType: 'Owner',
+    voyageType: 'TCTIN-TCOUT',
     service: 'RPM',
     status: 'At Sea',
+    legDesc: 'B+RD',
     portFrom: 'Fujairah',
+    portVia: 'Colombo',
     portTo: 'Singapore',
     etd: '13-Jun 1200',
     eta: '19-Jun 0600',
@@ -432,9 +480,13 @@ const COLUMNS: { key: keyof TaskRow | 'actions'; label: string; width?: number }
   { key: 'createdDate', label: 'Created On', width: 160 },
   { key: 'pic', label: 'PIC', width: 90 },
   { key: 'client', label: 'Client', width: 100 },
+  { key: 'clientType', label: 'Client Type', width: 110 },
+  { key: 'voyageType', label: 'Voyage Type', width: 130 },
   { key: 'service', label: 'Service', width: 100 },
   { key: 'status', label: 'Status', width: 90 },
+  { key: 'legDesc', label: 'Leg Desc', width: 130 },
   { key: 'portFrom', label: 'Port From', width: 110 },
+  { key: 'portVia', label: 'Port Via', width: 110 },
   { key: 'portTo', label: 'Port To', width: 110 },
   { key: 'etd', label: 'ETD', width: 110 },
   { key: 'eta', label: 'ETA', width: 110 },
@@ -455,6 +507,24 @@ const FILTER_FIELDS: { key: keyof TaskRow; label: string }[] = COLUMNS.filter(
 
 function uniqueValues(key: keyof TaskRow): string[] {
   return Array.from(new Set(TASK_ROWS.map((r) => String(r[key])))).sort();
+}
+
+/** Single leg-type code → human-readable label. */
+const LEG_CODE_LABELS: Record<string, string> = {
+  D: 'Delivery',
+  RD: 'Redelivery',
+  B: 'Ballast',
+  L: 'Laden',
+};
+
+/** Build a tooltip describing each leg code in a `D+B+L` style value. */
+function legDescTitle(code: string): string {
+  return code
+    .split('+')
+    .map((c) => c.trim())
+    .filter(Boolean)
+    .map((c) => LEG_CODE_LABELS[c] ?? c)
+    .join(' → ');
 }
 
 function priorityClass(p: Priority): string {
@@ -491,6 +561,16 @@ function healthClass(h: number): string {
 function renderCell(row: TaskRow, key: keyof TaskRow): React.ReactNode {
   if (key === 'priority') {
     return <span className={priorityClass(row.priority)}>{row.priority}</span>;
+  }
+  if (key === 'legDesc') {    const legCount = row.legDesc
+      .split('+')
+      .map((c) => c.trim())
+      .filter(Boolean).length;
+    return (
+      <span className="fv-fleet-grid__leg-desc" title={legDescTitle(row.legDesc)}>
+        {legCount} ({row.legDesc})
+      </span>
+    );
   }
   if (key === 'health') {
     return (
@@ -581,7 +661,17 @@ export function FleetListPage() {
   const [view, setView] = useState<'list' | 'map'>('list');
   const [filters, setFilters] = useState<Record<string, string[]>>({});
   const [openFilter, setOpenFilter] = useState<string | null>(null);
-  const [shiftView, setShiftView] = useState(false);
+  const [filterSearch, setFilterSearch] = useState('');
+  const [shiftView, setShiftView] = useState(true);
+  // Switch mode (light theme) is off by default on every load.
+  const [theme, toggleTheme] = useTheme();
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  // Open/close a column filter panel, resetting the search box each time.
+  const toggleFilterPanel = (label: string) => {
+    setOpenFilter((prev) => (prev === label ? null : label));
+    setFilterSearch('');
+  };
 
   // Toggle a single value within a column's multi-select filter.
   const toggleFilterValue = (label: string, value: string) => {
@@ -610,6 +700,14 @@ export function FleetListPage() {
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [openFilter]);
+
+  // Close the profile menu on any outside click.
+  useEffect(() => {
+    if (!profileOpen) return;
+    const onDocClick = () => setProfileOpen(false);
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [profileOpen]);
 
   const visibleRows = useMemo(() => {
     return TASK_ROWS.filter((row) => {
@@ -673,7 +771,7 @@ export function FleetListPage() {
   );
 
   return (
-    <div className="fv-fleet">
+    <div className={`fv-fleet${theme === 'light' ? ' fv-fleet--light' : ''}`}>
       {/* TOP BAR ---------------------------------------------------- */}
       <header className="fv-fleet__topbar">
         <div className="fv-fleet__brand">
@@ -757,6 +855,72 @@ export function FleetListPage() {
             <i className="fas fa-plus" aria-hidden="true" />
             <span>{t('createNewVoyage', 'Create New Voyage')}</span>
           </Link>
+
+          <button
+            type="button"
+            className="fv-fleet__theme-toggle"
+            onClick={toggleTheme}
+            aria-pressed={theme === 'light'}
+            title={
+              theme === 'dark'
+                ? t('switchToLight', 'Switch to Light Mode')
+                : t('switchToDark', 'Switch to Dark Mode')
+            }
+          >
+            <i
+              className={`fas ${theme === 'dark' ? 'fa-moon' : 'fa-sun'}`}
+              aria-hidden="true"
+            />
+            <span>{theme === 'dark' ? t('dark', 'Dark') : t('light', 'Light')}</span>
+          </button>
+
+          <div
+            className="fv-fleet__profile"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="fv-fleet__profile-btn"
+              aria-label={t('profileSettings', 'Profile Settings')}
+              title={t('profileSettings', 'Profile Settings')}
+              aria-expanded={profileOpen}
+              onClick={() => setProfileOpen((prev) => !prev)}
+            >
+              <i className="fas fa-user-gear" aria-hidden="true" />
+            </button>
+            {profileOpen && (
+              <div className="fv-fleet__profile-menu" role="menu">
+                <div className="fv-fleet__profile-head">
+                  <span className="fv-fleet__profile-avatar" aria-hidden="true">
+                    <i className="fas fa-user" />
+                  </span>
+                  <div className="fv-fleet__profile-id">
+                    <span className="fv-fleet__profile-name">Amit Sharma</span>
+                    <span className="fv-fleet__profile-role">
+                      {t('role', 'Role')}: Fleet Operator
+                    </span>
+                  </div>
+                </div>
+                <button type="button" className="fv-fleet__profile-item" role="menuitem">
+                  <i className="fas fa-id-badge" aria-hidden="true" />
+                  <span>{t('accountDetails', 'Account Details')}</span>
+                </button>
+                <button type="button" className="fv-fleet__profile-item" role="menuitem">
+                  <i className="fas fa-gear" aria-hidden="true" />
+                  <span>{t('settings', 'Settings')}</span>
+                </button>
+                <div className="fv-fleet__profile-divider" />
+                <button
+                  type="button"
+                  className="fv-fleet__profile-logout"
+                  role="menuitem"
+                >
+                  <i className="fas fa-right-from-bracket" aria-hidden="true" />
+                  <span>{t('logout', 'Logout')}</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -774,6 +938,14 @@ export function FleetListPage() {
             </div>
           ))}
         </div>
+        <button
+          type="button"
+          className="fv-fleet__btn fv-fleet__btn--ghost fv-fleet-kpi__clear"
+          onClick={clearFilters}
+        >
+          <i className="fas fa-filter-circle-xmark" aria-hidden="true" />
+          <span>{t('clearFilters', 'Clear Filters')}</span>
+        </button>
       </section>
 
       {/* TASKS HIGHLIGHT -------------------------------------------- */}
@@ -801,14 +973,6 @@ export function FleetListPage() {
 
       {/* FILTER STRIP ----------------------------------------------- */}
       <section className="fv-fleet-filters" aria-label="Filters">
-        <button
-          type="button"
-          className="fv-fleet__btn fv-fleet__btn--ghost"
-          onClick={clearFilters}
-        >
-          <i className="fas fa-filter-circle-xmark" aria-hidden="true" />
-          <span>{t('clearFilters', 'Clear Filters')}</span>
-        </button>
         <span className="fv-fleet-filters__count">
           {visibleRows.length} / {TASK_ROWS.length}
         </span>
@@ -816,7 +980,7 @@ export function FleetListPage() {
 
       {/* GRID / MAP ------------------------------------------------- */}
       {view === 'map' ? (
-        <FleetMapView vessels={mapVessels} />
+        <FleetMapView vessels={mapVessels} theme={theme} />
       ) : (
         <div className="fv-fleet__grid-scroll">
           <table className="fv-fleet-grid">
@@ -852,7 +1016,7 @@ export function FleetListPage() {
                           selected.length > 0 ? ' fv-fleet-grid__filter-btn--active' : ''
                         }`}
                         onClick={() =>
-                          setOpenFilter(isOpen ? null : col.label)
+                          toggleFilterPanel(col.label)
                         }
                         aria-label={`Filter ${col.label}`}
                         aria-expanded={isOpen}
@@ -866,22 +1030,50 @@ export function FleetListPage() {
                       </button>
                       {isOpen && (
                         <div className="fv-fleet-grid__filter-panel">
-                          {uniqueValues(col.key).map((v) => (
-                            <label key={v} className="fv-fleet-grid__filter-opt">
-                              <input
-                                type="checkbox"
-                                checked={selected.includes(v)}
-                                onChange={() => toggleFilterValue(col.label, v)}
-                              />
-                              <span>
-                                {col.key === 'lastNoon'
+                          <input
+                            type="text"
+                            className="fv-fleet-grid__filter-search"
+                            placeholder={t('search', 'Search…')}
+                            value={filterSearch}
+                            autoFocus
+                            onChange={(e) => setFilterSearch(e.target.value)}
+                          />
+                          {(() => {
+                            const options = uniqueValues(col.key).filter((v) => {
+                              const display =
+                                col.key === 'lastNoon'
                                   ? formatLastNoon(Number(v))
                                   : col.key === 'lastAis'
                                   ? formatLastAis(Number(v))
-                                  : v}
-                              </span>
-                            </label>
-                          ))}
+                                  : v;
+                              return display
+                                .toLowerCase()
+                                .includes(filterSearch.toLowerCase());
+                            });
+                            if (options.length === 0) {
+                              return (
+                                <div className="fv-fleet-grid__filter-empty">
+                                  {t('noMatches', 'No matches')}
+                                </div>
+                              );
+                            }
+                            return options.map((v) => (
+                              <label key={v} className="fv-fleet-grid__filter-opt">
+                                <input
+                                  type="checkbox"
+                                  checked={selected.includes(v)}
+                                  onChange={() => toggleFilterValue(col.label, v)}
+                                />
+                                <span>
+                                  {col.key === 'lastNoon'
+                                    ? formatLastNoon(Number(v))
+                                    : col.key === 'lastAis'
+                                    ? formatLastAis(Number(v))
+                                    : v}
+                                </span>
+                              </label>
+                            ));
+                          })()}
                         </div>
                       )}
                     </th>
