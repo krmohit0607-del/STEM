@@ -4,6 +4,8 @@ import type { LatLngBoundsLiteral, Map as LeafletMap } from 'leaflet';
 
 import { WeatherOverlay } from './WeatherOverlay';
 import { WeatherControls } from './WeatherControls';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
+import { WeatherFieldControl } from './WeatherFieldControl';
 
 /**
  * Leaflet map with floating right-side control bar.
@@ -88,6 +90,8 @@ interface ToggleOption {
   url?: string;
   attribution?: string;
   description?: string;
+  /** Wired overlays that aren't tile layers (e.g. vector data) set this. */
+  live?: boolean;
 }
 
 const OVERLAYS: ToggleOption[] = [
@@ -222,6 +226,7 @@ export function MapView() {
           url={basemap.url}
           maxNativeZoom={basemap.maxNativeZoom}
           maxZoom={18}
+          crossOrigin="anonymous"
         />
         {liveOverlays.map((o) => (
           <TileLayer
@@ -231,6 +236,8 @@ export function MapView() {
             maxZoom={18}
           />
         ))}
+        <AreaConstraintsControl position="topright" />
+        <WeatherFieldControl position="topright" />
         <WeatherOverlay />
       </MapContainer>
 
@@ -304,7 +311,7 @@ export function MapView() {
             <ul className="fv-map-controls__list">
               {OVERLAYS.map((o) => {
                 const on = overlayIds.has(o.id);
-                const live = !!o.url;
+                const live = o.live ?? !!o.url;
                 return (
                   <li
                     key={o.id}

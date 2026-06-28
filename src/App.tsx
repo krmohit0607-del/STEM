@@ -7,7 +7,10 @@ import { Layout } from './components/Layout';
 import { FleetListPage } from './components/FleetListPage';
 import { InterimDashboardPage } from './components/InterimDashboardPage';
 import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
+import { OptimizationStudioPage } from './components/OptimizationStudioPage';
 import { VoyageDetailsPage } from './components/VoyageDetailsPage';
+import { ConfigHistoryPage } from './components/ConfigHistoryPage';
+import { AreaConstraintsPage } from './components/AreaConstraintsPage';
 import { VesselDetailsPage } from './components/VesselDetailsPage';
 import { ClientDetailsPage } from './components/ClientDetailsPage';
 import { EmailDetailsPage } from './components/EmailDetailsPage';
@@ -73,6 +76,14 @@ export function App() {
               }
             />
             <Route
+              path="/optimization-studio"
+              element={
+                <Layout>
+                  <OptimizationStudioPage />
+                </Layout>
+              }
+            />
+            <Route
               path="/voyage/new"
               element={
                 <Layout>
@@ -85,6 +96,22 @@ export function App() {
               element={
                 <Layout>
                   <VoyageDetailsPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/configuration-history"
+              element={
+                <Layout>
+                  <ConfigHistoryPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/area-constraints"
+              element={
+                <Layout>
+                  <AreaConstraintsPage />
                 </Layout>
               }
             />

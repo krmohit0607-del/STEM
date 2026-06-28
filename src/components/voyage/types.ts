@@ -33,6 +33,13 @@ export interface SubLeg {
   to: string;
   etd: string;
   autoRoute: boolean;
+  // CP details / good-weather criteria (per sub-leg / intermediate port).
+  cpWinds: string;
+  cpDss: string;
+  cpSwh: string;
+  cpMinHours: string;
+  cpCurrents: string;
+  cpGoodWeatherSelection: string;
 }
 
 export interface LegRow {

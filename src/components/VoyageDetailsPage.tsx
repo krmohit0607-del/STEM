@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { buildEmptyView, buildView, nowStamp } from './voyage/buildView';
-import { ConfigHistorySection } from './voyage/ConfigHistorySection';
 import { LegsSection } from './voyage/LegsSection';
 import { NotesSection } from './voyage/NotesSection';
 import { OrderSection } from './voyage/OrderSection';
@@ -123,12 +122,7 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
   const [openSection, setOpenSection] = useState<string>('summary');
   const toggleSection = (id: string) =>
     setOpenSection((prev) => (prev === id ? '' : id));
-  const openAndScroll = (id: string) => {
-    setOpenSection(id);
-    requestAnimationFrame(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  };
+  const openSectionById = (id: string) => setOpenSection(id);
 
   const sectionNav = [
     { id: 'summary', label: t('voyageSummary', 'Voyage Summary'), icon: 'fa-clipboard-list' },
@@ -136,7 +130,6 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
     { id: 'vessel', label: t('vesselProfile', 'Vessel Profile'), icon: 'fa-ship' },
     { id: 'legs', label: t('legDetails', 'Leg Details'), icon: 'fa-route' },
     { id: 'voyageNotes', label: t('notes', 'Notes'), icon: 'fa-note-sticky' },
-    { id: 'configHistory', label: t('configurationHistory', 'Configuration History'), icon: 'fa-clock-rotate-left' },
   ];
 
   return (
@@ -179,7 +172,7 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
             className={`fv-voyage__tab${
               openSection === s.id ? ' fv-voyage__tab--active' : ''
             }`}
-            onClick={() => openAndScroll(s.id)}
+            onClick={() => openSectionById(s.id)}
             aria-current={openSection === s.id ? 'page' : undefined}
           >
             <i className={`fas ${s.icon}`} aria-hidden="true" /> {s.label}
@@ -243,15 +236,6 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
           title={t('notes', 'NOTES')}
           collapsed={false}
           onToggleCollapse={() => toggleSection('voyageNotes')}
-        />
-      )}
-
-      {openSection === 'configHistory' && (
-        <ConfigHistorySection
-          view={view}
-          title={t('configurationHistory', 'CONFIGURATION HISTORY')}
-          collapsed={false}
-          onToggleCollapse={() => toggleSection('configHistory')}
         />
       )}
 

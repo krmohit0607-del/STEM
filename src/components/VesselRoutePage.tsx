@@ -6,6 +6,8 @@ import L, { type LatLngBoundsExpression, type LatLngExpression } from 'leaflet';
 import { useFleetView } from '../context/FleetViewContext';
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
+import { WeatherFieldControl } from './WeatherFieldControl';
 import { PORT_COORDS } from '../data/fleet';
 import type { Voyage } from '../data/voyages';
 import { LeftSidebar } from './LeftSidebar';
@@ -211,6 +213,7 @@ export function VesselRoutePage() {
                   attribution="Tiles &copy; Esri"
                   url="https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
                   maxNativeZoom={10}
+                  crossOrigin="anonymous"
                 />
 
                 {linePositions.length >= 2 && (
@@ -250,6 +253,8 @@ export function VesselRoutePage() {
                     </Tooltip>
                   </Marker>
                 )}
+                <AreaConstraintsControl position="topright" />
+                <WeatherFieldControl position="topright" />
               </MapContainer>
             )}
           </div>

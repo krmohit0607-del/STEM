@@ -369,8 +369,8 @@ export function buildView(v: Voyage): VoyageView {
 
   // Seed LEG-2 with an intermediate port to demonstrate sub-legs.
   legs[1].subLegs = [
-    { type: 'Laden', from: interim, to: 'Port Said (EGPSD)', etd: addDays(v.etdDisplay, 4), autoRoute: true },
-    { type: 'Laden', from: 'Port Said (EGPSD)', to: v.portTo, etd: addDays(v.etdDisplay, 8), autoRoute: true },
+    { type: 'Laden', from: interim, to: 'Port Said (EGPSD)', etd: addDays(v.etdDisplay, 4), autoRoute: true, cpWinds: 'BF 5', cpDss: '4', cpSwh: '2.5', cpMinHours: '12', cpCurrents: '0.5 kn', cpGoodWeatherSelection: 'Noon-to-Noon' },
+    { type: 'Laden', from: 'Port Said (EGPSD)', to: v.portTo, etd: addDays(v.etdDisplay, 8), autoRoute: true, cpWinds: 'BF 5', cpDss: '4', cpSwh: '2.5', cpMinHours: '12', cpCurrents: '0.5 kn', cpGoodWeatherSelection: 'Noon-to-Noon' },
   ];
 
   return {

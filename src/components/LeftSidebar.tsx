@@ -15,6 +15,7 @@ import { useTheme } from '../theme';
 type TabId =
   | 'dashboard'
   | 'interim'
+  | 'optimization'
   | 'route'
   | 'limits'
   | 'area'
@@ -68,6 +69,16 @@ const TABS: TabDef[] = [
     ],
   },
   {
+    id: 'optimization',
+    icon: 'fa-wand-magic-sparkles',
+    labelKey: 'optimization',
+    labelFallback: 'Optimization',
+    route: '/optimization-studio',
+    planned: [
+      { label: 'Optimization studio', route: '/optimization-studio' },
+    ],
+  },
+  {
     id: 'route',
     icon: 'fa-route',
     labelKey: 'routeEditing',
@@ -104,7 +115,14 @@ const TABS: TabDef[] = [
     icon: 'fa-draw-polygon',
     labelKey: 'areaConstraints',
     labelFallback: 'Area Constraints',
-    planned: ['ECA zones', 'Speed control zones', 'Block / no-go zones'],
+    route: '/area-constraints',
+    planned: [
+      { label: 'View all on map', route: '/area-constraints' },
+      { label: 'Limited-passage zones', route: '/area-constraints' },
+      { label: 'No-go zones', route: '/area-constraints' },
+      { label: 'Speed-control zones', route: '/area-constraints' },
+      { label: 'ECA zones', route: '/area-constraints' },
+    ],
   },
   {
     id: 'simulator',
@@ -118,13 +136,6 @@ const TABS: TabDef[] = [
     ],
   },
   {
-    id: 'history',
-    icon: 'fa-clock-rotate-left',
-    labelKey: 'configurationHistory',
-    labelFallback: 'Configuration History',
-    planned: ['Configuration change log', 'Voyage configuration revisions'],
-  },
-  {
     id: 'reports',
     icon: 'fa-file-invoice',
     labelKey: 'reportsCalculations',
@@ -136,6 +147,14 @@ const TABS: TabDef[] = [
       'Deviation calculation',
       'Emission calculation',
     ],
+  },
+  {
+    id: 'history',
+    icon: 'fa-clock-rotate-left',
+    labelKey: 'configurationHistory',
+    labelFallback: 'Configuration History',
+    route: '/configuration-history',
+    planned: ['Configuration change log', 'Voyage configuration revisions'],
   },
 ];
 
@@ -323,9 +342,10 @@ export function LeftSidebar({ iconOnly = false }: { iconOnly?: boolean } = {}) {
         <button
           type="button"
           className="fv-left-sidebar__foot-btn"
-          title={t('settings', 'Settings')}
+          title={t('areaConstraints', 'Area Constraints')}
+          onClick={() => navigate('/area-constraints')}
         >
-          <i className="fas fa-gear" aria-hidden="true" />
+          <i className="fas fa-draw-polygon" aria-hidden="true" />
         </button>
 
         <div className="fv-left-sidebar__profile" onMouseDown={(e) => e.stopPropagation()}>

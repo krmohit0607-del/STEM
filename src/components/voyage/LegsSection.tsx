@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import { emptyLeg, normalizeLegs } from './buildView';
@@ -36,6 +36,12 @@ interface SegItem {
   to: string;
   etd: string;
   autoRoute: boolean;
+  cpWinds: string;
+  cpDss: string;
+  cpSwh: string;
+  cpMinHours: string;
+  cpCurrents: string;
+  cpGoodWeatherSelection: string;
 }
 
 /**
@@ -60,7 +66,22 @@ function computeMergeSplit(legs: LegRow[], items: SegItem[], checks: boolean[], 
   const moving: { seg: SubLeg; target: string }[] = [];
 
   chosen.forEach(({ it, target }) => {
-    moving.push({ seg: { type: target, from: it.from, to: it.to, etd: it.etd, autoRoute: it.autoRoute }, target });
+    moving.push({
+      seg: {
+        type: target,
+        from: it.from,
+        to: it.to,
+        etd: it.etd,
+        autoRoute: it.autoRoute,
+        cpWinds: it.cpWinds,
+        cpDss: it.cpDss,
+        cpSwh: it.cpSwh,
+        cpMinHours: it.cpMinHours,
+        cpCurrents: it.cpCurrents,
+        cpGoodWeatherSelection: it.cpGoodWeatherSelection,
+      },
+      target,
+    });
     if (it.subIdx == null) {
       removeWholeLeg.add(it.legIdx);
     } else {
@@ -88,7 +109,22 @@ function computeMergeSplit(legs: LegRow[], items: SegItem[], checks: boolean[], 
     if (t) {
       t.subLegs = t.subLegs.length
         ? [...t.subLegs, seg]
-        : [{ type: t.type, from: t.from, to: t.to, etd: t.etd, autoRoute: t.autoRoute }, seg];
+        : [
+            {
+              type: t.type,
+              from: t.from,
+              to: t.to,
+              etd: t.etd,
+              autoRoute: t.autoRoute,
+              cpWinds: t.cpWinds,
+              cpDss: t.cpDss,
+              cpSwh: t.cpSwh,
+              cpMinHours: t.cpMinHours,
+              cpCurrents: t.cpCurrents,
+              cpGoodWeatherSelection: t.cpGoodWeatherSelection,
+            },
+            seg,
+          ];
     } else {
       work.push({
         ...emptyLeg('LEG-NEW'),
@@ -115,6 +151,16 @@ function computeMergeSplit(legs: LegRow[], items: SegItem[], checks: boolean[], 
 export function LegsSection({ view, setView, editing, onToggleEdit, title, collapsed, onToggleCollapse }: Props) {
   const [selected, setSelected] = useState<number | null>(0);
   const [checked, setChecked] = useState<number[]>([]);
+  // Sub-legs whose CP / good-weather criteria editor is expanded (key: `${legIdx}-${subIdx}`).
+  const [openCriteria, setOpenCriteria] = useState<Set<string>>(new Set());
+  const toggleCriteria = (legIdx: number, subIdx: number) =>
+    setOpenCriteria((prev) => {
+      const key = `${legIdx}-${subIdx}`;
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   // Modal for choosing which sub-legs to merge / split and into which type.
   const [modal, setModal] = useState<{ mode: 'merge' | 'split'; items: SegItem[] } | null>(null);
   const [segChecked, setSegChecked] = useState<boolean[]>([]);
@@ -157,7 +203,20 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
       legs.map((leg, li) => {
         if (li !== legIdx) return leg;
         const lastTo = leg.subLegs.length ? leg.subLegs[leg.subLegs.length - 1].to : leg.from;
-        const newSub: SubLeg = { type: leg.type || 'Laden', from: lastTo, to: leg.to, etd: leg.etd, autoRoute: true };
+        const newSub: SubLeg = {
+          type: leg.type || 'Laden',
+          from: lastTo,
+          to: leg.to,
+          etd: leg.etd,
+          autoRoute: true,
+          // Inherit the parent leg's CP / good-weather criteria as a starting point.
+          cpWinds: leg.cpWinds,
+          cpDss: leg.cpDss,
+          cpSwh: leg.cpSwh,
+          cpMinHours: leg.cpMinHours,
+          cpCurrents: leg.cpCurrents,
+          cpGoodWeatherSelection: leg.cpGoodWeatherSelection,
+        };
         return { ...leg, subLegs: [...leg.subLegs, newSub] };
       }),
     );
@@ -210,8 +269,38 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
   const legItems = (legIdx: number): SegItem[] => {
     const leg = view.legs[legIdx];
     return leg.subLegs.length
-      ? leg.subLegs.map((s, si) => ({ legIdx, subIdx: si, type: s.type, from: s.from, to: s.to, etd: s.etd, autoRoute: s.autoRoute }))
-      : [{ legIdx, subIdx: null, type: leg.type, from: leg.from, to: leg.to, etd: leg.etd, autoRoute: leg.autoRoute }];
+      ? leg.subLegs.map((s, si) => ({
+          legIdx,
+          subIdx: si,
+          type: s.type,
+          from: s.from,
+          to: s.to,
+          etd: s.etd,
+          autoRoute: s.autoRoute,
+          cpWinds: s.cpWinds,
+          cpDss: s.cpDss,
+          cpSwh: s.cpSwh,
+          cpMinHours: s.cpMinHours,
+          cpCurrents: s.cpCurrents,
+          cpGoodWeatherSelection: s.cpGoodWeatherSelection,
+        }))
+      : [
+          {
+            legIdx,
+            subIdx: null,
+            type: leg.type,
+            from: leg.from,
+            to: leg.to,
+            etd: leg.etd,
+            autoRoute: leg.autoRoute,
+            cpWinds: leg.cpWinds,
+            cpDss: leg.cpDss,
+            cpSwh: leg.cpSwh,
+            cpMinHours: leg.cpMinHours,
+            cpCurrents: leg.cpCurrents,
+            cpGoodWeatherSelection: leg.cpGoodWeatherSelection,
+          },
+        ];
   };
 
   const closeModal = () => {
@@ -392,71 +481,6 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                 <BoolField label="Auto Route" value={leg.autoRoute} editing={editing} onChange={(b) => setLeg(i, 'autoRoute', b)} />
               </div>
 
-              <h5 className="fv-voyage__subhead">Sub-Legs / Intermediate Ports</h5>
-              <div className="fv-voyage__table-scroll">
-                <table className="fv-voyage__dtable">
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>Type</th>
-                      <th>Port From</th>
-                      <th>Port To</th>
-                      <th>ETD</th>
-                      <th>Auto Route</th>
-                      {editing && <th aria-label="Actions" />}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leg.subLegs.length === 0 ? (
-                      <tr>
-                        <td colSpan={editing ? 7 : 6} className="fv-voyage__muted">
-                          No sub-legs — this leg runs directly {leg.from || '—'} → {leg.to || '—'}.
-                        </td>
-                      </tr>
-                    ) : (
-                      leg.subLegs.map((s, si) => (
-                        <tr key={si}>
-                          <td>{si + 1}</td>
-                          <td><Cell editing={editing} value={s.type} onChange={(x) => setSubLeg(i, si, 'type', x)} options={LEG_VOYAGE_TYPE_OPTIONS} /></td>
-                          <td>{s.from || '—'}</td>
-                          <td><Cell editing={editing} value={s.to} onChange={(x) => setSubLeg(i, si, 'to', x)} /></td>
-                          <td><Cell editing={editing} value={s.etd} onChange={(x) => setSubLeg(i, si, 'etd', x)} /></td>
-                          <td>
-                            <button
-                              type="button"
-                              className={`fv-voyage__toggle${s.autoRoute ? ' fv-voyage__toggle--on' : ''}`}
-                              onClick={() => editing && setSubLeg(i, si, 'autoRoute', !s.autoRoute)}
-                              disabled={!editing}
-                              role="switch"
-                              aria-checked={s.autoRoute}
-                              aria-label="Auto Route"
-                              title={s.autoRoute ? 'Auto Route ON — optimized route fetched automatically' : 'Auto Route OFF'}
-                            >
-                              <span className="fv-voyage__toggle-knob" />
-                              <span className="fv-voyage__toggle-text">{s.autoRoute ? 'On' : 'Off'}</span>
-                            </button>
-                          </td>
-                          {editing && (
-                            <td>
-                              <button type="button" className="fv-voyage__icon-btn" onClick={() => removeSubLeg(i, si)} aria-label="Remove sub-leg">
-                                <i className="fas fa-times" aria-hidden="true" />
-                              </button>
-                            </td>
-                          )}
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-              {editing && (
-                <div className="fv-voyage__leg-actions">
-                  <button type="button" className="fv-voyage__btn" onClick={() => addSubLeg(i)}>
-                    <i className="fas fa-plus" aria-hidden="true" /> Add Port / Sub-Leg
-                  </button>
-                </div>
-              )}
-
               <h5 className="fv-voyage__subhead">Weather Safety Limits</h5>
               <div className="fv-voyage__cols fv-voyage__cols--3">
                 <Field label="Max Sign Wave Height (m)" value={leg.maxSwh} editing={editing} onChange={(x) => setLeg(i, 'maxSwh', x)} />
@@ -513,6 +537,113 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                 <div className="fv-voyage__leg-actions">
                   <button type="button" className="fv-voyage__btn" onClick={() => addLegSpeed(i)}>
                     <i className="fas fa-plus" aria-hidden="true" /> Add More
+                  </button>
+                </div>
+              )}
+
+              <h5 className="fv-voyage__subhead">Sub-Legs / Intermediate Ports</h5>
+              <div className="fv-voyage__table-scroll">
+                <table className="fv-voyage__dtable">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Type</th>
+                      <th>Port From</th>
+                      <th>Port To</th>
+                      <th>ETD</th>
+                      <th>Auto Route</th>
+                      <th>C/P &amp; Good Weather</th>
+                      {editing && <th aria-label="Actions" />}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leg.subLegs.length === 0 ? (
+                      <tr>
+                        <td colSpan={editing ? 8 : 7} className="fv-voyage__muted">
+                          No sub-legs — this leg runs directly {leg.from || '—'} → {leg.to || '—'}.
+                        </td>
+                      </tr>
+                    ) : (
+                      leg.subLegs.map((s, si) => {
+                        const criteriaOpen = openCriteria.has(`${i}-${si}`);
+                        return (
+                          <Fragment key={si}>
+                            <tr>
+                              <td>{si + 1}</td>
+                              <td><Cell editing={editing} value={s.type} onChange={(x) => setSubLeg(i, si, 'type', x)} options={LEG_VOYAGE_TYPE_OPTIONS} /></td>
+                              <td>{s.from || '—'}</td>
+                              <td><Cell editing={editing} value={s.to} onChange={(x) => setSubLeg(i, si, 'to', x)} /></td>
+                              <td><Cell editing={editing} value={s.etd} onChange={(x) => setSubLeg(i, si, 'etd', x)} /></td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className={`fv-voyage__toggle${s.autoRoute ? ' fv-voyage__toggle--on' : ''}`}
+                                  onClick={() => editing && setSubLeg(i, si, 'autoRoute', !s.autoRoute)}
+                                  disabled={!editing}
+                                  role="switch"
+                                  aria-checked={s.autoRoute}
+                                  aria-label="Auto Route"
+                                  title={s.autoRoute ? 'Auto Route ON — optimized route fetched automatically' : 'Auto Route OFF'}
+                                >
+                                  <span className="fv-voyage__toggle-knob" />
+                                  <span className="fv-voyage__toggle-text">{s.autoRoute ? 'On' : 'Off'}</span>
+                                </button>
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="fv-voyage__btn fv-voyage__btn--sm"
+                                  onClick={() => toggleCriteria(i, si)}
+                                  aria-expanded={criteriaOpen}
+                                  title="Select C/P & good-weather criteria for this sub-leg"
+                                >
+                                  <i className={`fas ${criteriaOpen ? 'fa-chevron-up' : 'fa-sliders'}`} aria-hidden="true" />{' '}
+                                  {criteriaOpen ? 'Hide' : 'Criteria'}
+                                </button>
+                              </td>
+                              {editing && (
+                                <td>
+                                  <button type="button" className="fv-voyage__icon-btn" onClick={() => removeSubLeg(i, si)} aria-label="Remove sub-leg">
+                                    <i className="fas fa-times" aria-hidden="true" />
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                            {criteriaOpen && (
+                              <tr className="fv-voyage__subleg-detail-row">
+                                <td colSpan={editing ? 8 : 7}>
+                                  <div className="fv-voyage__subleg-detail">
+                                    <h6 className="fv-voyage__subhead">
+                                      C/P &amp; Good Weather Criteria — {s.from || '—'} → {s.to || '—'}
+                                    </h6>
+                                    <div className="fv-voyage__cols fv-voyage__cols--3">
+                                      <Field label="Winds" value={s.cpWinds} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpWinds', x)} />
+                                      <Field label="DSS" value={s.cpDss} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpDss', x)} />
+                                      <Field label="SWH" value={s.cpSwh} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpSwh', x)} />
+                                      <Field label="Min Hours" value={s.cpMinHours} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpMinHours', x)} />
+                                      <Field label="Currents" value={s.cpCurrents} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpCurrents', x)} />
+                                      <Field
+                                        label="Good Weather Selection"
+                                        value={s.cpGoodWeatherSelection}
+                                        editing={editing}
+                                        onChange={(x) => setSubLeg(i, si, 'cpGoodWeatherSelection', x)}
+                                      />
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {editing && (
+                <div className="fv-voyage__leg-actions">
+                  <button type="button" className="fv-voyage__btn" onClick={() => addSubLeg(i)}>
+                    <i className="fas fa-plus" aria-hidden="true" /> Add Port / Sub-Leg
                   </button>
                 </div>
               )}

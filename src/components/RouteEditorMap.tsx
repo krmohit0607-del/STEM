@@ -11,6 +11,8 @@ import {
 import L, { type LatLngExpression } from 'leaflet';
 
 import { WeatherOverlay } from './WeatherOverlay';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
+import { WeatherFieldControl } from './WeatherFieldControl';
 
 /**
  * Interactive route editor map.
@@ -153,6 +155,7 @@ export function RouteEditorMap({
       <TileLayer
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attribution="&copy; OpenStreetMap contributors"
+        crossOrigin="anonymous"
       />
       <TileLayer
         url="https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png"
@@ -244,6 +247,8 @@ export function RouteEditorMap({
           </Tooltip>
         </Marker>
       ))}
+      <AreaConstraintsControl position="topright" />
+      <WeatherFieldControl position="topright" />
     </MapContainer>
   );
 }

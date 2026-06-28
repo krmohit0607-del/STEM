@@ -5,6 +5,8 @@ import L from 'leaflet';
 import { PORT_COORDS } from '../data/fleet';
 import { generateSeaRoute } from '../data/seaRoute';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
+import { WeatherFieldControl } from './WeatherFieldControl';
 
 /**
  * Fleet Map View — rendered when the Fleet List View toggle is set to
@@ -169,6 +171,7 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
           url={`https://{s}.basemaps.cartocdn.com/${
             theme === 'light' ? 'light_all' : 'dark_all'
           }/{z}/{x}/{y}{r}.png`}
+          crossOrigin="anonymous"
         />
 
         {placed.map((v) =>
@@ -230,6 +233,8 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
             </Tooltip>
           </Marker>
         ))}
+        <AreaConstraintsControl position="topright" />
+        <WeatherFieldControl position="topright" />
       </MapContainer>
     </div>
   );

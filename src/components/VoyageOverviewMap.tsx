@@ -10,6 +10,8 @@ import {
 } from '../data/fleet';
 import { WeatherOverlay } from './WeatherOverlay';
 import { WeatherControls } from './WeatherControls';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
+import { WeatherFieldControl } from './WeatherFieldControl';
 
 /**
  * Voyage Overview Map — rendered on `/?voyage=ID`.
@@ -262,6 +264,7 @@ function VoyageOverviewInner({ row }: InnerProps) {
             attribution="Tiles &copy; Esri"
             url="https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
             maxNativeZoom={10}
+            crossOrigin="anonymous"
           />
 
           {positions.length >= 2 && (
@@ -308,6 +311,8 @@ function VoyageOverviewInner({ row }: InnerProps) {
           )}
 
           <WeatherOverlay points={path as Array<[number, number]>} maxPoints={6} />
+          <AreaConstraintsControl position="topright" />
+          <WeatherFieldControl position="topright" />
         </MapContainer>
 
         <WeatherControls />

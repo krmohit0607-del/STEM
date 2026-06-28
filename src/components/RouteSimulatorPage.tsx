@@ -12,6 +12,8 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { WeatherOverlay } from './WeatherOverlay';
 import { WeatherControls } from './WeatherControls';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
+import { WeatherFieldControl } from './WeatherFieldControl';
 
 /**
  * Route Simulator page — `/route-simulator`.
@@ -723,6 +725,7 @@ function RouteMap({
           attribution="Tiles &copy; Esri"
           url="https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
           maxNativeZoom={10}
+          crossOrigin="anonymous"
         />
 
         {routes.map((route) => {
@@ -776,6 +779,8 @@ function RouteMap({
           points={routes.map((route) => samplePath(route.path, progressById[route.id] ?? 0))}
           maxPoints={6}
         />
+        <AreaConstraintsControl position="topright" />
+        <WeatherFieldControl position="topright" />
       </MapContainer>
 
       <WeatherControls />
