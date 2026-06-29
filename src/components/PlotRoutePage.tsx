@@ -2,8 +2,11 @@ import { useMemo, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { PORT_COORDS } from '../data/fleet';
+import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
 import { RouteEditorMap, type EditorPoint } from './RouteEditorMap';
 import { WeatherControls } from './WeatherControls';
+import { RouteEditingTabs } from './RouteEditingTabs';
+import { PortInput } from './PortInput';
 
 /**
  * Plot Route on Map page — `/plot-route`.
@@ -50,9 +53,14 @@ function decToDM(value: number, isLat: boolean): string {
 }
 
 /** Resolve a port name or a free "lat, lon" string to decimal coords. */
-function resolveLocation(raw: string): { lat: number; lon: number; name: string } | null {
+function resolveLocation(
+  raw: string,
+  worldPorts: WorldPort[],
+): { lat: number; lon: number; name: string } | null {
   const text = raw.trim();
   if (!text) return null;
+  const wp = resolveWorldPort(text, worldPorts);
+  if (wp) return { lat: wp.lat, lon: wp.lon, name: wp.name };
   const portKey = Object.keys(PORT_COORDS).find(
     (k) => k.toLowerCase() === text.toLowerCase(),
   );
@@ -141,6 +149,7 @@ export function PlotRoutePage() {
 
   const [depInput, setDepInput] = useState('');
   const [arrInput, setArrInput] = useState('');
+  const worldPorts = useWorldPorts();
   const [error, setError] = useState('');
 
   // --- Saved routes ------------------------------------------------
@@ -153,7 +162,7 @@ export function PlotRoutePage() {
   const setEndpoint = (kind: 'departure' | 'arrival') => {
     setError('');
     const raw = kind === 'departure' ? depInput : arrInput;
-    const loc = resolveLocation(raw);
+    const loc = resolveLocation(raw, worldPorts);
     if (!loc) {
       setError(
         t('plotResolveErr', 'Enter a known port name or "lat, lon" (e.g. "1.26, 103.8").'),
@@ -366,28 +375,24 @@ export function PlotRoutePage() {
         </ul>
       </header>
 
+      <RouteEditingTabs />
+
       {/* Endpoints --------------------------------------------------- */}
       <section className="fv-route__section">
         <header className="fv-route__section-header">
           <h2>{t('endpoints', 'Departure & Arrival')}</h2>
         </header>
         <div className="fv-route__gen">
-          <datalist id="fv-plot-ports">
-            {Object.keys(PORT_COORDS).map((p) => (
-              <option key={p} value={p} />
-            ))}
-          </datalist>
           <label className="fv-route__gen-field">
             <span>
               <i className="fas fa-anchor-circle-check" aria-hidden="true" />{' '}
               {t('departure', 'Departure')}
             </span>
-            <input
-              type="text"
-              list="fv-plot-ports"
+            <PortInput
+              ports={worldPorts}
               placeholder={t('portOrLatLon', 'Port name or "lat, lon"')}
               value={depInput}
-              onChange={(e) => setDepInput(e.target.value)}
+              onChange={setDepInput}
             />
           </label>
           <button
@@ -401,12 +406,11 @@ export function PlotRoutePage() {
             <span>
               <i className="fas fa-anchor" aria-hidden="true" /> {t('arrival', 'Arrival')}
             </span>
-            <input
-              type="text"
-              list="fv-plot-ports"
+            <PortInput
+              ports={worldPorts}
               placeholder={t('portOrLatLon', 'Port name or "lat, lon"')}
               value={arrInput}
-              onChange={(e) => setArrInput(e.target.value)}
+              onChange={setArrInput}
             />
           </label>
           <button
@@ -473,7 +477,6 @@ export function PlotRoutePage() {
               onAddPoint={addWaypoint}
               onInsertPoint={insertWaypoint}
               onMovePoint={movePoint}
-              onSelectPoint={toggleSelected}
               onDeletePoint={deletePoint}
             />
             <WeatherControls />
