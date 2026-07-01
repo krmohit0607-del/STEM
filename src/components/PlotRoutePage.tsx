@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { PORT_COORDS } from '../data/fleet';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
+import { findBestOptimizedRoute } from '../data/routeOptimizer';
 import { RouteEditorMap, type EditorPoint } from './RouteEditorMap';
-import { WeatherControls } from './WeatherControls';
 import { RouteEditingTabs } from './RouteEditingTabs';
 import { PortInput } from './PortInput';
 
@@ -41,6 +41,30 @@ function haversineNM(lat1: number, lon1: number, lat2: number, lon2: number): nu
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
+
+/**
+ * Stand-in for the backend route optimizer. Runs the client-side
+ * `findBestOptimizedRoute` search after a short delay to mimic a
+ * network/compute round-trip, and can be aborted if the endpoints change.
+ * Swap the body for a real `fetch(...)` when the optimization service is
+ * available.
+ */
+function fetchOptimizedRoute(
+  departure: { lat: number; lon: number },
+  arrival: { lat: number; lon: number },
+  signal?: AbortSignal,
+): Promise<Array<[number, number]>> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      resolve(findBestOptimizedRoute(departure, arrival).path);
+    }, 1400);
+    signal?.addEventListener('abort', () => {
+      window.clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    });
+  });
+}
+
 
 /** Decimal degrees → `01° 16.0' N` style string. */
 function decToDM(value: number, isLat: boolean): string {
@@ -151,6 +175,10 @@ export function PlotRoutePage() {
   const [arrInput, setArrInput] = useState('');
   const worldPorts = useWorldPorts();
   const [error, setError] = useState('');
+
+  // --- Optimized route (background) --------------------------------
+  const [optimizedRoute, setOptimizedRoute] = useState<Array<[number, number]> | null>(null);
+  const [optimizing, setOptimizing] = useState(false);
 
   // --- Saved routes ------------------------------------------------
   const [routeName, setRouteName] = useState('');
@@ -341,6 +369,41 @@ export function PlotRoutePage() {
   const hasDeparture = points.some((p) => p.kind === 'departure');
   const hasArrival = points.some((p) => p.kind === 'arrival');
 
+  const departurePoint = points.find((p) => p.kind === 'departure');
+  const arrivalPoint = points.find((p) => p.kind === 'arrival');
+  const depLat = departurePoint?.lat;
+  const depLon = departurePoint?.lon;
+  const arrLat = arrivalPoint?.lat;
+  const arrLon = arrivalPoint?.lon;
+
+  // Once both endpoints exist, the straight line is drawn immediately from
+  // `points`; here we kick off the optimizer in the background and swap in
+  // the optimized track when it resolves. Re-runs whenever an endpoint moves.
+  useEffect(() => {
+    if (depLat == null || depLon == null || arrLat == null || arrLon == null) {
+      setOptimizedRoute(null);
+      setOptimizing(false);
+      return;
+    }
+    const controller = new AbortController();
+    setOptimizedRoute(null);
+    setOptimizing(true);
+    fetchOptimizedRoute(
+      { lat: depLat, lon: depLon },
+      { lat: arrLat, lon: arrLon },
+      controller.signal,
+    )
+      .then((route) => {
+        setOptimizedRoute(route);
+        setOptimizing(false);
+      })
+      .catch((err) => {
+        if ((err as DOMException)?.name === 'AbortError') return;
+        setOptimizing(false);
+      });
+    return () => controller.abort();
+  }, [depLat, depLon, arrLat, arrLon]);
+
   return (
     <div className="fv-route">
       <header className="fv-route__header">
@@ -474,12 +537,31 @@ export function PlotRoutePage() {
               points={mapPoints}
               plotMode={plotMode}
               selected={selected}
+              routes={
+                optimizedRoute
+                  ? [{ id: 'optimized', color: '#2ea043', path: optimizedRoute }]
+                  : []
+              }
+              selectedRouteId="optimized"
               onAddPoint={addWaypoint}
               onInsertPoint={insertWaypoint}
               onMovePoint={movePoint}
               onDeletePoint={deletePoint}
             />
-            <WeatherControls />
+            {optimizing && (
+              <div className="fv-route__map-overlay" role="status" aria-live="polite">
+                <div className="fv-route__spinner" aria-hidden="true" />
+                <span className="fv-route__spinner-label">
+                  {t('optimizingRoute', 'Optimizing route…')}
+                </span>
+              </div>
+            )}
+            {!optimizing && optimizedRoute && (
+              <div className="fv-route__map-status fv-route__map-status--done" role="status">
+                <i className="fas fa-route" aria-hidden="true" />{' '}
+                {t('optimizedRouteReady', 'Optimized route ready')}
+              </div>
+            )}
             {plotMode && (
               <div className="fv-route__map-hint">
                 <i className="fas fa-info-circle" aria-hidden="true" />{' '}

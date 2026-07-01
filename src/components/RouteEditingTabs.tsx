@@ -17,7 +17,6 @@ export function RouteEditingTabs() {
 
   const tabs = [
     { to: '/route-explorer', icon: 'fa-pen-ruler', label: t('openRouteEditor', 'Open route editor') },
-    { to: '/route-editor#import-export', icon: 'fa-file-import', label: t('importExport', 'Import / export') },
   ];
 
   return (

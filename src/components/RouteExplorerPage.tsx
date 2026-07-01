@@ -1,11 +1,12 @@
-import { Fragment, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { PORT_COORDS } from '../data/fleet';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
+import { type OptimizedRoute } from '../data/routeOptimizer';
+import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
 import { RouteEditorMap, type EditorPoint } from './RouteEditorMap';
-import { WeatherControls } from './WeatherControls';
 import { RouteEditingTabs } from './RouteEditingTabs';
 import { PortInput } from './PortInput';
 
@@ -43,6 +44,12 @@ interface Waypoint {
   drift: boolean;
   /** Whether this waypoint is a port (so it can be edited). */
   isPort: boolean;
+  /**
+   * How the leg *departing* this waypoint (to the next one) is drawn:
+   * `'rhumb'` = constant-bearing straight line, `'greatcircle'` = shortest
+   * great-circle arc. Defaults to `'rhumb'` when unset.
+   */
+  legType?: 'rhumb' | 'greatcircle';
 }
 
 const STUB_WAYPOINTS: Waypoint[] = [
@@ -204,6 +211,46 @@ function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): num
   return Math.round((((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360);
 }
 
+/** Rhumb-line (constant-bearing) distance between two points, in NM. */
+function rhumbDistanceNM(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 3440.065; // Earth radius in NM
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const dφ = φ2 - φ1;
+  let dλ = toRad(lon2 - lon1);
+  if (Math.abs(dλ) > Math.PI) dλ = dλ > 0 ? dλ - 2 * Math.PI : dλ + 2 * Math.PI;
+  const dψ = Math.log(
+    Math.tan(Math.PI / 4 + φ2 / 2) / Math.tan(Math.PI / 4 + φ1 / 2),
+  );
+  const q = Math.abs(dψ) > 1e-12 ? dφ / dψ : Math.cos(φ1);
+  return Math.sqrt(dφ * dφ + q * q * dλ * dλ) * R;
+}
+
+/**
+ * Pick the better sailing mode for the leg between two points.
+ *
+ * A great circle is the shortest track over the globe but curves on the chart
+ * and needs continuous course changes, so it is only worthwhile on longer legs
+ * where the saving over a rhumb line is meaningful (typically high-latitude,
+ * east-west ocean passages). On short legs, or near the equator / on
+ * north-south legs, the two are practically identical, so the simpler
+ * constant-bearing rhumb line is preferred.
+ */
+function chooseLegType(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): 'rhumb' | 'greatcircle' {
+  const gc = haversineNM(lat1, lon1, lat2, lon2);
+  const rl = rhumbDistanceNM(lat1, lon1, lat2, lon2);
+  // Use a great circle only when it is long enough to matter and saves a
+  // non-trivial distance over the rhumb line (>~0.5%, at least 5 NM).
+  const saving = rl - gc;
+  return gc > 300 && saving > Math.max(5, gc * 0.005) ? 'greatcircle' : 'rhumb';
+}
+
 interface SavedRoute {
   id: string;
   name: string;
@@ -275,6 +322,30 @@ function recomputeGeometry(list: Waypoint[]): Waypoint[] {
   });
 }
 
+/**
+ * The candidate routes are computed off the main thread in a Web Worker (see
+ * `routeOptimizer.worker.ts`) so the UI stays responsive. Each profile follows
+ * a genuinely different, land-avoiding corridor and is drawn in its own colour.
+ */
+
+/** Assumed service speed used to turn distance into a transit time / ETA. */
+const SERVICE_SPEED_KN = 12;
+
+/** A computed candidate route: its profile plus the optimizer result. */
+type ComputedRoute = RouteVariantMeta & { info: OptimizedRoute };
+
+/** Estimated transit time (in hours) for a distance at service speed. */
+function transitHours(distanceNm: number): number {
+  return distanceNm / SERVICE_SPEED_KN;
+}
+
+/** Format a transit duration as a compact "Xd Yh" string. */
+function formatDuration(hours: number): string {
+  const d = Math.floor(hours / 24);
+  const h = Math.round(hours % 24);
+  return d > 0 ? `${d}d ${h}h` : `${h}h`;
+}
+
 export function RouteExplorerPage() {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -308,6 +379,55 @@ export function RouteExplorerPage() {
   const [genError, setGenError] = useState('');
   const worldPorts = useWorldPorts();
 
+  // Candidate optimized routes computed in the background after the straight
+  // line is drawn. The user picks their preferred one from the list.
+  const [routeResults, setRouteResults] = useState<ComputedRoute[] | null>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [optimizing, setOptimizing] = useState(false);
+  const optimizeRunRef = useRef(0);
+  const workerRef = useRef<Worker | null>(null);
+
+  // Spin up the routing Web Worker once; it computes the candidate routes off
+  // the main thread and streams each land-clean result back as it finishes.
+  useEffect(() => {
+    const worker = new Worker(
+      new URL('../data/routeOptimizer.worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+    worker.onmessage = (
+      event: MessageEvent<
+        | { type: 'variant'; runId: number; id: string; info: OptimizedRoute }
+        | { type: 'done'; runId: number }
+      >,
+    ) => {
+      const msg = event.data;
+      if (msg.runId !== optimizeRunRef.current) return; // stale run
+      if (msg.type === 'variant') {
+        const meta = ROUTE_VARIANTS.find((v) => v.id === msg.id);
+        if (!meta) return;
+        setRouteResults((prev) => {
+          const next = (prev ?? []).filter((r) => r.id !== msg.id);
+          next.push({ ...meta, info: msg.info });
+          // Keep the display order aligned with ROUTE_VARIANTS.
+          next.sort(
+            (a, b) =>
+              ROUTE_VARIANTS.findIndex((v) => v.id === a.id) -
+              ROUTE_VARIANTS.findIndex((v) => v.id === b.id),
+          );
+          return next;
+        });
+        setSelectedRouteId((prev) => prev ?? msg.id);
+      } else if (msg.type === 'done') {
+        setOptimizing(false);
+      }
+    };
+    workerRef.current = worker;
+    return () => {
+      worker.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
   const generateRoute = async () => {
     setGenError('');
     const from = resolveLocation(depInput, worldPorts);
@@ -322,6 +442,11 @@ export function RouteExplorerPage() {
       return;
     }
     setGenerating(true);
+    // Any earlier optimization run is now stale.
+    const runId = optimizeRunRef.current + 1;
+    optimizeRunRef.current = runId;
+    setRouteResults(null);
+    setSelectedRouteId(null);
     try {
       // Straight line from departure to arrival.
       const built: Waypoint[] = [
@@ -336,6 +461,7 @@ export function RouteExplorerPage() {
           eta: '',
           drift: false,
           isPort: true,
+          legType: chooseLegType(from.lat, from.lon, to.lat, to.lon),
         },
         {
           id: `wp-${Date.now()}-1`,
@@ -353,15 +479,69 @@ export function RouteExplorerPage() {
       setWaypoints(recomputeGeometry(built));
       setSelected([]);
       setPlotMode(false);
+
+      // Kick off the optimizer in the background worker; each land-clean
+      // candidate is streamed back and overlaid on the map as it resolves
+      // (unless a newer run supersedes it), so the UI never freezes.
+      setOptimizing(true);
+      workerRef.current?.postMessage({
+        runId,
+        dep: { lat: from.lat, lon: from.lon },
+        arr: { lat: to.lat, lon: to.lon },
+      });
     } catch (err) {
       setGenError(
         err instanceof Error
           ? err.message
           : t('genFailed', 'Could not generate a route.'),
       );
+      setOptimizing(false);
     } finally {
       setGenerating(false);
     }
+  };
+
+  /** The candidate the user has currently selected, if any. */
+  const selectedRoute =
+    routeResults?.find((r) => r.id === selectedRouteId) ?? null;
+
+  /** Replace the editable waypoints with the selected candidate route. */
+  const applySelectedRoute = () => {
+    const chosen = selectedRoute;
+    if (!chosen || chosen.info.path.length < 2) return;
+    const path = chosen.info.path;
+    const last = path.length - 1;
+    const stamp = Date.now();
+    const built: Waypoint[] = path.map((pt, i) => ({
+      id: `wp-${stamp}-${i}`,
+      name:
+        i === 0
+          ? `${depInput || 'Departure'} (Departure)`
+          : i === last
+            ? `${arrInput || 'Arrival'} (Arrival)`
+            : `${chosen.label} WP ${i}`,
+      lat: decToDM(pt[0], true),
+      lon: decToDM(pt[1], false),
+      course: 0,
+      speed: 12,
+      distanceFromPrev: 0,
+      eta: '',
+      drift: false,
+      isPort: i === 0 || i === last,
+      legType:
+        i === last
+          ? 'rhumb'
+          : chooseLegType(pt[0], pt[1], path[i + 1][0], path[i + 1][1]),
+    }));
+    setWaypoints(recomputeGeometry(built));
+    setSelected([]);
+    setPlotMode(false);
+    // Collapse the chooser and drop the alternative overlays — only the
+    // selected route (now the editable waypoints) remains on the map.
+    optimizeRunRef.current += 1;
+    setRouteResults(null);
+    setSelectedRouteId(null);
+    setOptimizing(false);
   };
 
   /** Waypoints with valid coordinates, mapped to decimal for the map. */
@@ -377,6 +557,7 @@ export function RouteExplorerPage() {
           lon: dmToDec(wp.lon),
           isPort: wp.isPort,
           drift: wp.drift,
+          legType: wp.legType ?? 'rhumb',
           latLabel: wp.lat,
           lonLabel: wp.lon,
           distFromPrev: Math.round(wp.distanceFromPrev),
@@ -906,6 +1087,28 @@ export function RouteExplorerPage() {
                                     {selectedWaypoint.drift ? t('drift', 'Drift') : t('sail', 'Sail')}
                                   </span>
                                 </label>
+                                {waypoints[waypoints.length - 1]?.id !== selectedWaypoint.id && (
+                                  <label className="fv-route__wp-detail-field">
+                                    <span>{t('legToNext', 'Leg to next')}</span>
+                                    <select
+                                      value={selectedWaypoint.legType ?? 'rhumb'}
+                                      onChange={(e) =>
+                                        updateWaypoint(
+                                          selectedWaypoint.id,
+                                          'legType',
+                                          e.target.value as 'rhumb' | 'greatcircle',
+                                        )
+                                      }
+                                    >
+                                      <option value="rhumb">
+                                        {t('rhumbLine', 'Rhumb line (straight)')}
+                                      </option>
+                                      <option value="greatcircle">
+                                        {t('greatCircle', 'Great circle')}
+                                      </option>
+                                    </select>
+                                  </label>
+                                )}
                                 <button
                                   type="button"
                                   className="fv-route__btn fv-route__btn--danger"
@@ -932,12 +1135,95 @@ export function RouteExplorerPage() {
               points={mapPoints}
               plotMode={plotMode}
               selected={selected}
+              routes={(routeResults ?? []).map((r) => ({
+                id: r.id,
+                color: r.color,
+                path: r.info.path,
+              }))}
+              selectedRouteId={selectedRouteId}
               onAddPoint={addPointFromMap}
               onInsertPoint={insertPointFromMap}
               onMovePoint={moveWaypoint}
               onDeletePoint={deletePoint}
             />
-            <WeatherControls />
+            {optimizing && (
+              <div className="fv-route__map-overlay" role="status" aria-live="polite">
+                <div className="fv-route__spinner" aria-hidden="true" />
+                <span className="fv-route__spinner-label">
+                  {t('optimizingRoute', 'Optimizing route…')}
+                </span>
+              </div>
+            )}
+            {!optimizing && routeResults && routeResults.length > 0 && (
+              <div className="fv-route__map-status fv-route__map-status--done" role="status">
+                <div className="fv-route__opt-head">
+                  <i className="fas fa-route" aria-hidden="true" />{' '}
+                  {t('chooseRoute', 'Choose a route')}
+                </div>
+                <div
+                  className="fv-route__opt-choices"
+                  role="radiogroup"
+                  aria-label={t('chooseRoute', 'Choose a route')}
+                >
+                  {routeResults.map((r) => {
+                    const isSel = r.id === selectedRouteId;
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={isSel}
+                        className={`fv-route__opt-choice${
+                          isSel ? ' fv-route__opt-choice--active' : ''
+                        }`}
+                        onClick={() => setSelectedRouteId(r.id)}
+                      >
+                        <span
+                          className="fv-route__opt-swatch"
+                          style={{ borderTopColor: r.color }}
+                        />
+                        <span className="fv-route__opt-choice-main">
+                          <span className="fv-route__opt-choice-label">
+                            {t(`routeVariant.${r.id}`, r.label)}
+                          </span>
+                          <span className="fv-route__opt-choice-desc">
+                            {t(`routeVariant.${r.id}.desc`, r.description)}
+                          </span>
+                        </span>
+                        <span className="fv-route__opt-choice-metrics">
+                          <span>
+                            {Math.round(r.info.distanceNm).toLocaleString()}{' '}
+                            {t('nmUnit', 'NM')}
+                          </span>
+                          <span>
+                            {Math.round(r.info.fuelTons).toLocaleString()}{' '}
+                            {t('fuelTonsUnit', 't fuel')}
+                          </span>
+                          <span
+                            className="fv-route__opt-choice-eta"
+                            title={`${t('eta', 'ETA')}: ${new Date(
+                              Date.now() + transitHours(r.info.distanceNm) * 3600000,
+                            ).toLocaleString()} · ${SERVICE_SPEED_KN} ${t('knots', 'kn')}`}
+                          >
+                            <i className="fas fa-clock" aria-hidden="true" />{' '}
+                            {formatDuration(transitHours(r.info.distanceNm))}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  className="fv-route__opt-apply"
+                  onClick={applySelectedRoute}
+                  disabled={!selectedRoute}
+                >
+                  <i className="fas fa-check" aria-hidden="true" />{' '}
+                  {t('useThisRoute', 'Use this route')}
+                </button>
+              </div>
+            )}
             {plotMode && (
               <div className="fv-route__map-hint">
                 <i className="fas fa-info-circle" aria-hidden="true" />{' '}

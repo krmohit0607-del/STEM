@@ -201,7 +201,7 @@ export function TopNav() {
         <button
           type="button"
           className="fv-topnav__action-button"
-          onClick={todoHandler('Edit current voyage')}
+          onClick={() => navigate('/voyage?edit=1')}
           disabled={!selectedVoyage}
         >
           <i className="fas fa-pen" aria-hidden="true" />

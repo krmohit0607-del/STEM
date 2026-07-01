@@ -8,6 +8,8 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 import { PORT_COORDS } from '../data/fleet';
 import type { Voyage } from '../data/voyages';
 import { LeftSidebar } from './LeftSidebar';
@@ -255,6 +257,8 @@ export function VesselRoutePage() {
                 )}
                 <AreaConstraintsControl position="topright" />
                 <WeatherFieldControl position="topright" />
+                <WeatherPointControl position="topright" />
+                <MapCursorPosition />
               </MapContainer>
             )}
           </div>

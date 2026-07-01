@@ -2559,6 +2559,10 @@ a {
 /* Reusable area-constraints map control (any map). */
 .fv-ac-control {
   background: none;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
 }
 
 /* The control lives in a Leaflet corner; give it spacing and, in the
@@ -2601,7 +2605,9 @@ a {
 }
 
 .fv-ac-control__panel {
-  margin-top: 6px;
+  position: absolute;
+  top: 0;
+  right: calc(100% + 8px);
   min-width: 200px;
   padding: 8px;
   border: 1px solid #2a3447;
@@ -5936,7 +5942,24 @@ select.fv-voyage__input {
   font-family: inherit;
 }
 
+.fv-route__wp-detail-field select {
+  width: 100%;
+  background: #0d1626;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
 .fv-route__wp-detail-field input:focus {
+  outline: none;
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 2px #1f6feb33;
+}
+
+.fv-route__wp-detail-field select:focus {
   outline: none;
   border-color: #58a6ff;
   box-shadow: 0 0 0 2px #1f6feb33;
@@ -5984,6 +6007,221 @@ select.fv-voyage__input {
   font-weight: 600;
   pointer-events: none;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.fv-route__map-status {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(13, 22, 38, 0.92);
+  border: 1px solid #58a6ff;
+  color: #cde3ff;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.fv-route__map-status > i {
+  color: #58a6ff;
+}
+.fv-route__map-status--done {
+  border-color: #2ea043;
+  color: #b8f0c4;
+  top: auto;
+  bottom: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 268px;
+  max-width: calc(100% - 20px);
+  max-height: calc(100% - 20px);
+  overflow-y: auto;
+  pointer-events: auto;
+}
+.fv-route__map-status--done > i {
+  color: #2ea043;
+}
+.fv-route__opt-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.fv-route__opt-head > i {
+  color: #2ea043;
+}
+.fv-route__opt-metrics {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #e8f6ec;
+}
+.fv-route__opt-metrics > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+.fv-route__opt-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: #f0c98a;
+  white-space: normal;
+}
+.fv-route__opt-note > i {
+  color: #e0a106;
+  margin-top: 1px;
+}
+.fv-route__opt-note--clear {
+  color: #b8f0c4;
+}
+.fv-route__opt-note--clear > i {
+  color: #2ea043;
+}
+/* Candidate-route chooser shown in the map "done" badge. */
+.fv-route__opt-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.fv-route__opt-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.fv-route__opt-choice:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.fv-route__opt-choice--active {
+  border-color: #2ea043;
+  background: rgba(46, 160, 67, 0.14);
+}
+.fv-route__opt-choice-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.fv-route__opt-choice-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #e8f6ec;
+}
+.fv-route__opt-choice-desc {
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: #9fb4c8;
+  white-space: normal;
+}
+.fv-route__opt-choice-metrics {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #cfe1f5;
+  flex: none;
+}
+.fv-route__opt-choice-eta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #f0c98a;
+}
+.fv-route__opt-choice-eta > i {
+  font-size: 9px;
+}
+.fv-route__opt-apply {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 7px;
+  background: #2ea043;
+  color: #06210d;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.fv-route__opt-apply:hover:not(:disabled) {
+  background: #37c052;
+}
+.fv-route__opt-apply:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.fv-route__opt-swatch {
+  width: 18px;
+  height: 0;
+  flex: none;
+  border-top-width: 3px;
+  border-top-style: solid;
+  border-top-color: currentColor;
+}
+
+/* Centered rotating-circle overlay shown while the optimizer runs. */
+.fv-route__map-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(6, 12, 22, 0.35);
+  backdrop-filter: blur(1px);
+  pointer-events: none;
+}
+.fv-route__spinner {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 5px solid rgba(88, 166, 255, 0.25);
+  border-top-color: #58a6ff;
+  animation: fv-route-spin 0.8s linear infinite;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.fv-route__spinner-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cde3ff;
+  background: rgba(13, 22, 38, 0.92);
+  border: 1px solid #58a6ff;
+  padding: 5px 12px;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+@keyframes fv-route-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .fv-route-map__pin-wrap {
@@ -8668,6 +8906,7 @@ select.fv-voyage__input {
   flex-direction: column;
   align-items: flex-end;
   gap: 6px;
+  position: relative;
 }
 .fv-wf-control__btn {
   width: 34px;
@@ -8692,6 +8931,9 @@ select.fv-voyage__input {
   color: #fff;
 }
 .fv-wf-control__panel {
+  position: absolute;
+  top: 0;
+  right: calc(100% + 8px);
   width: 230px;
   background: #0f1726;
   border: 1px solid #2a3447;
@@ -8815,4 +9057,218 @@ select.fv-voyage__input {
 }
 .fv-light .fv-wf-control__legend-title {
   color: #36404f;
+}
+
+/* --- Weather-at-a-point control + popup ------------------------------ */
+.leaflet-top.leaflet-right .fv-wp-control {
+  margin-top: 144px;
+}
+.leaflet-right .fv-wp-control {
+  margin-right: 12px;
+}
+
+/* When several of these icon controls share the top-right corner (e.g. the
+   main map stacks area-constraints + weather-field + weather-point), their
+   individual top offsets would compound and spread the buttons far apart.
+   Collapse the offset to a small gap whenever one control immediately
+   follows another so they form a tidy vertical stack. The first control in
+   the corner keeps its offset to clear the map's floating top bar. */
+.leaflet-top.leaflet-right .fv-ac-control + .fv-wf-control,
+.leaflet-top.leaflet-right .fv-ac-control + .fv-wp-control,
+.leaflet-top.leaflet-right .fv-wf-control + .fv-ac-control,
+.leaflet-top.leaflet-right .fv-wf-control + .fv-wp-control,
+.leaflet-top.leaflet-right .fv-wp-control + .fv-ac-control,
+.leaflet-top.leaflet-right .fv-wp-control + .fv-wf-control {
+  margin-top: 8px;
+}
+.fv-wp-control__btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #11192a;
+  border: 1px solid #2a3447;
+  color: #c4cedd;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.fv-wp-control__btn:hover {
+  color: #fff;
+  border-color: #3a4a66;
+}
+.fv-wp-control__btn--on {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+}
+.fv-wp-popup .leaflet-popup-content {
+  margin: 0;
+  width: 230px !important;
+}
+.fv-wp-popup .leaflet-popup-content-wrapper {
+  background: #0f1726;
+  color: #c4cedd;
+  border: 1px solid #2a3447;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.fv-wp-popup .leaflet-popup-tip {
+  background: #0f1726;
+  border: 1px solid #2a3447;
+}
+.fv-wp-popup a.leaflet-popup-close-button {
+  color: #8a97a8;
+}
+.fv-wp-popup__inner {
+  padding: 10px;
+}
+.fv-wp-popup__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e6edf3;
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid #1f2a3c;
+}
+.fv-wp-popup__head > i {
+  color: #58a6ff;
+}
+.fv-wp-popup__msg {
+  font-size: 12px;
+  color: #8a97a8;
+  padding: 4px 2px;
+}
+.fv-wp-popup__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fv-wp-popup__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 12px;
+}
+.fv-wp-popup__row > i {
+  color: #8a97a8;
+  width: 14px;
+  text-align: center;
+}
+.fv-wp-popup__label {
+  flex: 1 1 auto;
+  color: #c4cedd;
+}
+.fv-wp-popup__value {
+  font-weight: 600;
+  color: #e6edf3;
+  white-space: nowrap;
+}
+.fv-cursorpos {
+  pointer-events: none;
+}
+.fv-cursorpos__box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 11px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #e6edf3;
+  background: rgba(13, 22, 38, 0.82);
+  border: 1px solid #1f2a3c;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+.fv-cursorpos__box > i {
+  color: #58a6ff;
+  font-size: 13px;
+}
+.fv-cursorpos__box--empty {
+  opacity: 0.6;
+}
+.fv-light .fv-cursorpos__box {
+  color: #1b2330;
+  background: rgba(255, 255, 255, 0.92);
+  border-color: #d6deea;
+}
+.fv-wp-popup__foot {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #1f2a3c;
+  display: flex;
+  justify-content: center;
+}
+.fv-wp-popup__download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cfe0ff;
+  background: #12233d;
+  border: 1px solid #1f4e8a;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.fv-wp-popup__download:hover:not(:disabled) {
+  background: #173763;
+  border-color: #2a63b0;
+}
+.fv-wp-popup__download:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.fv-wp-popup__download > i {
+  color: #58a6ff;
+}
+.fv-light .fv-wp-control__btn {
+  background: #fff;
+  border-color: #d6deea;
+  color: #36404f;
+}
+.fv-light .fv-wp-control__btn--on {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+}
+.fv-light .fv-wp-popup .leaflet-popup-content-wrapper,
+.fv-light .fv-wp-popup .leaflet-popup-tip {
+  background: #fff;
+  border-color: #d6deea;
+  color: #36404f;
+}
+.fv-light .fv-wp-popup__head {
+  color: #1b2330;
+  border-bottom-color: #e3e9f2;
+}
+.fv-light .fv-wp-popup__label {
+  color: #36404f;
+}
+.fv-light .fv-wp-popup__value {
+  color: #1b2330;
+}
+.fv-light .fv-wp-popup__foot {
+  border-top-color: #e3e9f2;
+}
+.fv-light .fv-wp-popup__download {
+  color: #1f6feb;
+  background: #eef4ff;
+  border-color: #b9d2f7;
+}
+.fv-light .fv-wp-popup__download:hover:not(:disabled) {
+  background: #e0ecff;
+  border-color: #7fb0f0;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { Fragment, useEffect, useRef } from 'react';
 import {
   MapContainer,
   Marker,
@@ -10,9 +10,67 @@ import {
 } from 'react-leaflet';
 import L, { type LatLngExpression } from 'leaflet';
 
-import { WeatherOverlay } from './WeatherOverlay';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
+
+const toRad = (d: number) => (d * Math.PI) / 180;
+const toDeg = (r: number) => (r * 180) / Math.PI;
+
+/**
+ * Positions for one leg between two waypoints. A rhumb-line leg is a single
+ * straight segment (a loxodrome plots straight on this Mercator map); a
+ * great-circle leg is densified into an arc that visibly curves poleward.
+ * Longitudes are kept continuous across the antimeridian so the arc never
+ * jumps horizontally across the map.
+ */
+function legPositions(
+  a: { lat: number; lon: number },
+  b: { lat: number; lon: number },
+  legType: 'rhumb' | 'greatcircle',
+): LatLngExpression[] {
+  if (legType !== 'greatcircle') return [[a.lat, a.lon], [b.lat, b.lon]];
+
+  const φ1 = toRad(a.lat);
+  const λ1 = toRad(a.lon);
+  const φ2 = toRad(b.lat);
+  let lon2 = b.lon;
+  while (lon2 - a.lon > 180) lon2 -= 360;
+  while (lon2 - a.lon < -180) lon2 += 360;
+  const λ2 = toRad(lon2);
+  const d =
+    2 *
+    Math.asin(
+      Math.min(
+        1,
+        Math.sqrt(
+          Math.sin((φ2 - φ1) / 2) ** 2 +
+            Math.cos(φ1) * Math.cos(φ2) * Math.sin((λ2 - λ1) / 2) ** 2,
+        ),
+      ),
+    );
+  if (d === 0 || !Number.isFinite(d)) return [[a.lat, a.lon], [b.lat, b.lon]];
+
+  const segs = Math.max(8, Math.min(128, Math.round((toDeg(d) / 180) * 96)));
+  const out: LatLngExpression[] = [];
+  let prevLon = a.lon;
+  for (let i = 0; i <= segs; i += 1) {
+    const f = i / segs;
+    const A = Math.sin((1 - f) * d) / Math.sin(d);
+    const B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+    const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+    const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+    const lat = toDeg(Math.atan2(z, Math.hypot(x, y)));
+    let lon = toDeg(Math.atan2(y, x));
+    while (lon - prevLon > 180) lon -= 360;
+    while (lon - prevLon < -180) lon += 360;
+    prevLon = lon;
+    out.push([lat, lon]);
+  }
+  return out;
+}
 
 /**
  * Interactive route editor map.
@@ -34,6 +92,11 @@ export interface EditorPoint {
   lon: number;
   isPort: boolean;
   drift: boolean;
+  /**
+   * How the leg departing this point (to the next one) is drawn on the map:
+   * `'rhumb'` = straight segment, `'greatcircle'` = curved great-circle arc.
+   */
+  legType?: 'rhumb' | 'greatcircle';
   /** Pre-formatted lat string, e.g. `01° 16.0' N`. */
   latLabel: string;
   /** Pre-formatted lon string, e.g. `103° 50.0' E`. */
@@ -48,6 +111,10 @@ interface RouteEditorMapProps {
   points: EditorPoint[];
   plotMode: boolean;
   selected: string[];
+  /** Candidate optimized routes to overlay, each with its own colour. */
+  routes?: Array<{ id: string; color: string; path: Array<[number, number]> }>;
+  /** Which candidate route is currently selected (drawn emphasised). */
+  selectedRouteId?: string | null;
   onAddPoint: (lat: number, lon: number) => void;
   onInsertPoint: (afterIndex: number, lat: number, lon: number) => void;
   onMovePoint: (id: string, lat: number, lon: number) => void;
@@ -133,13 +200,13 @@ export function RouteEditorMap({
   points,
   plotMode,
   selected,
+  routes = [],
+  selectedRouteId,
   onAddPoint,
   onInsertPoint,
   onMovePoint,
   onDeletePoint,
 }: RouteEditorMapProps) {
-  const line: LatLngExpression[] = points.map((p) => [p.lat, p.lon]);
-
   return (
     <MapContainer
       className="fv-route-map__canvas"
@@ -163,38 +230,63 @@ export function RouteEditorMap({
       <ClickCapture plotMode={plotMode} onAddPoint={onAddPoint} />
       <FitBounds points={points} />
 
-      <WeatherOverlay points={points.map((p) => [p.lat, p.lon])} maxPoints={6} />
-
-      {/* Each segment is clickable so a waypoint can be inserted between
-          its two endpoints. A wide transparent line gives a forgiving
-          click target on top of the thin visible line. */}
+      {/* Each leg is drawn as a straight rhumb line or a curved great-circle
+          arc depending on its originating waypoint's `legType`. A wide
+          transparent line on top gives a forgiving click target for inserting
+          a new waypoint between the two endpoints. */}
       {points.slice(0, -1).map((p, i) => {
-        const seg: LatLngExpression[] = [
+        const next = points[i + 1];
+        const visible = legPositions(p, next, p.legType ?? 'rhumb');
+        const hit: LatLngExpression[] = [
           [p.lat, p.lon],
-          [points[i + 1].lat, points[i + 1].lon],
+          [next.lat, next.lon],
         ];
         return (
-          <Polyline
-            key={`seg-${p.id}`}
-            positions={seg}
-            pathOptions={{ color: '#58a6ff', weight: 12, opacity: 0 }}
-            eventHandlers={{
-              click: (e) => {
-                if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
-                onInsertPoint(i, e.latlng.lat, e.latlng.lng);
-              },
-            }}
-          />
+          <Fragment key={`seg-${p.id}`}>
+            <Polyline
+              positions={visible}
+              pathOptions={{ color: '#58a6ff', weight: 3 }}
+              interactive={false}
+            />
+            <Polyline
+              positions={hit}
+              pathOptions={{ color: '#58a6ff', weight: 12, opacity: 0 }}
+              eventHandlers={{
+                click: (e) => {
+                  if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+                  onInsertPoint(i, e.latlng.lat, e.latlng.lng);
+                },
+              }}
+            />
+          </Fragment>
         );
       })}
 
-      {line.length >= 2 && (
-        <Polyline
-          positions={line}
-          pathOptions={{ color: '#58a6ff', weight: 3 }}
-          interactive={false}
-        />
-      )}
+      {/* Candidate optimized routes. The selected one is drawn last (on top),
+          solid and emphasised; the rest are thinner, dashed and translucent. */}
+      {[...routes]
+        .filter((r) => r.path.length >= 2)
+        .sort((a, b) => {
+          const aSel = a.id === selectedRouteId ? 1 : 0;
+          const bSel = b.id === selectedRouteId ? 1 : 0;
+          return aSel - bSel;
+        })
+        .map((r) => {
+          const isSel = r.id === selectedRouteId;
+          return (
+            <Polyline
+              key={r.id}
+              positions={r.path as LatLngExpression[]}
+              pathOptions={{
+                color: r.color,
+                weight: isSel ? 5 : 3,
+                opacity: isSel ? 1 : 0.55,
+                dashArray: isSel ? undefined : '6 7',
+              }}
+              interactive={false}
+            />
+          );
+        })}
 
       {points.map((p, idx) => (
         <Marker
@@ -249,6 +341,8 @@ export function RouteEditorMap({
       ))}
       <AreaConstraintsControl position="topright" />
       <WeatherFieldControl position="topright" />
+      <WeatherPointControl position="topright" />
+      <MapCursorPosition />
     </MapContainer>
   );
 }

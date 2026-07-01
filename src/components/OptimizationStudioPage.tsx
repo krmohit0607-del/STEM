@@ -11,6 +11,8 @@ import L from 'leaflet';
 
 import { useTheme } from '../theme';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 import {
   getOptimizationData,
   type OptimizationData,
@@ -354,6 +356,8 @@ export function OptimizationStudioPage() {
               crossOrigin="anonymous"
             />
             <WeatherFieldControl position="topright" />
+            <WeatherPointControl position="topright" />
+            <MapCursorPosition />
             {data.routeOptions.map((r) => {
               const isSel = r.id === selectedRouteId;
               return (

@@ -10,10 +10,10 @@ import L, { type LatLngExpression } from 'leaflet';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
-import { WeatherOverlay } from './WeatherOverlay';
-import { WeatherControls } from './WeatherControls';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 
 /**
  * Route Simulator page — `/route-simulator`.
@@ -775,15 +775,11 @@ function RouteMap({
           );
         })}
 
-        <WeatherOverlay
-          points={routes.map((route) => samplePath(route.path, progressById[route.id] ?? 0))}
-          maxPoints={6}
-        />
         <AreaConstraintsControl position="topright" />
         <WeatherFieldControl position="topright" />
+        <WeatherPointControl position="topright" />
+        <MapCursorPosition />
       </MapContainer>
-
-      <WeatherControls />
 
       <div className="fv-route__map-legend">
         {routes.map((route) => {

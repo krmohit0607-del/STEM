@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
@@ -52,6 +53,8 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
   };
 
   const isCreate = mode === 'create';
+  const [searchParams] = useSearchParams();
+  const startEdit = searchParams.get('edit') === '1';
   const selectedVoyage = useSelectedVoyage();
   const selectedId = selectedVoyage?.id;
 
@@ -62,7 +65,7 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
 
   const [view, setView] = useState<VoyageView>(initialView);
   const [editing, setEditing] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(CARD_IDS.map((id) => [id, isCreate])),
+    Object.fromEntries(CARD_IDS.map((id) => [id, isCreate || startEdit])),
   );
 
   // Snapshot of the view captured when edit mode is first entered, so the audit
@@ -73,10 +76,10 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
   useEffect(() => {
     const seeded = isCreate || !selectedVoyage ? buildEmptyView() : buildView(selectedVoyage);
     setView(seeded);
-    setEditing(Object.fromEntries(CARD_IDS.map((id) => [id, isCreate])));
-    editSnapshotRef.current = isCreate ? seeded : null;
+    setEditing(Object.fromEntries(CARD_IDS.map((id) => [id, isCreate || startEdit])));
+    editSnapshotRef.current = isCreate || startEdit ? seeded : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, isCreate]);
+  }, [selectedId, isCreate, startEdit]);
 
   const ed = (id: string) => !!editing[id];
   const captureSnapshot = () => {

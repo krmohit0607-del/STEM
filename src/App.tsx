@@ -1,7 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
 
 import { FleetViewProvider } from './context/FleetViewContext';
-import { WeatherProvider } from './context/WeatherContext';
 import { LocalizationProvider } from './i18n/LocalizationProvider';
 import { Layout } from './components/Layout';
 import { FleetListPage } from './components/FleetListPage';
@@ -17,7 +16,6 @@ import { EmailDetailsPage } from './components/EmailDetailsPage';
 import { PassageDetailsPage } from './components/PassageDetailsPage';
 import { CreateVoyagePage } from './components/CreateVoyagePage';
 import { RouteExplorerPage } from './components/RouteExplorerPage';
-import { RouteEditorPage } from './components/RouteEditorPage';
 
 import { RouteSimulatorPage } from './components/RouteSimulatorPage';
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
@@ -47,7 +45,6 @@ export function App() {
   return (
     <FleetViewProvider>
       <LocalizationProvider>
-        <WeatherProvider>
           <BrowserRouter>
             <Routes>
               <Route path="/" element={<HomeRoute />} />
@@ -156,14 +153,6 @@ export function App() {
               }
             />
             <Route
-              path="/route-editor"
-              element={
-                <Layout>
-                  <RouteEditorPage />
-                </Layout>
-              }
-            />
-            <Route
               path="/route-simulator"
               element={
                 <Layout>
@@ -176,7 +165,6 @@ export function App() {
             <Route path="*" element={<Navigate to="/main" replace />} />
           </Routes>
         </BrowserRouter>
-        </WeatherProvider>
       </LocalizationProvider>
     </FleetViewProvider>
   );

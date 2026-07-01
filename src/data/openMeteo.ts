@@ -169,3 +169,151 @@ export function sampleLiveField(
     at(r1, c1) * tx * ty;
   return { magnitude, directionDeg: g.dir[r0 * g.cols + c0] };
 }
+
+/** Live value of a single weather factor at one point. */
+export interface PointFactor {
+  id: string;
+  /** Magnitude in the factor's display unit. */
+  magnitude: number;
+  /** Compass bearing (deg) for vector factors, or `null`. */
+  directionDeg: number | null;
+}
+
+/**
+ * Fetch the current value of every supported weather factor at a single
+ * lat/lon. Issues one request to the atmosphere API and one to the ocean
+ * API (each covering several factors) and merges the results, keyed by
+ * factor id. Factors whose request fails are simply omitted.
+ */
+export async function fetchPointWeather(
+  lat: number,
+  lon: number,
+): Promise<Record<string, PointFactor>> {
+  // Collect the `current` variables needed per API.
+  const varsByApi: Record<'forecast' | 'marine', Set<string>> = {
+    forecast: new Set(),
+    marine: new Set(),
+  };
+  for (const q of Object.values(FACTOR_QUERY)) {
+    varsByApi[q.api].add(q.magVar);
+    if (q.dirVar) varsByApi[q.api].add(q.dirVar);
+  }
+
+  const bases: Record<'forecast' | 'marine', string> = {
+    forecast: 'https://api.open-meteo.com/v1/forecast',
+    marine: 'https://marine-api.open-meteo.com/v1/marine',
+  };
+
+  const currents: Partial<Record<'forecast' | 'marine', Record<string, number>>> = {};
+  await Promise.all(
+    (['forecast', 'marine'] as const).map(async (api) => {
+      const vars = [...varsByApi[api]];
+      if (!vars.length) return;
+      const url =
+        `${bases[api]}?latitude=${lat}&longitude=${lon}` +
+        `&current=${vars.join(',')}&wind_speed_unit=kn&timezone=UTC`;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const json = (await res.json()) as { current?: Record<string, number> };
+        currents[api] = json.current ?? {};
+      } catch {
+        /* ignore — factor simply omitted below */
+      }
+    }),
+  );
+
+  const out: Record<string, PointFactor> = {};
+  for (const [id, q] of Object.entries(FACTOR_QUERY)) {
+    const cur = currents[q.api];
+    if (!cur) continue;
+    const rawMag = Number(cur[q.magVar]);
+    if (!Number.isFinite(rawMag)) continue;
+    const dir = q.dirVar ? Number(cur[q.dirVar]) : NaN;
+    out[id] = {
+      id,
+      magnitude: q.scale ? q.scale(rawMag) : rawMag,
+      directionDeg: Number.isFinite(dir) ? dir : null,
+    };
+  }
+  return out;
+}
+
+/** One hour of the forecast at a point: a timestamp plus each factor's value. */
+export interface ForecastRow {
+  /** ISO timestamp (UTC). */
+  time: string;
+  values: Record<string, PointFactor>;
+}
+
+/**
+ * Fetch the multi-day hourly forecast of every supported factor at a single
+ * lat/lon. Issues one request to the atmosphere API and one to the ocean API
+ * and merges their hourly series by index into per-hour rows suitable for
+ * export (e.g. CSV download).
+ */
+export async function fetchPointForecast(
+  lat: number,
+  lon: number,
+): Promise<ForecastRow[]> {
+  const varsByApi: Record<'forecast' | 'marine', Set<string>> = {
+    forecast: new Set(),
+    marine: new Set(),
+  };
+  for (const q of Object.values(FACTOR_QUERY)) {
+    varsByApi[q.api].add(q.magVar);
+    if (q.dirVar) varsByApi[q.api].add(q.dirVar);
+  }
+
+  const bases: Record<'forecast' | 'marine', string> = {
+    forecast: 'https://api.open-meteo.com/v1/forecast',
+    marine: 'https://marine-api.open-meteo.com/v1/marine',
+  };
+
+  const hourlyByApi: Partial<
+    Record<'forecast' | 'marine', Record<string, Array<number | string>>>
+  > = {};
+  await Promise.all(
+    (['forecast', 'marine'] as const).map(async (api) => {
+      const vars = [...varsByApi[api]];
+      if (!vars.length) return;
+      const url =
+        `${bases[api]}?latitude=${lat}&longitude=${lon}` +
+        `&hourly=${vars.join(',')}&wind_speed_unit=kn&timezone=UTC&forecast_days=7`;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          hourly?: Record<string, Array<number | string>>;
+        };
+        hourlyByApi[api] = json.hourly ?? {};
+      } catch {
+        /* ignore — factor simply omitted below */
+      }
+    }),
+  );
+
+  // Both APIs return hourly series on the same UTC clock, so we can index them
+  // together. Prefer the atmosphere time axis, falling back to the ocean one.
+  const times =
+    (hourlyByApi.forecast?.time as string[] | undefined) ??
+    (hourlyByApi.marine?.time as string[] | undefined) ??
+    [];
+
+  return times.map((time, idx) => {
+    const values: Record<string, PointFactor> = {};
+    for (const [id, q] of Object.entries(FACTOR_QUERY)) {
+      const h = hourlyByApi[q.api];
+      if (!h) continue;
+      const rawMag = Number((h[q.magVar] as number[] | undefined)?.[idx]);
+      if (!Number.isFinite(rawMag)) continue;
+      const dir = q.dirVar ? Number((h[q.dirVar] as number[] | undefined)?.[idx]) : NaN;
+      values[id] = {
+        id,
+        magnitude: q.scale ? q.scale(rawMag) : rawMag,
+        directionDeg: Number.isFinite(dir) ? dir : null,
+      };
+    }
+    return { time: String(time), values };
+  });
+}

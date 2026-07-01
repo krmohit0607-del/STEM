@@ -5,6 +5,8 @@ import L, { type LatLngBoundsLiteral, type Map as LeafletMap } from 'leaflet';
 import { useL } from '../i18n/LocalizationProvider';
 import { useTheme } from '../theme';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 import {
   AreaConstraintsLayer,
   ZONE_STYLES,
@@ -355,6 +357,8 @@ export function AreaConstraintsPage() {
             crossOrigin="anonymous"
           />
           <WeatherFieldControl position="topright" />
+          <WeatherPointControl position="topright" />
+          <MapCursorPosition />
           <AreaConstraintsLayer
             constraints={data}
             selectedId={selectedId ?? undefined}

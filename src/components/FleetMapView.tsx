@@ -6,6 +6,8 @@ import { PORT_COORDS } from '../data/fleet';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 
 /**
  * Fleet Map View — rendered when the Fleet List View toggle is set to
@@ -207,6 +209,8 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
         ))}
         <AreaConstraintsControl position="topright" />
         <WeatherFieldControl position="topright" />
+        <WeatherPointControl position="topright" />
+        <MapCursorPosition />
       </MapContainer>
     </div>
   );

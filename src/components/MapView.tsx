@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { MapContainer, TileLayer } from 'react-leaflet';
 import type { LatLngBoundsLiteral, Map as LeafletMap } from 'leaflet';
 
-import { WeatherOverlay } from './WeatherOverlay';
-import { WeatherControls } from './WeatherControls';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 
 /**
  * Leaflet map with floating right-side control bar.
@@ -238,10 +238,9 @@ export function MapView() {
         ))}
         <AreaConstraintsControl position="topright" />
         <WeatherFieldControl position="topright" />
-        <WeatherOverlay />
+        <WeatherPointControl position="topright" />
+        <MapCursorPosition />
       </MapContainer>
-
-      <WeatherControls />
 
       <div className="fv-map-controls" ref={controlsRef}>
         <div className="fv-map-controls__bar">

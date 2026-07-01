@@ -8,10 +8,10 @@ import {
   STUB_ROWS,
   getRoutePath,
 } from '../data/fleet';
-import { WeatherOverlay } from './WeatherOverlay';
-import { WeatherControls } from './WeatherControls';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { WeatherPointControl } from './WeatherPointControl';
+import { MapCursorPosition } from './MapCursorPosition';
 
 /**
  * Voyage Overview Map — rendered on `/?voyage=ID`.
@@ -310,12 +310,11 @@ function VoyageOverviewInner({ row }: InnerProps) {
             </Marker>
           )}
 
-          <WeatherOverlay points={path as Array<[number, number]>} maxPoints={6} />
           <AreaConstraintsControl position="topright" />
           <WeatherFieldControl position="topright" />
+          <WeatherPointControl position="topright" />
+          <MapCursorPosition />
         </MapContainer>
-
-        <WeatherControls />
       </div>
     </div>
   );
