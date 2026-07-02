@@ -11,6 +11,7 @@ import {
 import {
   ensureLiveData,
   sampleLiveField,
+  getLiveDataTime,
   type LatLngBounds,
 } from '../data/openMeteo';
 import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
@@ -710,6 +711,17 @@ export function RouteExplorerPage() {
   /** True once real Open-Meteo data is available for the current factor. */
   const simLiveActive = isLiveLoaded(simBounds, simFactorDef.liveId, 0);
 
+  /** Base UTC time the live weather data represents (voyage departure). */
+  const simBaseDate = useMemo(() => {
+    void liveVersion; // recompute once the grid loads
+    if (!simLiveActive || !simBounds) return null;
+    const iso = getLiveDataTime(simFactorDef.liveId, simBounds, 0);
+    if (!iso) return null;
+    // Open-Meteo returns local-to-UTC strings like "2026-07-02T00:00".
+    const d = new Date(`${iso}Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }, [simLiveActive, simBounds, simFactorDef.liveId, liveVersion]);
+
   /**
    * Weather factor sampled along every route, expressed against voyage time
    * (hours from departure) so the chart compares what each vessel experiences
@@ -778,6 +790,21 @@ export function RouteExplorerPage() {
 
   /** Elapsed voyage hours represented by the current clock position. */
   const simElapsedHours = simClock * simMaxHours;
+
+  /**
+   * Projected UTC date/time at the current slider position: the base live-data
+   * time advanced by the elapsed voyage hours, so it updates as the slider
+   * moves. Falls back to the base "valid" time when the slider is at departure.
+   */
+  const simForecastTime = useMemo(() => {
+    if (!simBaseDate) return null;
+    const d = new Date(simBaseDate.getTime() + simElapsedHours * 3600_000);
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'UTC',
+    }).format(d);
+  }, [simBaseDate, simElapsedHours]);
 
   /**
    * Live per-route weather factor at the position each vessel currently
@@ -1450,6 +1477,7 @@ export function RouteExplorerPage() {
           </aside>
           </div>
 
+          <div className="fv-route__map-col">
           <div className="fv-route__map-wrap">
             <RouteEditorMap
               points={mapPoints}
@@ -1476,7 +1504,87 @@ export function RouteExplorerPage() {
                 </span>
               </div>
             )}
-            {showSimulator && (
+            {!optimizing && routeResults && routeResults.length > 0 && (
+              <div className="fv-route__map-status fv-route__map-status--done" role="status">
+                <div className="fv-route__opt-head">
+                  <i className="fas fa-route" aria-hidden="true" />{' '}
+                  {t('chooseRoute', 'Choose a route')}
+                </div>
+                <div
+                  className="fv-route__opt-choices"
+                  role="radiogroup"
+                  aria-label={t('chooseRoute', 'Choose a route')}
+                >
+                  {routeResults.map((r) => {
+                    const isSel = r.id === selectedRouteId;
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={isSel}
+                        className={`fv-route__opt-choice${
+                          isSel ? ' fv-route__opt-choice--active' : ''
+                        }`}
+                        onClick={() => setSelectedRouteId(r.id)}
+                      >
+                        <span
+                          className="fv-route__opt-swatch"
+                          style={{ borderTopColor: r.color }}
+                        />
+                        <span className="fv-route__opt-choice-main">
+                          <span className="fv-route__opt-choice-label">
+                            {t(`routeVariant.${r.id}`, r.label)}
+                          </span>
+                          <span className="fv-route__opt-choice-desc">
+                            {t(`routeVariant.${r.id}.desc`, r.description)}
+                          </span>
+                        </span>
+                        <span className="fv-route__opt-choice-metrics">
+                          <span>
+                            {Math.round(r.info.distanceNm).toLocaleString()}{' '}
+                            {t('nmUnit', 'NM')}
+                          </span>
+                          <span>
+                            {Math.round(r.info.fuelTons).toLocaleString()}{' '}
+                            {t('fuelTonsUnit', 't fuel')}
+                          </span>
+                          <span
+                            className="fv-route__opt-choice-eta"
+                            title={`${t('eta', 'ETA')}: ${new Date(
+                              Date.now() + transitHours(r.info.distanceNm) * 3600000,
+                            ).toLocaleString()} · ${SERVICE_SPEED_KN} ${t('knots', 'kn')}`}
+                          >
+                            <i className="fas fa-clock" aria-hidden="true" />{' '}
+                            {formatDuration(transitHours(r.info.distanceNm))}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  className="fv-route__opt-apply"
+                  onClick={applySelectedRoute}
+                  disabled={!selectedRoute}
+                >
+                  <i className="fas fa-check" aria-hidden="true" />{' '}
+                  {t('useThisRoute', 'Use this route')}
+                </button>
+              </div>
+            )}
+            {plotMode && (
+              <div className="fv-route__map-hint">
+                <i className="fas fa-info-circle" aria-hidden="true" />{' '}
+                {t(
+                  'plotBanner',
+                  'Click empty sea to add a waypoint at the end, or click the route line to insert one in between. Drag pins to adjust.',
+                )}
+              </div>
+            )}
+          </div>
+          {showSimulator && (
               <div
                 className={`fv-route__sim-panel${simMinimized ? ' fv-route__sim-panel--min' : ''}`}
                 role="group"
@@ -1609,6 +1717,15 @@ export function RouteExplorerPage() {
                           ? t('live', 'Live')
                           : t('sampleData', 'Sample')}
                       </span>
+                      {simForecastTime && (
+                        <span
+                          className="fv-route__sim-time"
+                          title={t('forecastTimeHint', 'Projected date/time at the current position (UTC)')}
+                        >
+                          <i className="fas fa-calendar-day" aria-hidden="true" />{' '}
+                          {simForecastTime} {t('utc', 'UTC')}
+                        </span>
+                      )}
                     </span>
                     <span className="fv-route__sim-chart-ymax">
                       {t('max', 'max')} {simWeather.maxW.toFixed(1)} {simFactorDef.unit}
@@ -1761,86 +1878,7 @@ export function RouteExplorerPage() {
                 </>
                 )}
               </div>
-            )}
-            {!optimizing && routeResults && routeResults.length > 0 && (
-              <div className="fv-route__map-status fv-route__map-status--done" role="status">
-                <div className="fv-route__opt-head">
-                  <i className="fas fa-route" aria-hidden="true" />{' '}
-                  {t('chooseRoute', 'Choose a route')}
-                </div>
-                <div
-                  className="fv-route__opt-choices"
-                  role="radiogroup"
-                  aria-label={t('chooseRoute', 'Choose a route')}
-                >
-                  {routeResults.map((r) => {
-                    const isSel = r.id === selectedRouteId;
-                    return (
-                      <button
-                        key={r.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={isSel}
-                        className={`fv-route__opt-choice${
-                          isSel ? ' fv-route__opt-choice--active' : ''
-                        }`}
-                        onClick={() => setSelectedRouteId(r.id)}
-                      >
-                        <span
-                          className="fv-route__opt-swatch"
-                          style={{ borderTopColor: r.color }}
-                        />
-                        <span className="fv-route__opt-choice-main">
-                          <span className="fv-route__opt-choice-label">
-                            {t(`routeVariant.${r.id}`, r.label)}
-                          </span>
-                          <span className="fv-route__opt-choice-desc">
-                            {t(`routeVariant.${r.id}.desc`, r.description)}
-                          </span>
-                        </span>
-                        <span className="fv-route__opt-choice-metrics">
-                          <span>
-                            {Math.round(r.info.distanceNm).toLocaleString()}{' '}
-                            {t('nmUnit', 'NM')}
-                          </span>
-                          <span>
-                            {Math.round(r.info.fuelTons).toLocaleString()}{' '}
-                            {t('fuelTonsUnit', 't fuel')}
-                          </span>
-                          <span
-                            className="fv-route__opt-choice-eta"
-                            title={`${t('eta', 'ETA')}: ${new Date(
-                              Date.now() + transitHours(r.info.distanceNm) * 3600000,
-                            ).toLocaleString()} · ${SERVICE_SPEED_KN} ${t('knots', 'kn')}`}
-                          >
-                            <i className="fas fa-clock" aria-hidden="true" />{' '}
-                            {formatDuration(transitHours(r.info.distanceNm))}
-                          </span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <button
-                  type="button"
-                  className="fv-route__opt-apply"
-                  onClick={applySelectedRoute}
-                  disabled={!selectedRoute}
-                >
-                  <i className="fas fa-check" aria-hidden="true" />{' '}
-                  {t('useThisRoute', 'Use this route')}
-                </button>
-              </div>
-            )}
-            {plotMode && (
-              <div className="fv-route__map-hint">
-                <i className="fas fa-info-circle" aria-hidden="true" />{' '}
-                {t(
-                  'plotBanner',
-                  'Click empty sea to add a waypoint at the end, or click the route line to insert one in between. Drag pins to adjust.',
-                )}
-              </div>
-            )}
+          )}
           </div>
         </div>
 

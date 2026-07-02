@@ -65,6 +65,8 @@ interface Grid {
   rows: number;
   mag: number[];
   dir: number[];
+  /** ISO timestamp (UTC) of the sampled forecast hour, if reported. */
+  time: string | null;
 }
 
 const cache = new Map<string, Grid>();
@@ -109,14 +111,21 @@ async function fetchGrid(factorId: string, b: LatLngBounds, hour: number): Promi
 
   const mag: number[] = [];
   const dir: number[] = [];
+  let time: string | null = null;
   for (const cell of list) {
-    const hr = (cell as { hourly?: Record<string, number[]> }).hourly ?? {};
-    const idx = Math.min(hour, (hr[q.magVar]?.length ?? 1) - 1);
-    const raw = Number(hr[q.magVar]?.[idx]);
+    const hr = (cell as { hourly?: Record<string, number[] | string[]> }).hourly ?? {};
+    const magArr = hr[q.magVar] as number[] | undefined;
+    const idx = Math.min(hour, (magArr?.length ?? 1) - 1);
+    const raw = Number(magArr?.[idx]);
     mag.push(q.scale ? q.scale(raw || 0) : raw || 0);
-    dir.push(q.dirVar ? Number(hr[q.dirVar]?.[idx]) || 0 : 0);
+    const dirArr = q.dirVar ? (hr[q.dirVar] as number[] | undefined) : undefined;
+    dir.push(q.dirVar ? Number(dirArr?.[idx]) || 0 : 0);
+    if (time == null) {
+      const timeArr = hr.time as string[] | undefined;
+      if (timeArr?.[idx]) time = timeArr[idx];
+    }
   }
-  return { bounds: b, cols: COLS, rows: ROWS, mag, dir };
+  return { bounds: b, cols: COLS, rows: ROWS, mag, dir, time };
 }
 
 /** Kick off (or reuse) a fetch of the grid covering `b` for the factor. */
@@ -168,6 +177,18 @@ export function sampleLiveField(
     at(r1, c0) * (1 - tx) * ty +
     at(r1, c1) * tx * ty;
   return { magnitude, directionDeg: g.dir[r0 * g.cols + c0] };
+}
+
+/**
+ * ISO timestamp (UTC) the cached grid represents for the given factor/bounds,
+ * or `null` if the grid isn't loaded yet or reported no time.
+ */
+export function getLiveDataTime(
+  factorId: string,
+  b: LatLngBounds,
+  hour: number,
+): string | null {
+  return cache.get(keyFor(factorId, b, hour))?.time ?? null;
 }
 
 /** Live value of a single weather factor at one point. */
