@@ -107,6 +107,20 @@ export interface EditorPoint {
   distFromStart: number;
 }
 
+/** An animated vessel marker moving along a candidate route during playback. */
+export interface ShipMarker {
+  id: string;
+  color: string;
+  /** Current `[lat, lon]` position of the ship. */
+  pos: [number, number];
+  /** Primary tooltip line (e.g. the route label). */
+  label: string;
+  /** Secondary tooltip line (e.g. weather factor / progress). */
+  sublabel?: string;
+  /** True when this route is the currently selected one (drawn emphasised). */
+  active?: boolean;
+}
+
 interface RouteEditorMapProps {
   points: EditorPoint[];
   plotMode: boolean;
@@ -115,6 +129,10 @@ interface RouteEditorMapProps {
   routes?: Array<{ id: string; color: string; path: Array<[number, number]> }>;
   /** Which candidate route is currently selected (drawn emphasised). */
   selectedRouteId?: string | null;
+  /** Vessel markers animated along the routes during route-simulator playback. */
+  shipMarkers?: ShipMarker[];
+  /** Called when a ship marker is clicked, to select that route. */
+  onSelectRoute?: (id: string) => void;
   onAddPoint: (lat: number, lon: number) => void;
   onInsertPoint: (afterIndex: number, lat: number, lon: number) => void;
   onMovePoint: (id: string, lat: number, lon: number) => void;
@@ -145,6 +163,29 @@ function waypointIcon(opts: {
     iconAnchor: [13, 13],
     html: `<span class="${cls}">${label}</span>`,
   });
+}
+
+/**
+ * Small vessel marker used by the route simulator. Icons are cached per
+ * colour/active combination so playback re-renders don't churn the DOM.
+ */
+const shipIconCache = new Map<string, L.DivIcon>();
+function shipDivIcon(color: string, active: boolean): L.DivIcon {
+  const key = `${color}|${active ? 1 : 0}`;
+  const cached = shipIconCache.get(key);
+  if (cached) return cached;
+  const size = active ? 16 : 12;
+  const icon = L.divIcon({
+    className: 'fv-route__ship-icon-wrap',
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    html: `
+      <span class="fv-route__ship-dot${active ? ' fv-route__ship-dot--active' : ''}"
+        style="background:${color};width:${size}px;height:${size}px"></span>
+    `,
+  });
+  shipIconCache.set(key, icon);
+  return icon;
 }
 
 /** Captures map clicks while in plot mode. */
@@ -202,6 +243,8 @@ export function RouteEditorMap({
   selected,
   routes = [],
   selectedRouteId,
+  shipMarkers = [],
+  onSelectRoute,
   onAddPoint,
   onInsertPoint,
   onMovePoint,
@@ -339,6 +382,19 @@ export function RouteEditorMap({
           </Tooltip>
         </Marker>
       ))}
+      {/* Animated vessel markers driven by the route simulator playback. */}
+      {shipMarkers.map((s) => (
+        <Marker
+          key={`ship-${s.id}`}
+          position={s.pos}
+          icon={shipDivIcon(s.color, s.active ?? false)}
+          zIndexOffset={s.active ? 1000 : 500}
+          eventHandlers={
+            onSelectRoute ? { click: () => onSelectRoute(s.id) } : undefined
+          }
+        />
+      ))}
+
       <AreaConstraintsControl position="topright" />
       <WeatherFieldControl position="topright" />
       <WeatherPointControl position="topright" />

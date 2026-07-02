@@ -220,7 +220,7 @@ export function sampleEnvironment(lat: number, lon: number): Environment {
 }
 
 /** Heavy-weather penalty (0–1+) — grows sharply once seas get rough. */
-function heavyWeatherPenalty(env: Environment): number {
+export function heavyWeatherPenalty(env: Environment): number {
   const wave = Math.max(0, env.waveHeight - 3); // calm below ~3 m
   return wave * wave * 0.06 + Math.max(0, env.windSpeed - 22) * 0.01;
 }
