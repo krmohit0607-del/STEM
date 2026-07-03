@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 
+import { GlobalNav } from './GlobalNav';
+
 /**
  * Shared shell used by routes that should display the main content
  * full-width (e.g. `/main`). The dashboard route (`/`) uses
@@ -9,6 +11,7 @@ import type { ReactNode } from 'react';
 export function PageShell({ children }: { children: ReactNode }) {
   return (
     <div className="fv-page-shell">
+      <GlobalNav />
       <main className="fv-page-shell__content">{children}</main>
     </div>
   );

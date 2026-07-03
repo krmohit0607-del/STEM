@@ -9,6 +9,7 @@ import {
   LEG_VOYAGE_TYPE_OPTIONS,
   CP_CURRENTS_OPTIONS,
   CP_GOOD_WEATHER_OPTIONS,
+  CP_ALLOWABLE_FUEL_METHOD_OPTIONS,
   type LegRow,
   type SpeedConsRow,
   type SubLeg,
@@ -155,7 +156,7 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
   const [checked, setChecked] = useState<number[]>([]);
   // Sub-legs whose CP / good-weather criteria editor is expanded (key: `${legIdx}-${subIdx}`).
   const [openCriteria, setOpenCriteria] = useState<Set<string>>(new Set());
-  const toggleCriteria = (legIdx: number, subIdx: number) =>
+  const toggleCriteria = (legIdx: number, subIdx: number | string) =>
     setOpenCriteria((prev) => {
       const key = `${legIdx}-${subIdx}`;
       const next = new Set(prev);
@@ -228,6 +229,35 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
       legs.map((leg, li) =>
         li === legIdx
           ? { ...leg, subLegs: leg.subLegs.map((s, si) => (si === subIdx ? { ...s, [key]: value } : s)) }
+          : leg,
+      ),
+    );
+
+  // Toggle "Use Default CP Criteria" for a sub-leg. When turned on, copy the
+  // parent leg's CP / good-weather criteria into the sub-leg.
+  const setSubLegUseDefaultCp = (legIdx: number, subIdx: number, on: boolean) =>
+    updateLegs((legs) =>
+      legs.map((leg, li) =>
+        li === legIdx
+          ? {
+              ...leg,
+              subLegs: leg.subLegs.map((s, si) =>
+                si === subIdx
+                  ? on
+                    ? {
+                        ...s,
+                        useDefaultCp: true,
+                        cpWinds: leg.cpWinds,
+                        cpDss: leg.cpDss,
+                        cpSwh: leg.cpSwh,
+                        cpMinHours: leg.cpMinHours,
+                        cpCurrents: leg.cpCurrents,
+                        cpGoodWeatherSelection: leg.cpGoodWeatherSelection,
+                      }
+                    : { ...s, useDefaultCp: false }
+                  : s,
+              ),
+            }
           : leg,
       ),
     );
@@ -497,7 +527,7 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                 <Field label="SWH" value={leg.cpSwh} editing={editing} onChange={(x) => setLeg(i, 'cpSwh', x)} />
                 <Field label="Min Hours" value={leg.cpMinHours} editing={editing} onChange={(x) => setLeg(i, 'cpMinHours', x)} />
                 <Field label="Currents" value={leg.cpCurrents} editing={editing} onChange={(x) => setLeg(i, 'cpCurrents', x)} options={CP_CURRENTS_OPTIONS} />
-                <Field label="Allowable Fuel Method" value={leg.cpAllowableFuelMethod} editing={editing} onChange={(x) => setLeg(i, 'cpAllowableFuelMethod', x)} />
+                <Field label="Allowable Fuel Method" value={leg.cpAllowableFuelMethod} editing={editing} onChange={(x) => setLeg(i, 'cpAllowableFuelMethod', x)} options={CP_ALLOWABLE_FUEL_METHOD_OPTIONS} />
                 <Field label="Good Weather Selection" value={leg.cpGoodWeatherSelection} editing={editing} onChange={(x) => setLeg(i, 'cpGoodWeatherSelection', x)} options={CP_GOOD_WEATHER_OPTIONS} />
                 <Field label="About Speed" value={leg.cpAboutSpeed} editing={editing} onChange={(x) => setLeg(i, 'cpAboutSpeed', x)} />
                 <Field label="Time Gain" value={leg.cpTimeGain} editing={editing} onChange={(x) => setLeg(i, 'cpTimeGain', x)} />
@@ -554,17 +584,78 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                       <th>Port To</th>
                       <th>ETD</th>
                       <th>Auto Route</th>
+                      <th>Use Default CP Criteria</th>
                       <th>C/P &amp; Good Weather</th>
                       {editing && <th aria-label="Actions" />}
                     </tr>
                   </thead>
                   <tbody>
                     {leg.subLegs.length === 0 ? (
-                      <tr>
-                        <td colSpan={editing ? 8 : 7} className="fv-voyage__muted">
-                          No sub-legs — this leg runs directly {leg.from || '—'} → {leg.to || '—'}.
-                        </td>
-                      </tr>
+                      (() => {
+                        const criteriaOpen = openCriteria.has(`${i}-main`);
+                        return (
+                          <Fragment>
+                            <tr className="fv-voyage__subleg-main-row">
+                              <td>1</td>
+                              <td>{leg.type || '—'}</td>
+                              <td>{leg.from || '—'}</td>
+                              <td>{leg.to || '—'}</td>
+                              <td>{leg.etd || '—'}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className={`fv-voyage__toggle${leg.autoRoute ? ' fv-voyage__toggle--on' : ''}`}
+                                  disabled
+                                  role="switch"
+                                  aria-checked={leg.autoRoute}
+                                  aria-label="Auto Route"
+                                  title="Main leg — edit Auto Route in the leg details above"
+                                >
+                                  <span className="fv-voyage__toggle-knob" />
+                                  <span className="fv-voyage__toggle-text">{leg.autoRoute ? 'On' : 'Off'}</span>
+                                </button>
+                              </td>
+                              <td className="fv-voyage__muted">—</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="fv-voyage__btn fv-voyage__btn--sm"
+                                  onClick={() => toggleCriteria(i, 'main')}
+                                  aria-expanded={criteriaOpen}
+                                  title="View this leg's C/P & good-weather criteria"
+                                >
+                                  <i className={`fas ${criteriaOpen ? 'fa-chevron-up' : 'fa-sliders'}`} aria-hidden="true" />{' '}
+                                  {criteriaOpen ? 'Hide' : 'Criteria'}
+                                </button>
+                              </td>
+                              {editing && <td />}
+                            </tr>
+                            {criteriaOpen && (
+                              <tr className="fv-voyage__subleg-detail-row">
+                                <td colSpan={editing ? 9 : 8}>
+                                  <div className="fv-voyage__subleg-detail">
+                                    <h6 className="fv-voyage__subhead">
+                                      C/P &amp; Good Weather Criteria — {leg.from || '—'} → {leg.to || '—'}
+                                    </h6>
+                                    <p className="fv-voyage__muted">
+                                      This leg has no sub-legs, so it runs directly. Use
+                                      &ldquo;Add Port / Sub-Leg&rdquo; below to split it into sub-legs.
+                                    </p>
+                                    <div className="fv-voyage__cols fv-voyage__cols--3">
+                                      <Field label="Winds" value={leg.cpWinds} editing={false} onChange={() => {}} />
+                                      <Field label="DSS" value={leg.cpDss} editing={false} onChange={() => {}} />
+                                      <Field label="SWH" value={leg.cpSwh} editing={false} onChange={() => {}} />
+                                      <Field label="Min Hours" value={leg.cpMinHours} editing={false} onChange={() => {}} />
+                                      <Field label="Currents" value={leg.cpCurrents} editing={false} onChange={() => {}} />
+                                      <Field label="Good Weather Selection" value={leg.cpGoodWeatherSelection} editing={false} onChange={() => {}} />
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })()
                     ) : (
                       leg.subLegs.map((s, si) => {
                         const criteriaOpen = openCriteria.has(`${i}-${si}`);
@@ -594,6 +685,21 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                               <td>
                                 <button
                                   type="button"
+                                  className={`fv-voyage__toggle${s.useDefaultCp ? ' fv-voyage__toggle--on' : ''}`}
+                                  onClick={() => editing && setSubLegUseDefaultCp(i, si, !s.useDefaultCp)}
+                                  disabled={!editing}
+                                  role="switch"
+                                  aria-checked={!!s.useDefaultCp}
+                                  aria-label="Use Default CP Criteria"
+                                  title={s.useDefaultCp ? "Use Default CP Criteria ON — inherits this leg's CP criteria" : 'Use Default CP Criteria OFF'}
+                                >
+                                  <span className="fv-voyage__toggle-knob" />
+                                  <span className="fv-voyage__toggle-text">{s.useDefaultCp ? 'On' : 'Off'}</span>
+                                </button>
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
                                   className="fv-voyage__btn fv-voyage__btn--sm"
                                   onClick={() => toggleCriteria(i, si)}
                                   aria-expanded={criteriaOpen}
@@ -613,21 +719,27 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                             </tr>
                             {criteriaOpen && (
                               <tr className="fv-voyage__subleg-detail-row">
-                                <td colSpan={editing ? 8 : 7}>
+                                <td colSpan={editing ? 9 : 8}>
                                   <div className="fv-voyage__subleg-detail">
                                     <h6 className="fv-voyage__subhead">
                                       C/P &amp; Good Weather Criteria — {s.from || '—'} → {s.to || '—'}
                                     </h6>
+                                    {s.useDefaultCp && (
+                                      <p className="fv-voyage__muted">
+                                        Using this leg&apos;s default CP criteria. Turn off
+                                        &ldquo;Use Default CP Criteria&rdquo; to edit these values.
+                                      </p>
+                                    )}
                                     <div className="fv-voyage__cols fv-voyage__cols--3">
-                                      <Field label="Winds" value={s.cpWinds} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpWinds', x)} />
-                                      <Field label="DSS" value={s.cpDss} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpDss', x)} />
-                                      <Field label="SWH" value={s.cpSwh} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpSwh', x)} />
-                                      <Field label="Min Hours" value={s.cpMinHours} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpMinHours', x)} />
-                                      <Field label="Currents" value={s.cpCurrents} editing={editing} onChange={(x) => setSubLeg(i, si, 'cpCurrents', x)} options={CP_CURRENTS_OPTIONS} />
+                                      <Field label="Winds" value={s.cpWinds} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpWinds', x)} />
+                                      <Field label="DSS" value={s.cpDss} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpDss', x)} />
+                                      <Field label="SWH" value={s.cpSwh} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpSwh', x)} />
+                                      <Field label="Min Hours" value={s.cpMinHours} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpMinHours', x)} />
+                                      <Field label="Currents" value={s.cpCurrents} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpCurrents', x)} options={CP_CURRENTS_OPTIONS} />
                                       <Field
                                         label="Good Weather Selection"
                                         value={s.cpGoodWeatherSelection}
-                                        editing={editing}
+                                        editing={editing && !s.useDefaultCp}
                                         onChange={(x) => setSubLeg(i, si, 'cpGoodWeatherSelection', x)}
                                         options={CP_GOOD_WEATHER_OPTIONS}
                                       />

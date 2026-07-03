@@ -19,7 +19,6 @@ type TabId =
   | 'route'
   | 'limits'
   | 'area'
-  | 'simulator'
   | 'history'
   | 'reports';
 
@@ -109,17 +108,6 @@ const TABS: TabDef[] = [
       { label: 'No-go zones', route: '/area-constraints' },
       { label: 'Speed-control zones', route: '/area-constraints' },
       { label: 'ECA zones', route: '/area-constraints' },
-    ],
-  },
-  {
-    id: 'simulator',
-    icon: 'fa-compass-drafting',
-    labelKey: 'routeExplorer',
-    labelFallback: 'Route Explorer / Simulator',
-    route: '/route-explorer',
-    planned: [
-      { label: 'Route explorer', route: '/route-explorer' },
-      { label: 'Route simulator', route: '/route-simulator' },
     ],
   },
   {

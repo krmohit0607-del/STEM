@@ -68,6 +68,11 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
     Object.fromEntries(CARD_IDS.map((id) => [id, isCreate || startEdit])),
   );
 
+  // When creating or editing a voyage the read-only Voyage Summary is skipped
+  // (hidden from the nav) and we land on Order Details instead. After the voyage
+  // is saved the summary is shown again.
+  const [skipSummary, setSkipSummary] = useState<boolean>(isCreate || startEdit);
+
   // Snapshot of the view captured when edit mode is first entered, so the audit
   // log can record the before/after value of every field that changed on save.
   const editSnapshotRef = useRef<VoyageView | null>(null);
@@ -77,6 +82,7 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
     const seeded = isCreate || !selectedVoyage ? buildEmptyView() : buildView(selectedVoyage);
     setView(seeded);
     setEditing(Object.fromEntries(CARD_IDS.map((id) => [id, isCreate || startEdit])));
+    setSkipSummary(isCreate || startEdit);
     editSnapshotRef.current = isCreate || startEdit ? seeded : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, isCreate, startEdit]);
@@ -118,17 +124,24 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
     }
     editSnapshotRef.current = null;
     setAllEditing(false);
+    // Saving is complete — reveal the read-only Voyage Summary and open it.
+    setSkipSummary(false);
+    setOpenSection('summary');
   };
 
   // Accordion: only one section is expanded at a time. Clicking a nav item (or
-  // a card's collapse button) opens that section just below the nav row.
-  const [openSection, setOpenSection] = useState<string>('summary');
+  // a card's collapse button) opens that section just below the nav row. When
+  // creating or editing a voyage the read-only Voyage Summary is skipped and we
+  // land on Order Details instead.
+  const [openSection, setOpenSection] = useState<string>(skipSummary ? 'order' : 'summary');
   const toggleSection = (id: string) =>
     setOpenSection((prev) => (prev === id ? '' : id));
   const openSectionById = (id: string) => setOpenSection(id);
 
   const sectionNav = [
-    { id: 'summary', label: t('voyageSummary', 'Voyage Summary'), icon: 'fa-clipboard-list' },
+    ...(skipSummary
+      ? []
+      : [{ id: 'summary', label: t('voyageSummary', 'Voyage Summary'), icon: 'fa-clipboard-list' }]),
     { id: 'order', label: t('orderDetails', 'Order Details'), icon: 'fa-file-contract' },
     { id: 'vessel', label: t('vesselProfile', 'Vessel Profile'), icon: 'fa-ship' },
     { id: 'legs', label: t('legDetails', 'Leg Details'), icon: 'fa-route' },
@@ -186,8 +199,6 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
       {openSection === 'summary' && (
         <VoyageSummarySection
           view={view}
-          isCreate={isCreate}
-          setView={setView}
           title={t('voyageSummary', 'VOYAGE SUMMARY')}
           collapsed={false}
           onToggleCollapse={() => toggleSection('summary')}

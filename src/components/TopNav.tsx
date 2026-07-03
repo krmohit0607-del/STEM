@@ -2,87 +2,26 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
+import { useSelectedVoyage } from '../data/selectedVoyage';
+import { buildView } from './voyage/buildView';
 
 /**
  * Top navigation bar for the home page.
  *
  * LEFT side
- *   - Vessel name / Client (Owner / Charter)
- *   - Voyage selector dropdown — each option shows
- *     `Departure → Arrival · B/L · ETD`
+ *   - Vessel name / Client (from the selected voyage)
+ *   - Leg selector dropdown — each option shows
+ *     `Leg No · From → To · Type · Status · ETD`
  *
  * RIGHT side
  *   - Mail icon (send system email)            — TODO wire to EmailDialog API
  *   - "Edit current voyage" button              — TODO wire to VoyageDialog
  *   - "Create new voyage" button + Position     — TODO wire to VoyageDialog (new)
  *
- * The vessel + voyage data here is **stubbed** because the corresponding
- * endpoints (`/api/voyage/...`, `/api/vessel/...`) have not been factored
- * out for the React app yet. Replace `STUB_VESSEL` / `STUB_VOYAGES` with
- * real API data when the dependent endpoints are exposed.
+ * The vessel + voyage data here is resolved from the shared voyage dataset
+ * via `useSelectedVoyage`. Replace that data source with real API data when
+ * the dependent endpoints are exposed.
  */
-
-interface VoyageOption {
-  id: number;
-  number: string;
-  departurePort: string;
-  arrivalPort: string;
-  blNumber: string;
-  /** ISO-8601 string. */
-  etd: string;
-}
-
-interface VesselSummary {
-  name: string;
-  clientName: string;
-  /** Owner | Charterer | Manager — matches legacy `ClientType`. */
-  clientType: 'Owner' | 'Charterer' | 'Manager';
-}
-
-const STUB_VESSEL: VesselSummary = {
-  name: 'MV Atlantic Voyager',
-  clientName: 'Acme Shipping',
-  clientType: 'Owner',
-};
-
-const STUB_VOYAGES: VoyageOption[] = [
-  {
-    id: 1001,
-    number: 'V-2026-014',
-    departurePort: 'Singapore',
-    arrivalPort: 'Rotterdam',
-    blNumber: 'BL-88421',
-    etd: '2026-06-12T08:00:00Z',
-  },
-  {
-    id: 1000,
-    number: 'V-2026-013',
-    departurePort: 'Houston',
-    arrivalPort: 'Singapore',
-    blNumber: 'BL-88410',
-    etd: '2026-05-22T14:00:00Z',
-  },
-  {
-    id: 999,
-    number: 'V-2026-012',
-    departurePort: 'Rotterdam',
-    arrivalPort: 'Houston',
-    blNumber: 'BL-88401',
-    etd: '2026-04-30T09:30:00Z',
-  },
-];
-
-function formatEtd(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
 
 function todoHandler(label: string) {
   return () => {
@@ -99,16 +38,20 @@ export function TopNav() {
     return v === key ? fallback : v;
   };
 
-  const [voyageId, setVoyageId] = useState<number>(STUB_VOYAGES[0]?.id ?? 0);
+  const voyage = useSelectedVoyage();
+  const legs = useMemo(() => (voyage ? buildView(voyage).legs : []), [voyage]);
+
+  const [legNo, setLegNo] = useState<string>('');
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
-  const selectedVoyage = useMemo(
-    () => STUB_VOYAGES.find((v) => v.id === voyageId) ?? STUB_VOYAGES[0],
-    [voyageId],
+  const selectedLeg = useMemo(
+    () => legs.find((leg) => leg.no === legNo) ?? legs[0],
+    [legs, legNo],
   );
 
-  // Close dropdown on outside-click.
+  const vesselName = voyage?.vessel ?? t('noVessel', 'No vessel selected');
+  const clientName = voyage?.client ?? '';
   useEffect(() => {
     if (!dropdownOpen) return;
     const onDocClick = (e: MouseEvent) => {
@@ -123,15 +66,18 @@ export function TopNav() {
   return (
     <div className="fv-topnav" role="navigation" aria-label="Voyage">
       <div className="fv-topnav__left">
+        <span className="fv-topnav__logo">
+          <i className="fas fa-ship" aria-hidden="true" />
+          STEM
+        </span>
         <div className="fv-topnav__vessel">
-          <span className="fv-topnav__vessel-name">{STUB_VESSEL.name}</span>
-          <span className="fv-topnav__vessel-sep">/</span>
-          <span className="fv-topnav__client">
-            {STUB_VESSEL.clientName}
-            <span className="fv-topnav__client-type">
-              ({t(STUB_VESSEL.clientType.toLowerCase(), STUB_VESSEL.clientType)})
-            </span>
-          </span>
+          <span className="fv-topnav__vessel-name">{vesselName}</span>
+          {clientName && (
+            <>
+              <span className="fv-topnav__vessel-sep">/</span>
+              <span className="fv-topnav__client">{clientName}</span>
+            </>
+          )}
         </div>
 
         <div className="fv-topnav__voyage" ref={wrapperRef}>
@@ -141,44 +87,45 @@ export function TopNav() {
             onClick={() => setDropdownOpen((v) => !v)}
             aria-haspopup="listbox"
             aria-expanded={dropdownOpen}
+            disabled={legs.length === 0}
           >
-            {selectedVoyage ? (
+            {selectedLeg ? (
               <>
                 <span className="fv-topnav__voyage-route">
-                  {selectedVoyage.departurePort} → {selectedVoyage.arrivalPort}
+                  {selectedLeg.no} · {selectedLeg.from} → {selectedLeg.to}
                 </span>
                 <span className="fv-topnav__voyage-meta">
-                  · {selectedVoyage.blNumber} · {t('etd', 'ETD')} {formatEtd(selectedVoyage.etd)}
+                  · {selectedLeg.type} · {selectedLeg.distanceNm} · {selectedLeg.status} · {t('etd', 'ETD')} {selectedLeg.etd}
                 </span>
               </>
             ) : (
-              <span>{t('noVoyage', 'No voyage selected')}</span>
+              <span>{t('noLegs', 'No legs')}</span>
             )}
             <span className="fv-topnav__caret" aria-hidden="true">
               ▾
             </span>
           </button>
 
-          {dropdownOpen && (
+          {dropdownOpen && legs.length > 0 && (
             <ul className="fv-topnav__voyage-list" role="listbox">
-              {STUB_VOYAGES.map((v) => (
+              {legs.map((leg) => (
                 <li
-                  key={v.id}
+                  key={leg.no}
                   role="option"
-                  aria-selected={v.id === voyageId}
+                  aria-selected={leg.no === selectedLeg?.no}
                   className={`fv-topnav__voyage-item${
-                    v.id === voyageId ? ' fv-topnav__voyage-item--active' : ''
+                    leg.no === selectedLeg?.no ? ' fv-topnav__voyage-item--active' : ''
                   }`}
                   onClick={() => {
-                    setVoyageId(v.id);
+                    setLegNo(leg.no);
                     setDropdownOpen(false);
                   }}
                 >
                   <div className="fv-topnav__voyage-item-route">
-                    {v.departurePort} → {v.arrivalPort}
+                    {leg.no} · {leg.from} → {leg.to}
                   </div>
                   <div className="fv-topnav__voyage-item-meta">
-                    {v.number} · {v.blNumber} · {t('etd', 'ETD')} {formatEtd(v.etd)}
+                    {leg.type} · {leg.distanceNm} · {leg.status} · {t('etd', 'ETD')} {leg.etd}
                   </div>
                 </li>
               ))}
@@ -202,7 +149,7 @@ export function TopNav() {
           type="button"
           className="fv-topnav__action-button"
           onClick={() => navigate('/voyage?edit=1')}
-          disabled={!selectedVoyage}
+          disabled={!voyage}
         >
           <i className="fas fa-pen" aria-hidden="true" />
           <span>{t('editCurrentVoyage', 'Edit voyage')}</span>

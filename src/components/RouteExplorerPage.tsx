@@ -159,19 +159,6 @@ const STUB_WAYPOINTS: Waypoint[] = [
   },
 ];
 
-const DEFAULT_VESSEL_NAME = 'MV Atlantic Voyager';
-const DEFAULT_VESSEL_CLIENT = 'Acme Shipping (owner)';
-const DEFAULT_VOYAGE_LABEL = 'Singapore → Rotterdam';
-const DEFAULT_VOYAGE_REF = 'BL-88421';
-const DEFAULT_VOYAGE_ETD = '12 Jun 2026, 13:30';
-
-function formatNumber(n: number, fractionDigits = 0): string {
-  return n.toLocaleString(undefined, {
-    minimumFractionDigits: fractionDigits,
-    maximumFractionDigits: fractionDigits,
-  });
-}
-
 /** Decimal degrees → `01° 16.0' N` style string. */
 function decToDM(value: number, isLat: boolean): string {
   const hemi = isLat ? (value >= 0 ? 'N' : 'S') : value >= 0 ? 'E' : 'W';
@@ -339,6 +326,16 @@ function recomputeGeometry(list: Waypoint[]): Waypoint[] {
 /** Assumed service speed used to turn distance into a transit time / ETA. */
 const SERVICE_SPEED_KN = 12;
 
+/** Palette used to colour saved routes pushed onto the simulator. */
+const SAVED_SIM_COLORS = [
+  '#f778ba',
+  '#a371f7',
+  '#3fb950',
+  '#d29922',
+  '#39c5cf',
+  '#ff7b72',
+];
+
 /** A computed candidate route: its profile plus the optimizer result. */
 type ComputedRoute = RouteVariantMeta & { info: OptimizedRoute };
 
@@ -479,23 +476,26 @@ export function RouteExplorerPage() {
   };
 
   const selectedVoyage = useSelectedVoyage();
-  const VESSEL_NAME = selectedVoyage?.vessel ?? DEFAULT_VESSEL_NAME;
-  const VESSEL_CLIENT = selectedVoyage ? `${selectedVoyage.client} (owner)` : DEFAULT_VESSEL_CLIENT;
-  const VOYAGE_LABEL = selectedVoyage
-    ? `${selectedVoyage.portFrom} → ${selectedVoyage.portTo}`
-    : DEFAULT_VOYAGE_LABEL;
-  const VOYAGE_REF = selectedVoyage?.routeRef ?? DEFAULT_VOYAGE_REF;
-  const VOYAGE_ETD = selectedVoyage?.etdDisplay ?? DEFAULT_VOYAGE_ETD;
 
   const [waypoints, setWaypoints] = useState<Waypoint[]>(STUB_WAYPOINTS);
   const [selected, setSelected] = useState<string[]>([]);
   const selectedWaypoint =
     selected.length === 1 ? waypoints.find((w) => w.id === selected[0]) : undefined;
 
+  // Placeholder action for toolbar buttons whose endpoints are not wired yet.
+  const notImplemented = (label: string) => () => {
+    // eslint-disable-next-line no-console
+    console.warn(`[STEM] '${label}' is not wired yet — see MIGRATION.md.`);
+  };
+
   // --- Map plotting + saved routes ---------------------------------
   const [plotMode, setPlotMode] = useState(false);
   const [routeName, setRouteName] = useState('');
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() => readSavedRoutes());
+  // Checkbox selection in the saved-routes table + the subset the user has
+  // pushed onto the simulator to compare.
+  const [savedSel, setSavedSel] = useState<string[]>([]);
+  const [compareIds, setCompareIds] = useState<string[]>([]);
 
   // --- Auto sea-route generator ------------------------------------
   const [depInput, setDepInput] = useState(selectedVoyage?.portFrom ?? '');
@@ -503,6 +503,9 @@ export function RouteExplorerPage() {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState('');
   const worldPorts = useWorldPorts();
+
+  // "Generate Optimized Sea Route" popup, opened from the map "Optimize" button.
+  const [genModalOpen, setGenModalOpen] = useState(false);
 
   // Candidate optimized routes computed in the background after the straight
   // line is drawn. The user picks their preferred one from the list.
@@ -650,7 +653,7 @@ export function RouteExplorerPage() {
   // --- Route simulator derived data --------------------------------
   /** Playable routes with per-route transit time + weather factor. */
   const simRoutes = useMemo(() => {
-    return (routeResults ?? [])
+    const optimized = (routeResults ?? [])
       .filter((r) => r.info.path.length >= 2)
       .map((r) => ({
         id: r.id,
@@ -661,7 +664,59 @@ export function RouteExplorerPage() {
         hours: transitHours(r.info.distanceNm),
         weatherFactor: r.info.weatherPenalty,
       }));
-  }, [routeResults, l]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // The route currently drawn on the map (editable waypoints), so the
+    // simulator can play it back even before any optimization runs.
+    const mapPath = waypoints
+      .map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number])
+      .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
+    const mapDistanceNm = waypoints.reduce(
+      (sum, wp) => sum + wp.distanceFromPrev,
+      0,
+    );
+    const mapRoute =
+      mapPath.length >= 2
+        ? [
+            {
+              id: 'map',
+              label: t('plannedRoute', 'Planned route'),
+              color: '#58a6ff',
+              path: mapPath,
+              distanceNm: Math.round(mapDistanceNm),
+              hours: transitHours(mapDistanceNm),
+              weatherFactor: 0,
+            },
+          ]
+        : [];
+
+    // Saved routes the user selected and pushed onto the simulator to compare.
+    const compared = savedRoutes
+      .filter((r) => compareIds.includes(r.id))
+      .map((r) => {
+        const path = r.waypoints
+          .map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number])
+          .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
+        let dist = 0;
+        for (let k = 1; k < path.length; k += 1) {
+          dist += haversineNM(path[k - 1][0], path[k - 1][1], path[k][0], path[k][1]);
+        }
+        return {
+          id: `saved-${r.id}`,
+          label: r.name,
+          color:
+            SAVED_SIM_COLORS[
+              compareIds.indexOf(r.id) % SAVED_SIM_COLORS.length
+            ],
+          path,
+          distanceNm: Math.round(dist),
+          hours: transitHours(dist),
+          weatherFactor: 0,
+        };
+      })
+      .filter((r) => r.path.length >= 2);
+
+    return [...mapRoute, ...compared, ...optimized];
+  }, [routeResults, waypoints, savedRoutes, compareIds, l]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Longest transit time across all routes — the full playback span. */
   const simMaxHours = useMemo(
@@ -695,8 +750,8 @@ export function RouteExplorerPage() {
     };
   }, [simRoutes]);
 
-  /** Whether the simulator UI should be shown. */
-  const showSimulator = !optimizing && simRoutes.length > 0;
+  /** Whether the simulator UI should be shown — always visible below the map. */
+  const showSimulator = true;
 
   // Fetch the live Open-Meteo grid for the selected factor over all routes.
   // `ensureLiveData` de-dupes/caches, and bumps `liveVersion` when ready so the
@@ -1008,10 +1063,29 @@ export function RouteExplorerPage() {
     setPlotMode(false);
   };
 
-  const deleteRoute = (id: string) => {
-    const next = savedRoutes.filter((r) => r.id !== id);
+  const toggleSavedSel = (id: string) => {
+    setSavedSel((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  const toggleSavedSelAll = () => {
+    setSavedSel((prev) =>
+      prev.length === savedRoutes.length ? [] : savedRoutes.map((r) => r.id),
+    );
+  };
+
+  const deleteSelectedRoutes = () => {
+    if (savedSel.length === 0) return;
+    const next = savedRoutes.filter((r) => !savedSel.includes(r.id));
     setSavedRoutes(next);
     writeSavedRoutes(next);
+    setCompareIds((prev) => prev.filter((id) => !savedSel.includes(id)));
+    setSavedSel([]);
+  };
+
+  const compareSelectedRoutes = () => {
+    setCompareIds(savedSel);
   };
 
   const clearRoute = () => {
@@ -1111,13 +1185,6 @@ export function RouteExplorerPage() {
     e.target.value = '';
   };
 
-  const totalDistance = useMemo(
-    () => waypoints.reduce((acc, wp) => acc + wp.distanceFromPrev, 0),
-    [waypoints],
-  );
-  const etd = waypoints[0]?.eta ?? '';
-  const eta = waypoints[waypoints.length - 1]?.eta ?? '';
-
   const updateWaypoint = <K extends keyof Waypoint>(
     id: string,
     key: K,
@@ -1130,41 +1197,6 @@ export function RouteExplorerPage() {
 
   return (
     <div className="fv-route">
-      <header className="fv-route__header">
-        <div className="fv-route__voyage-info">
-          <div className="fv-route__title">
-            <strong>{VESSEL_NAME}</strong>
-            <span className="fv-route__sep">/</span>
-            <span className="fv-route__client">{VESSEL_CLIENT}</span>
-          </div>
-          <div className="fv-route__voyage">
-            <strong>{VOYAGE_LABEL}</strong>
-            <span className="fv-route__sep">·</span>
-            <span>{VOYAGE_REF}</span>
-            <span className="fv-route__sep">·</span>
-            <span>ETD {VOYAGE_ETD}</span>
-          </div>
-        </div>
-        <ul className="fv-route__voyage-stats">
-          <li>
-            <span>Distance</span>
-            <strong>{formatNumber(totalDistance)} NM</strong>
-          </li>
-          <li>
-            <span>ETD</span>
-            <strong>{etd ? etd.replace('T', ' ') : '—'}</strong>
-          </li>
-          <li>
-            <span>ETA</span>
-            <strong>{eta ? eta.replace('T', ' ') : '—'}</strong>
-          </li>
-          <li>
-            <span>Waypoints</span>
-            <strong>{waypoints.length}</strong>
-          </li>
-        </ul>
-      </header>
-
       {/* Route editor map -------------------------------------------- */}
       <section className="fv-route__section">
         <header className="fv-route__section-header">
@@ -1231,70 +1263,6 @@ export function RouteExplorerPage() {
 
         <div className="fv-route__map-layout">
           <div className="fv-route__side-col">
-          {/* Auto sea-route generator ---------------------------------- */}
-          <section className="fv-route__gen-panel">
-            <header className="fv-route__side-head">
-              <h3>
-                <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
-                {t('autoRoute', 'Generate Optimized Sea Route')}
-              </h3>
-            </header>
-            <div className="fv-route__gen">
-              <label className="fv-route__gen-field">
-                <span>
-                  <i className="fas fa-anchor-circle-check" aria-hidden="true" />{' '}
-                  {t('departure', 'Departure')}
-                </span>
-                <PortInput
-                  ports={worldPorts}
-                  placeholder={t('portOrLatLon', 'Port name or "lat, lon"')}
-                  value={depInput}
-                  onChange={setDepInput}
-                />
-              </label>
-              <label className="fv-route__gen-field">
-                <span>
-                  <i className="fas fa-anchor" aria-hidden="true" /> {t('arrival', 'Arrival')}
-                </span>
-                <PortInput
-                  ports={worldPorts}
-                  placeholder={t('portOrLatLon', 'Port name or "lat, lon"')}
-                  value={arrInput}
-                  onChange={setArrInput}
-                />
-              </label>
-              <button
-                type="button"
-                className="fv-route__btn fv-route__btn--primary"
-                onClick={generateRoute}
-                disabled={generating}
-              >
-                {generating ? (
-                  <>
-                    <i className="fas fa-spinner fa-spin" aria-hidden="true" />{' '}
-                    {t('generating', 'Generating…')}
-                  </>
-                ) : (
-                  <>
-                    <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
-                    {t('generateRoute', 'Generate route')}
-                  </>
-                )}
-              </button>
-              {genError && (
-                <span className="fv-route__gen-error">
-                  <i className="fas fa-triangle-exclamation" aria-hidden="true" /> {genError}
-                </span>
-              )}
-              <span className="fv-route__gen-hint">
-                {t(
-                  'genHint',
-                  'Builds the shortest open-water track that routes around land between the two points.',
-                )}
-              </span>
-            </div>
-          </section>
-
           <aside className="fv-route__side-panel" aria-label={t('expectedRoute', 'Expected Route')}>
             <header className="fv-route__side-head">
               <h3>
@@ -1475,19 +1443,153 @@ export function RouteExplorerPage() {
               )}
             </div>
           </aside>
+          {savedRoutes.length > 0 && (
+            <div className="fv-route__saved">
+              <div className="fv-route__saved-head">
+                <span className="fv-route__saved-label">
+                  {t('savedRoutes', 'Saved routes')}
+                  {savedSel.length > 0 && ` (${savedSel.length})`}
+                </span>
+                <div className="fv-route__saved-actions">
+                  <button
+                    type="button"
+                    className="fv-route__saved-act"
+                    onClick={compareSelectedRoutes}
+                    disabled={savedSel.length === 0}
+                    title={t('compareOnSimulator', 'Compare on simulator')}
+                  >
+                    <i className="fas fa-clapperboard" aria-hidden="true" />{' '}
+                    {t('compare', 'Compare')}
+                  </button>
+                  <button
+                    type="button"
+                    className="fv-route__saved-act fv-route__saved-act--danger"
+                    onClick={deleteSelectedRoutes}
+                    disabled={savedSel.length === 0}
+                    title={t('deleteSelected', 'Delete selected routes')}
+                  >
+                    <i className="fas fa-trash" aria-hidden="true" />{' '}
+                    {t('delete', 'Delete')}
+                  </button>
+                </div>
+              </div>
+              <table className="fv-route__saved-table">
+                <thead>
+                  <tr>
+                    <th className="fv-route__saved-check">
+                      <input
+                        type="checkbox"
+                        checked={
+                          savedRoutes.length > 0 &&
+                          savedSel.length === savedRoutes.length
+                        }
+                        onChange={toggleSavedSelAll}
+                        aria-label={t('selectAll', 'Select all')}
+                      />
+                    </th>
+                    <th>{t('routeName', 'Route name')}</th>
+                    <th>{t('dateCreated', 'Date created')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {savedRoutes.map((r) => (
+                    <tr
+                      key={r.id}
+                      className={
+                        compareIds.includes(r.id)
+                          ? 'fv-route__saved-trow--compare'
+                          : undefined
+                      }
+                    >
+                      <td className="fv-route__saved-check">
+                        <input
+                          type="checkbox"
+                          checked={savedSel.includes(r.id)}
+                          onChange={() => toggleSavedSel(r.id)}
+                          aria-label={r.name}
+                        />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="fv-route__saved-load"
+                          onClick={() => loadRoute(r.id)}
+                          title={t('loadRoute', 'Load this route')}
+                        >
+                          {compareIds.includes(r.id) ? (
+                            <span
+                              className="fv-route__saved-swatch"
+                              style={{
+                                background:
+                                  SAVED_SIM_COLORS[
+                                    compareIds.indexOf(r.id) % SAVED_SIM_COLORS.length
+                                  ],
+                              }}
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <i className="fas fa-route" aria-hidden="true" />
+                          )}{' '}
+                          {r.name}
+                        </button>
+                      </td>
+                      <td className="fv-route__saved-date">
+                        {new Date(r.savedAt).toLocaleDateString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           </div>
 
           <div className="fv-route__map-col">
           <div className="fv-route__map-wrap">
+            <div className="fv-route__map-actions">
+              <button
+                type="button"
+                className="fv-route__btn"
+                onClick={notImplemented('Validate')}
+              >
+                <i className="fas fa-circle-check" aria-hidden="true" /> {t('validate', 'Validate')}
+              </button>
+              <button
+                type="button"
+                className="fv-route__btn"
+                onClick={() => setGenModalOpen(true)}
+              >
+                <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
+                {t('optimize', 'Optimize')}
+              </button>
+              <button
+                type="button"
+                className="fv-route__btn"
+                onClick={notImplemented('View on MT')}
+              >
+                <i className="fas fa-arrow-up-right-from-square" aria-hidden="true" />{' '}
+                {t('viewOnMt', 'View on MT')}
+              </button>
+              <button
+                type="button"
+                className="fv-route__btn"
+                onClick={notImplemented('Weather color code')}
+              >
+                <i className="fas fa-palette" aria-hidden="true" />{' '}
+                {t('weatherColorCode', 'Weather color code')}
+              </button>
+            </div>
             <RouteEditorMap
               points={mapPoints}
               plotMode={plotMode}
               selected={selected}
-              routes={(routeResults ?? []).map((r) => ({
-                id: r.id,
-                color: r.color,
-                path: r.info.path,
-              }))}
+              routes={simRoutes
+                .filter((r) => r.id !== 'map')
+                .map((r) => ({
+                  id: r.id,
+                  color: r.color,
+                  path: r.path,
+                }))}
               selectedRouteId={selectedRouteId}
               shipMarkers={shipMarkers}
               onSelectRoute={setSelectedRouteId}
@@ -1881,38 +1983,92 @@ export function RouteExplorerPage() {
           )}
           </div>
         </div>
-
-        {savedRoutes.length > 0 && (
-          <div className="fv-route__saved">
-            <span className="fv-route__saved-label">{t('savedRoutes', 'Saved routes')}:</span>
-            <ul className="fv-route__saved-list">
-              {savedRoutes.map((r) => (
-                <li key={r.id} className="fv-route__saved-item">
-                  <button
-                    type="button"
-                    className="fv-route__saved-load"
-                    onClick={() => loadRoute(r.id)}
-                    title={t('loadRoute', 'Load this route')}
-                  >
-                    <i className="fas fa-route" aria-hidden="true" /> {r.name}
-                    <span className="fv-route__saved-meta">
-                      {r.waypoints.length} {t('wp', 'WP')}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="fv-route__saved-del"
-                    onClick={() => deleteRoute(r.id)}
-                    title={t('deleteRoute', 'Delete saved route')}
-                  >
-                    <i className="fas fa-times" aria-hidden="true" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </section>
+
+      {genModalOpen && (
+        <div
+          className="fv-route__modal-overlay"
+          role="presentation"
+          onClick={() => setGenModalOpen(false)}
+        >
+          <div
+            className="fv-route__modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('autoRoute', 'Generate Optimized Sea Route')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="fv-route__modal-head">
+              <h3>
+                <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
+                {t('autoRoute', 'Generate Optimized Sea Route')}
+              </h3>
+              <button
+                type="button"
+                className="fv-route__modal-close"
+                onClick={() => setGenModalOpen(false)}
+                aria-label={t('close', 'Close')}
+              >
+                <i className="fas fa-xmark" aria-hidden="true" />
+              </button>
+            </header>
+            <div className="fv-route__gen">
+              <label className="fv-route__gen-field">
+                <span>
+                  <i className="fas fa-anchor-circle-check" aria-hidden="true" />{' '}
+                  {t('departure', 'Departure')}
+                </span>
+                <PortInput
+                  ports={worldPorts}
+                  placeholder={t('portOrLatLon', 'Port name or "lat, lon"')}
+                  value={depInput}
+                  onChange={setDepInput}
+                />
+              </label>
+              <label className="fv-route__gen-field">
+                <span>
+                  <i className="fas fa-anchor" aria-hidden="true" /> {t('arrival', 'Arrival')}
+                </span>
+                <PortInput
+                  ports={worldPorts}
+                  placeholder={t('portOrLatLon', 'Port name or "lat, lon"')}
+                  value={arrInput}
+                  onChange={setArrInput}
+                />
+              </label>
+              <button
+                type="button"
+                className="fv-route__btn fv-route__btn--primary"
+                onClick={generateRoute}
+                disabled={generating}
+              >
+                {generating ? (
+                  <>
+                    <i className="fas fa-spinner fa-spin" aria-hidden="true" />{' '}
+                    {t('generating', 'Generating…')}
+                  </>
+                ) : (
+                  <>
+                    <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
+                    {t('generateRoute', 'Generate route')}
+                  </>
+                )}
+              </button>
+              {genError && (
+                <span className="fv-route__gen-error">
+                  <i className="fas fa-triangle-exclamation" aria-hidden="true" /> {genError}
+                </span>
+              )}
+              <span className="fv-route__gen-hint">
+                {t(
+                  'genHint',
+                  'Builds the shortest open-water track that routes around land between the two points.',
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

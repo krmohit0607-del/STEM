@@ -506,9 +506,60 @@ a {
   line-height: 1.5;
 }
 
-/* Top nav -------------------------------------------------------------- */
-.fv-topnav {
+/* Global module menu --------------------------------------------------- */
+.fv-globalnav {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  background: #0d1424;
+  border-bottom: 1px solid #2a3447;
+  flex-shrink: 0;
+}
+
+.fv-globalnav__menu {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fv-globalnav__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #8b98ad;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fv-globalnav__item:hover:not(:disabled) {
+  color: #cde3ff;
+  background: #172032;
+}
+
+.fv-globalnav__item:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.fv-globalnav__item--active {
+  color: #fff;
+  background: #1f6feb;
+  opacity: 1;
+}
+
+/* Top nav -------------------------------------------------------------- */
+.fv-topnav {  display: flex;
   align-items: center;
   gap: 16px;
   padding: 0 16px;
@@ -516,6 +567,8 @@ a {
   background: #1b2434;
   border-bottom: 1px solid #2a3447;
   flex-shrink: 0;
+  position: relative;
+  z-index: 1000;
 }
 
 .fv-topnav__left {
@@ -524,6 +577,17 @@ a {
   gap: 16px;
   min-width: 0;
   flex: 1;
+}
+
+.fv-topnav__logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #58a6ff;
+  white-space: nowrap;
 }
 
 .fv-topnav__right {
@@ -615,7 +679,7 @@ a {
   list-style: none;
   margin: 0;
   padding: 4px 0;
-  z-index: 50;
+  z-index: 1200;
   max-height: 320px;
   overflow-y: auto;
 }
@@ -5529,6 +5593,61 @@ select.fv-voyage__input {
   color: #8b949e;
 }
 
+/* --- Generate route popup ----------------------------------------- */
+.fv-route__modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 9, 18, 0.6);
+}
+
+.fv-route__modal {
+  width: min(560px, calc(100vw - 32px));
+  background: #11192a;
+  border: 1px solid #2a3447;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.fv-route__modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #2a3447;
+  background: #0e1626;
+}
+
+.fv-route__modal-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: #cde3ff;
+}
+
+.fv-route__modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #8b98ad;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.fv-route__modal-close:hover {
+  color: #fff;
+  background: #172032;
+}
+
 .fv-route__gen-field span {
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -5731,7 +5850,7 @@ select.fv-voyage__input {
   flex: 0 0 300px;
   display: flex;
   flex-direction: column;
-  max-height: 640px;
+  max-height: 820px;
   background: #0d1626;
   border: 1px solid #2a3447;
   border-radius: 6px;
@@ -5764,6 +5883,26 @@ select.fv-voyage__input {
   border: 1px solid #2a3447;
   border-radius: 10px;
   padding: 1px 8px;
+}
+
+.fv-route__map-actions {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+  background: rgba(13, 22, 38, 0.92);
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.fv-route__map-actions .fv-route__btn {
+  white-space: nowrap;
 }
 
 .fv-route__side-scroll {
@@ -6021,7 +6160,7 @@ select.fv-voyage__input {
 
 .fv-route-map__canvas {
   width: 100%;
-  height: 640px;
+  height: 820px;
 }
 
 .fv-route__map-hint {
@@ -6666,11 +6805,17 @@ select.fv-voyage__input {
 
 .fv-route__saved {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
+  flex: 0 0 auto;
+  max-height: 320px;
+  overflow-y: auto;
   padding: 10px 12px;
-  border-top: 1px solid #2a3447;
+  background: rgba(13, 22, 38, 0.94);
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
 .fv-route__saved-label {
@@ -6681,60 +6826,114 @@ select.fv-voyage__input {
   color: #8b949e;
 }
 
-.fv-route__saved-list {
+.fv-route__saved-head {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
 }
 
-.fv-route__saved-item {
+.fv-route__saved-actions {
   display: inline-flex;
-  align-items: stretch;
+  gap: 6px;
+}
+
+.fv-route__saved-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #c9d1d9;
+  background: #1b2434;
   border: 1px solid #2a3447;
   border-radius: 4px;
-  overflow: hidden;
-  background: #1b2434;
+  cursor: pointer;
+}
+
+.fv-route__saved-act:hover:not(:disabled) {
+  background: #243049;
+  color: #fff;
+}
+
+.fv-route__saved-act--danger:hover:not(:disabled) {
+  background: #3d1f23;
+  border-color: #6e2b30;
+  color: #ff7b72;
+}
+
+.fv-route__saved-act:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.fv-route__saved-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.fv-route__saved-table thead th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+  padding: 4px 6px;
+  border-bottom: 1px solid #2a3447;
+}
+
+.fv-route__saved-table tbody td {
+  padding: 3px 6px;
+  border-bottom: 1px solid #1c2536;
+  vertical-align: middle;
+}
+
+.fv-route__saved-check {
+  width: 26px;
+  text-align: center;
+}
+
+.fv-route__saved-check input {
+  cursor: pointer;
+}
+
+.fv-route__saved-trow--compare td {
+  background: rgba(31, 111, 235, 0.14);
+}
+
+.fv-route__saved-date {
+  color: #8b949e;
+  white-space: nowrap;
 }
 
 .fv-route__saved-load {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   background: transparent;
   color: #e6edf3;
   border: none;
-  padding: 5px 10px;
+  padding: 2px 0;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  text-align: left;
 }
 
 .fv-route__saved-load:hover {
-  background: #243049;
-  color: #fff;
+  color: #58a6ff;
 }
 
-.fv-route__saved-meta {
-  color: #8b949e;
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.fv-route__saved-del {
-  border: none;
-  border-left: 1px solid #2a3447;
-  background: transparent;
-  color: #8b949e;
-  padding: 0 9px;
-  cursor: pointer;
-}
-
-.fv-route__saved-del:hover {
-  background: #3d1f23;
-  color: #ff7b72;
+.fv-route__saved-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: 0 0 auto;
 }
 
 .fv-route__icon-btn {
@@ -8283,6 +8482,10 @@ select.fv-voyage__input {
   background: #f7f9fc;
   border: 1px solid #d6dde7;
 }
+.fv-light .fv-route__gen-panel {
+  background: #f7f9fc;
+  border: 1px solid #d6dde7;
+}
 .fv-light .fv-route__side-head,
 .fv-light .fv-route__side-table thead th {
   color: #1b2330;
@@ -8343,14 +8546,21 @@ select.fv-voyage__input {
 .fv-light .fv-route__wp-detail-toggle {
   color: #3f4a5a;
 }
-.fv-light .fv-route__saved-item,
-.fv-light .fv-route__saved-load {
+.fv-light .fv-route__saved-act {
   background: #ffffff;
   color: #1b2330;
   border: 1px solid #d6dde7;
 }
+.fv-light .fv-route__saved {
+  background: #ffffff;
+  border: 1px solid #d6dde7;
+  box-shadow: 0 4px 14px rgba(15, 32, 61, 0.08);
+}
+.fv-light .fv-route__saved-table tbody td {
+  border-bottom: 1px solid #e4eaf2;
+}
 .fv-light .fv-route__saved-load:hover {
-  background: #e7edf6;
+  color: #1559c4;
 }
 .fv-light .fv-route__wp-table th,
 .fv-light .fv-route__wp-table td {
@@ -9467,6 +9677,9 @@ select.fv-voyage__input {
 .leaflet-right .fv-wp-control {
   margin-right: 12px;
 }
+.fv-wp-control {
+  position: relative;
+}
 
 /* When several of these icon controls share the top-right corner (e.g. the
    main map stacks area-constraints + weather-field + weather-point), their
@@ -9479,7 +9692,8 @@ select.fv-voyage__input {
 .leaflet-top.leaflet-right .fv-wf-control + .fv-ac-control,
 .leaflet-top.leaflet-right .fv-wf-control + .fv-wp-control,
 .leaflet-top.leaflet-right .fv-wp-control + .fv-ac-control,
-.leaflet-top.leaflet-right .fv-wp-control + .fv-wf-control {
+.leaflet-top.leaflet-right .fv-wp-control + .fv-wf-control,
+.leaflet-top.leaflet-right .fv-wp-control + .fv-wp-control {
   margin-top: 8px;
 }
 .fv-wp-control__btn {
@@ -9503,6 +9717,53 @@ select.fv-voyage__input {
   background: #1f6feb;
   border-color: #1f6feb;
   color: #fff;
+}
+.fv-wp-control__readout {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: #11192a;
+  border: 1px solid #2a3447;
+  color: #c4cedd;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.fv-wp-control__readout-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid #2a3447;
+  color: #c4cedd;
+  cursor: pointer;
+}
+.fv-wp-control__readout-clear:hover {
+  color: #fff;
+  border-color: #3a4a66;
+}
+.fv-ruler-dot span {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #39c5cf;
+  border: 2px solid #0b1220;
+  box-shadow: 0 0 0 1px #39c5cf;
+  cursor: grab;
+}
+.fv-ruler-dot:active span {
+  cursor: grabbing;
 }
 .fv-wp-popup .leaflet-popup-content {
   margin: 0;

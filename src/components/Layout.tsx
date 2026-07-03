@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
 import { useFleetView } from '../context/FleetViewContext';
+import { GlobalNav } from './GlobalNav';
 import { LeftSidebar } from './LeftSidebar';
 import { MapView } from './MapView';
 import { TopNav } from './TopNav';
@@ -22,7 +23,7 @@ import { BottomPanel } from './BottomPanel';
  * navigating between pages without losing their dashboard chrome.
  */
 export function Layout({ children }: { children?: ReactNode }) {
-  const { isLoading, error, user, isStubbed } = useFleetView();
+  const { isLoading, error, user } = useFleetView();
 
   if (isLoading) {
     return <div className="fv-loading">Loading FleetView…</div>;
@@ -42,13 +43,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 
   return (
     <div id="page-wrapper">
-      {isStubbed && (
-        <div className="fv-dev-banner">
-          DEV MODE — backend at <code>https://localhost:5001</code> is unreachable
-          or you are not signed in. Showing a stub user so the layout renders.
-          API calls from individual components will still fail.
-        </div>
-      )}
+      <GlobalNav />
       <div id="dynamicStuff">
         <div id="HiddenMap" />
         <div id="TestImage" />

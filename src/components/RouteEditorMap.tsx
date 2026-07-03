@@ -13,6 +13,7 @@ import L, { type LatLngExpression } from 'leaflet';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
 import { WeatherPointControl } from './WeatherPointControl';
+import { PortsControl, RulerControl } from './MapToolsControl';
 import { MapCursorPosition } from './MapCursorPosition';
 
 const toRad = (d: number) => (d * Math.PI) / 180;
@@ -398,6 +399,8 @@ export function RouteEditorMap({
       <AreaConstraintsControl position="topright" />
       <WeatherFieldControl position="topright" />
       <WeatherPointControl position="topright" />
+      <PortsControl position="topright" />
+      <RulerControl position="topright" />
       <MapCursorPosition />
     </MapContainer>
   );

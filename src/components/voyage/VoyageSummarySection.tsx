@@ -1,22 +1,19 @@
-import type { Dispatch, SetStateAction } from 'react';
-
-import { Badge, Card, Field, Info } from './primitives';
+import { Badge, Card, Info } from './primitives';
 import type { VoyageView } from './types';
 
 interface Props {
   view: VoyageView;
-  isCreate: boolean;
-  setView: Dispatch<SetStateAction<VoyageView>>;
   title: string;
   collapsed: boolean;
   onToggleCollapse: () => void;
 }
 
-/** Read-only voyage roll-up shown at the top of the page. */
-export function VoyageSummarySection({ view, isCreate, setView, title, collapsed, onToggleCollapse }: Props) {
-  const set = <K extends keyof VoyageView>(key: K, value: VoyageView[K]) =>
-    setView((prev) => ({ ...prev, [key]: value }));
-
+/**
+ * Read-only voyage roll-up shown at the top of the page. Every value is
+ * derived from the shared `view` state, so it always reflects the saved
+ * voyage (or the data currently being edited in the other sections).
+ */
+export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse }: Props) {
   const firstLeg = view.legs[0];
   const lastLeg = view.legs[view.legs.length - 1];
   const route =
@@ -35,19 +32,16 @@ export function VoyageSummarySection({ view, isCreate, setView, title, collapsed
   return (
     <Card title={title} collapsed={collapsed} onToggleCollapse={onToggleCollapse}>
       <div className="fv-voyage__summary">
-        <Field label="Vessel Name" value={view.vesselName} editing={isCreate} onChange={(x) => set('vesselName', x)} />
-        <Field label="IMO" value={view.imo} editing={isCreate} onChange={(x) => set('imo', x)} />
-        <Field label="Vessel Type" value={view.vesselType} editing={isCreate} onChange={(x) => set('vesselType', x)} />
-        <Field label="Flag" value={view.flag} editing={isCreate} onChange={(x) => set('flag', x)} />
-        <Field label="Client" value={view.client} editing={isCreate} onChange={(x) => set('client', x)} />
-        <Field label="Service Type" value={view.serviceType} editing={isCreate} onChange={(x) => set('serviceType', x)} />
-        <Field label="PIC" value={view.pic} editing={isCreate} onChange={(x) => set('pic', x)} />
-        <Field
+        <Info label="Vessel Name" value={view.vesselName} />
+        <Info label="IMO" value={view.imo} />
+        <Info label="Vessel Type" value={view.vesselType} />
+        <Info label="Flag" value={view.flag} />
+        <Info label="Client" value={view.client} />
+        <Info label="Service Type" value={view.serviceType} />
+        <Info label="PIC" value={view.pic} />
+        <Info
           label="Status"
-          value={view.status}
-          editing={isCreate}
-          onChange={(x) => set('status', x)}
-          display={view.status ? <Badge tone="active">{view.status}</Badge> : '—'}
+          value={view.status ? <Badge tone="active">{view.status}</Badge> : '—'}
         />
         <Info label="Route" value={route} />
         <Info label="Departure (ETD)" value={departure} />

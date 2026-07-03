@@ -33,6 +33,8 @@ export interface SubLeg {
   to: string;
   etd: string;
   autoRoute: boolean;
+  /** When true, this sub-leg inherits the parent leg's CP / good-weather criteria. */
+  useDefaultCp?: boolean;
   // CP details / good-weather criteria (per sub-leg / intermediate port).
   cpWinds: string;
   cpDss: string;
@@ -52,6 +54,8 @@ export interface LegRow {
   status: string;
   etdLocalTime: boolean;
   autoRoute: boolean;
+  /** Total great-circle distance of the leg, e.g. "3,240 NM". */
+  distanceNm: string;
   draft: string;
   displacement: string;
   gm: string;
@@ -232,6 +236,12 @@ export const CP_CURRENTS_OPTIONS = [
   'No Currents',
 ];
 export const CP_GOOD_WEATHER_OPTIONS = ['50%', '75%', 'Standard'];
+export const CP_ALLOWABLE_FUEL_METHOD_OPTIONS = [
+  '5% Method',
+  'Double About Method',
+  'Gaz Energy Method',
+  'Half Knots Method',
+];
 export const OPTIMIZATION_MODE_OPTIONS = [
   'Min Fuel',
   'Min Time',

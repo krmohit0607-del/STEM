@@ -181,7 +181,7 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
               click: () => {
                 writeSelectedVoyageId(v.id);
                 window.open(
-                  `/vessel-route?voyage=${encodeURIComponent(v.id)}`,
+                  `/route-explorer?voyage=${encodeURIComponent(v.id)}`,
                   '_blank',
                   'noopener,noreferrer',
                 );

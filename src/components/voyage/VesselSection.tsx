@@ -40,6 +40,30 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
   // Speed & Cons profile shows one load condition at a time.
   const [profileCondition, setProfileCondition] = useState<'Ballast' | 'Laden'>('Ballast');
 
+  const addEngineRow = () =>
+    setView((prev) => ({
+      ...prev,
+      engineSpeedCons: [
+        ...prev.engineSpeedCons,
+        {
+          condition: profileCondition,
+          speed: '',
+          consME: '',
+          consAE: '',
+          rpm: '',
+          mcrPercent: '',
+          powerKw: '',
+          eplLimit: '',
+        },
+      ],
+    }));
+
+  const removeEngineRow = (i: number) =>
+    setView((prev) => ({
+      ...prev,
+      engineSpeedCons: prev.engineSpeedCons.filter((_, idx) => idx !== i),
+    }));
+
   return (
     <Card
       id="vessel"
@@ -243,6 +267,7 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
                 <th>MCR %</th>
                 <th>Power (KW)</th>
                 <th>EPL Limit</th>
+                {editing && <th aria-label="Actions" />}
               </tr>
             </thead>
             <tbody>
@@ -256,12 +281,31 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
                     <td><Cell editing={editing} value={row.mcrPercent} onChange={(x) => setEngine(i, 'mcrPercent', x)} /></td>
                     <td><Cell editing={editing} value={row.powerKw} onChange={(x) => setEngine(i, 'powerKw', x)} /></td>
                     <td><Cell editing={editing} value={row.eplLimit} onChange={(x) => setEngine(i, 'eplLimit', x)} /></td>
+                    {editing && (
+                      <td>
+                        <button
+                          type="button"
+                          className="fv-voyage__icon-btn"
+                          onClick={() => removeEngineRow(i)}
+                          aria-label="Remove row"
+                        >
+                          <i className="fas fa-trash" aria-hidden="true" />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ) : null,
               )}
             </tbody>
           </table>
         </div>
+        {editing && (
+          <div className="fv-voyage__leg-actions">
+            <button type="button" className="fv-voyage__btn" onClick={addEngineRow}>
+              <i className="fas fa-plus" aria-hidden="true" /> Add More
+            </button>
+          </div>
+        )}
       </div>
     </Card>
   );

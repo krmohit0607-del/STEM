@@ -119,6 +119,7 @@ export function emptyLeg(no: string): LegRow {  return {
     status: 'Planning',
     etdLocalTime: true,
     autoRoute: true,
+    distanceNm: '',
     draft: '',
     displacement: '',
     gm: '',
@@ -315,6 +316,7 @@ export function buildView(v: Voyage): VoyageView {
     swh: string,
     wind: string,
     sea: string,
+    distanceNm: string,
   ): LegRow => ({
     no,
     name: `${from} → ${to}`,
@@ -325,6 +327,7 @@ export function buildView(v: Voyage): VoyageView {
     status,
     etdLocalTime: true,
     autoRoute: true,
+    distanceNm,
     draft,
     displacement,
     gm,
@@ -360,11 +363,14 @@ export function buildView(v: Voyage): VoyageView {
   const ladenDisp = numFmt(summerDisp * 0.92);
   const ballastDisp = numFmt(summerDisp * 0.46);
 
+  const legDist = (idx: number) =>
+    `${Math.round(1500 + r[21 + idx] * 4200).toLocaleString()} NM`;
+
   const legs: LegRow[] = [
-    mkLeg('LEG-1', 'Delivery', v.portFrom, interim, v.etdDisplay, 'Complete', ballastDraft.toFixed(1), ballastDisp, '4', '7', '5'),
-    mkLeg('LEG-2', 'Laden', interim, v.portTo, addDays(v.etdDisplay, 4), 'Active', ladenDraft.toFixed(1), ladenDisp, '4.5', '7', '5'),
-    mkLeg('LEG-3', 'Ballast', v.portTo, 'Singapore (SGSIN)', addDays(v.etdDisplay, 11), 'Planning', ballastDraft.toFixed(1), ballastDisp, '5', '8', '6'),
-    mkLeg('LEG-4', 'Redelivery', 'Singapore (SGSIN)', v.portFrom, addDays(v.etdDisplay, 18), 'Planning', ladenDraft.toFixed(1), ladenDisp, '4', '7', '5'),
+    mkLeg('LEG-1', 'Delivery', v.portFrom, interim, v.etdDisplay, 'Complete', ballastDraft.toFixed(1), ballastDisp, '4', '7', '5', legDist(0)),
+    mkLeg('LEG-2', 'Laden', interim, v.portTo, addDays(v.etdDisplay, 4), 'Active', ladenDraft.toFixed(1), ladenDisp, '4.5', '7', '5', legDist(1)),
+    mkLeg('LEG-3', 'Ballast', v.portTo, 'Singapore (SGSIN)', addDays(v.etdDisplay, 11), 'Planning', ballastDraft.toFixed(1), ballastDisp, '5', '8', '6', legDist(2)),
+    mkLeg('LEG-4', 'Redelivery', 'Singapore (SGSIN)', v.portFrom, addDays(v.etdDisplay, 18), 'Planning', ladenDraft.toFixed(1), ladenDisp, '4', '7', '5', legDist(3)),
   ];
 
   // Seed LEG-2 with an intermediate port to demonstrate sub-legs.

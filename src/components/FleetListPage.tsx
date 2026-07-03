@@ -618,7 +618,7 @@ function renderCell(row: TaskRow, key: keyof TaskRow): React.ReactNode {
     return (
       <Link
         className={`fv-fleet-grid__vessel-link fv-fleet-grid__vessel-link--${row.priority.toLowerCase()}`}
-        to={`/vessel-route?voyage=${encodeURIComponent(row.orderId)}`}
+        to={`/route-explorer?voyage=${encodeURIComponent(row.orderId)}`}
         target="_blank"
         rel="noopener noreferrer"
         onClick={() => writeSelectedVoyageId(row.orderId)}
@@ -776,10 +776,10 @@ export function FleetListPage() {
       <header className="fv-fleet__topbar">
         <div className="fv-fleet__brand">
           <i className="fas fa-ship" aria-hidden="true" />
-          <span>FleetView</span>
+          <span>STEM</span>
         </div>
 
-        {!shiftView && (
+        {!shiftView && view !== 'map' && (
           <div className="fv-fleet__topbar-fields">
             <label>
               <span>{t('timeFrom', 'Time From')}</span>
@@ -812,15 +812,17 @@ export function FleetListPage() {
         )}
 
         <div className="fv-fleet__topbar-actions">
-          <button
-            type="button"
-            className={`fv-fleet__btn${shiftView ? ' fv-fleet__btn--active' : ''}`}
-            onClick={() => setShiftView((prev) => !prev)}
-            aria-pressed={shiftView}
-          >
-            <i className="fas fa-right-left" aria-hidden="true" />
-            <span>{t('shiftView', 'Shift View')}</span>
-          </button>
+          {view !== 'map' && (
+            <button
+              type="button"
+              className={`fv-fleet__btn${shiftView ? ' fv-fleet__btn--active' : ''}`}
+              onClick={() => setShiftView((prev) => !prev)}
+              aria-pressed={shiftView}
+            >
+              <i className="fas fa-right-left" aria-hidden="true" />
+              <span>{t('shiftView', 'Shift View')}</span>
+            </button>
+          )}
 
           <div className="fv-fleet__view-toggle" role="group" aria-label="Fleet view">
             <button
@@ -949,7 +951,7 @@ export function FleetListPage() {
       </section>
 
       {/* TASKS HIGHLIGHT -------------------------------------------- */}
-      {!shiftView && (
+      {!shiftView && view !== 'map' && (
         <section className="fv-fleet-tasks" aria-label="Task highlights">
           <span className="fv-fleet-tasks__label">
             {t('tasksHighlight', 'Tasks Highlight')}
