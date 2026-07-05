@@ -867,6 +867,823 @@ a {
   font-size: 12px;
 }
 
+/* Route Simulator inside the bottom drawer ---------------------------- */
+/* Themed via CSS variables: dark by default, light under `.fv-light`. */
+.fv-sim2 {
+  --sim-bg: #0d1524;
+  --sim-surface: #0e1626;
+  --sim-border: #24314a;
+  --sim-line: #1b273d;
+  --sim-text: #e6edf3;
+  --sim-strong: #f0f6fc;
+  --sim-muted: #8b98a5;
+  --sim-faint: #6b7b8c;
+  --sim-accent: #58a6ff;
+  --sim-accent-strong: #1f6feb;
+  --sim-hover: #16202f;
+  --sim-sel: #16263f;
+  --sim-rose-fill: #0b1322;
+  --sim-live-on: #3fb950;
+  --sim-limit: #f85149;
+  /* Shared height of the top band: chart == weather read-out. */
+  --sim-top-h: 100px;
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--sim-bg);
+  color: var(--sim-text);
+  font-size: 11px;
+}
+.fv-light .fv-sim2 {
+  --sim-bg: #f4f6f9;
+  --sim-surface: #fff;
+  --sim-border: #e2e8ee;
+  --sim-line: #eef2f6;
+  --sim-text: #24313d;
+  --sim-strong: #14212e;
+  --sim-muted: #8a97a4;
+  --sim-faint: #6b7b8c;
+  --sim-accent: #1f6feb;
+  --sim-accent-strong: #1f6feb;
+  --sim-hover: #f7fafc;
+  --sim-sel: #eaf2fe;
+  --sim-rose-fill: #fbfdff;
+  --sim-live-on: #2ea043;
+  --sim-limit: #e5534b;
+}
+
+.fv-sim2__empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px 16px;
+  text-align: center;
+  color: var(--sim-muted);
+}
+.fv-sim2__empty > i {
+  font-size: 20px;
+  color: var(--sim-faint);
+}
+.fv-sim2__empty p {
+  margin: 0;
+  max-width: 420px;
+  line-height: 1.5;
+}
+.fv-sim2__add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--sim-border);
+  border-radius: 6px;
+  background: var(--sim-surface);
+  color: var(--sim-accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+.fv-sim2__add-btn:hover {
+  border-color: var(--sim-accent);
+}
+
+/* Layout: top row (read-out+controls | chart), then full-width routes --- */
+.fv-sim2__top {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex: none;
+  border-bottom: 1px solid var(--sim-border);
+}
+
+.fv-sim2__side {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 312px;
+  flex: none;
+  padding: 5px 10px;
+  border-right: 1px solid var(--sim-border);
+  background: var(--sim-surface);
+  overflow: hidden;
+}
+.fv-sim2__info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.fv-sim2__readout {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fv-sim2__ro {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.25;
+}
+.fv-sim2__ro > i {
+  color: var(--sim-faint);
+  text-align: center;
+  font-size: 12px;
+}
+.fv-sim2__ro-label {
+  color: var(--sim-muted);
+}
+.fv-sim2__ro-value {
+  font-weight: 600;
+  color: var(--sim-strong);
+  white-space: nowrap;
+}
+.fv-sim2__rose {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex: none;
+}
+.fv-sim2__rose-svg {
+  width: 96px;
+  height: 96px;
+}
+.fv-sim2__rose-ring {
+  fill: var(--sim-rose-fill);
+  stroke: var(--sim-border);
+  stroke-width: 1;
+}
+.fv-sim2__rose-ring--inner {
+  fill: none;
+  stroke-dasharray: 2 2;
+}
+.fv-sim2__rose-tick {
+  stroke: var(--sim-muted);
+  stroke-width: 1.5;
+}
+.fv-sim2__rose-label {
+  fill: var(--sim-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+.fv-sim2__rose-ship {
+  fill: var(--sim-accent);
+}
+
+/* Chart --------------------------------------------------------------- */
+.fv-sim2__chart {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  height: 140px;
+  min-width: 0;
+  padding: 4px 12px 6px;
+  background: var(--sim-surface);
+}
+.fv-sim2__chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  margin-bottom: 2px;
+}
+.fv-sim2__factor-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.fv-sim2__factor-select select {
+  appearance: none;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--sim-strong);
+  padding: 2px 18px 2px 4px;
+  cursor: pointer;
+}
+.fv-sim2__factor-select select option {
+  color: #14212e;
+}
+.fv-sim2__factor-select > i {
+  position: absolute;
+  right: 4px;
+  pointer-events: none;
+  font-size: 9px;
+  color: var(--sim-faint);
+}
+.fv-sim2__live {
+  position: absolute;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--sim-muted);
+}
+.fv-sim2__live--on {
+  color: var(--sim-live-on);
+}
+
+.fv-sim2__plot {
+  display: flex;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.fv-sim2__yaxis {
+  position: relative;
+  width: 22px;
+  flex: none;
+}
+.fv-sim2__yaxis > span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  font-size: 9px;
+  color: var(--sim-muted);
+}
+.fv-sim2__plot-area {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  border-left: 1px solid var(--sim-border);
+  border-bottom: 1px solid var(--sim-border);
+  padding-bottom: 14px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.fv-sim2__svg {
+  width: 100%;
+  height: calc(100% - 14px);
+  display: block;
+  pointer-events: none;
+}
+.fv-sim2__limit {
+  stroke: var(--sim-limit);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.fv-sim2__cursor {
+  position: absolute;
+  top: 0;
+  bottom: 14px;
+  width: 2px;
+  background: var(--sim-accent-strong);
+  transform: translateX(-1px);
+  z-index: 2;
+  pointer-events: none;
+}
+.fv-sim2__cursor::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sim-accent-strong);
+  transform: translateX(-50%);
+}
+.fv-sim2__cursor-grip {
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--sim-accent-strong);
+  border: 2px solid var(--sim-surface);
+  transform: translateX(-50%);
+}
+.fv-sim2__tooltip {
+  position: absolute;
+  top: 2px;
+  z-index: 3;
+  min-width: 88px;
+  transform: translateX(6px);
+  background: var(--sim-surface);
+  border: 1px solid var(--sim-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  padding: 4px 7px;
+  font-size: 9px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+.fv-light .fv-sim2__tooltip {
+  box-shadow: 0 4px 14px rgba(20, 33, 46, 0.12);
+}
+.fv-sim2__tooltip--left {
+  transform: translateX(-6px) translateX(-100%);
+}
+.fv-sim2__tt-time {
+  font-weight: 700;
+  color: var(--sim-strong);
+  margin-bottom: 2px;
+  white-space: nowrap;
+}
+.fv-sim2__tt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.fv-sim2__tt-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--sim-text);
+  white-space: nowrap;
+}
+.fv-sim2__tt-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+.fv-sim2__tt-dot--limit {
+  background: var(--sim-limit);
+}
+.fv-sim2__tt-thresh {
+  margin-top: 3px;
+  color: var(--sim-limit);
+  font-weight: 600;
+}
+.fv-sim2__xaxis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 12px;
+  pointer-events: none;
+}
+.fv-sim2__xaxis > span {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 9px;
+  color: var(--sim-muted);
+  white-space: nowrap;
+}
+
+/* Playback controls --------------------------------------------------- */
+.fv-sim2__controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+}
+.fv-sim2__coords {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sim-strong);
+  white-space: nowrap;
+}
+.fv-sim2__buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.fv-sim2__buttons button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--sim-border);
+  border-radius: 5px;
+  background: var(--sim-surface);
+  color: var(--sim-text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.fv-sim2__buttons button:hover {
+  border-color: var(--sim-accent);
+  color: var(--sim-accent);
+}
+.fv-sim2__play {
+  background: var(--sim-accent-strong) !important;
+  border-color: var(--sim-accent-strong) !important;
+  color: #fff !important;
+}
+.fv-sim2__play:hover {
+  filter: brightness(1.08);
+  color: #fff !important;
+}
+.fv-sim2__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--sim-accent-strong);
+}
+
+/* Routes table -------------------------------------------------------- */
+.fv-sim2__routes {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--sim-surface);
+}
+.fv-sim2__routes-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--sim-border);
+}
+.fv-sim2__routes-count {
+  font-weight: 700;
+  color: var(--sim-strong);
+}
+.fv-sim2__routes-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--sim-border);
+  border-radius: 5px;
+  background: var(--sim-surface);
+  color: var(--sim-accent);
+  cursor: pointer;
+}
+.fv-sim2__routes-add:hover {
+  border-color: var(--sim-accent);
+}
+.fv-sim2__routes-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.fv-sim2__routes-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--sim-border);
+  border-radius: 5px;
+  background: var(--sim-surface);
+  color: var(--sim-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.fv-sim2__routes-btn:hover:not(:disabled) {
+  color: var(--sim-accent);
+  border-color: var(--sim-accent);
+  background: var(--sim-hover);
+}
+.fv-sim2__routes-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Export-preferences modal ------------------------------------------- */
+.fv-sim2__export-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(4, 9, 18, 0.55);
+}
+.fv-sim2__export {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  background: var(--sim-surface);
+  border: 1px solid var(--sim-border);
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.fv-sim2__export-head {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--sim-border);
+}
+.fv-sim2__export-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sim-strong);
+}
+.fv-sim2__export-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 20px 20px;
+}
+.fv-sim2__export-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 0;
+}
+.fv-sim2__export-sec + .fv-sim2__export-sec {
+  border-top: 1px solid var(--sim-line);
+}
+.fv-sim2__export-sec-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sim-strong);
+  margin-bottom: 4px;
+}
+.fv-sim2__export-opt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+.fv-sim2__export-opt input {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--sim-accent-strong);
+  flex: none;
+}
+.fv-sim2__export-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex: none;
+}
+.fv-sim2__export-opt-label {
+  color: var(--sim-text);
+  font-weight: 600;
+}
+.fv-sim2__export-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--sim-border);
+}
+.fv-sim2__export-btn {
+  border: none;
+  background: transparent;
+  color: var(--sim-accent);
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-sim2__export-btn:hover:not(:disabled) {
+  background: var(--sim-hover);
+}
+.fv-sim2__export-btn--primary {
+  color: #fff;
+  background: var(--sim-accent-strong);
+}
+.fv-sim2__export-btn--primary:hover:not(:disabled) {
+  background: var(--sim-accent-strong);
+  filter: brightness(1.08);
+}
+.fv-sim2__export-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.fv-sim2__table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.fv-sim2__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.fv-sim2__table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: right;
+  padding: 4px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sim-muted);
+  white-space: nowrap;
+  background: var(--sim-surface);
+  border-bottom: 1px solid var(--sim-border);
+}
+.fv-sim2__table thead th.fv-sim2__col-name {
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fv-sim2__table tbody td {
+  text-align: right;
+  padding: 3px 8px;
+  color: var(--sim-text);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--sim-line);
+}
+.fv-sim2__table tbody tr {
+  cursor: pointer;
+}
+.fv-sim2__table tbody tr:hover {
+  background: var(--sim-hover);
+}
+.fv-sim2__trow--sel {
+  background: var(--sim-sel) !important;
+}
+.fv-sim2__col-name {
+  text-align: left !important;
+}
+.fv-sim2__table td.fv-sim2__col-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fv-sim2__swatch {
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  flex: none;
+}
+.fv-sim2__route-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.fv-sim2__route-name {
+  font-weight: 600;
+  color: var(--sim-accent);
+}
+.fv-sim2__route-sub {
+  font-size: 9px;
+  color: var(--sim-muted);
+}
+.fv-sim2__badge {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.fv-sim2__badge--active {
+  background: rgba(63, 185, 80, 0.18);
+  color: #3fb950;
+}
+.fv-light .fv-sim2__badge--active {
+  background: #e6f4ea;
+  color: #1a7f37;
+}
+.fv-sim2__row-x {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--sim-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.fv-sim2__row-x:hover {
+  color: var(--sim-limit);
+}
+
+/* Row checkbox + action buttons. */
+.fv-sim2__col-check {
+  width: 26px;
+  text-align: center !important;
+  padding-left: 8px !important;
+  padding-right: 0 !important;
+}
+.fv-sim2__col-check input {
+  cursor: pointer;
+  accent-color: var(--sim-accent-strong);
+}
+.fv-sim2__row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.fv-sim2__row-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sim-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.fv-sim2__row-btn:hover:not(:disabled) {
+  color: var(--sim-accent);
+  background: var(--sim-hover);
+}
+.fv-sim2__row-btn--danger:hover:not(:disabled) {
+  color: var(--sim-limit);
+}
+.fv-sim2__row-active--on {
+  color: #3fb950;
+  cursor: default;
+}
+.fv-light .fv-sim2__row-active--on {
+  color: #1a7f37;
+}
+
+/* Saved-routes picker ------------------------------------------------- */
+.fv-sim2__picker {
+  border: 1px solid var(--sim-border);
+  border-radius: 8px;
+  background: var(--sim-surface);
+  margin: 6px 12px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+.fv-light .fv-sim2__picker {
+  box-shadow: 0 6px 18px rgba(20, 33, 46, 0.08);
+}
+.fv-sim2__picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 11px;
+  border-bottom: 1px solid var(--sim-line);
+  font-weight: 700;
+  color: var(--sim-strong);
+}
+.fv-sim2__picker-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.fv-sim2__picker-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--sim-border);
+  border-radius: 6px;
+  background: var(--sim-surface);
+  color: var(--sim-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.fv-sim2__picker-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.fv-sim2__picker-danger:not(:disabled):hover {
+  border-color: var(--sim-limit);
+  color: var(--sim-limit);
+}
+.fv-sim2__picker-empty {
+  margin: 0;
+  padding: 12px;
+  color: var(--sim-muted);
+}
+.fv-sim2__picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 150px;
+  overflow: auto;
+}
+.fv-sim2__picker-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-sim2__picker-list label:hover {
+  background: var(--sim-hover);
+}
+.fv-sim2__picker-list label > i {
+  color: var(--sim-faint);
+}
+.fv-sim2__picker-name {
+  flex: 1 1 auto;
+  color: var(--sim-text);
+}
+.fv-sim2__picker-date {
+  font-size: 10px;
+  color: var(--sim-muted);
+}
+
 /* Fleet List View page (/main) ---------------------------------------- */
 .fv-fleet {
   display: flex;
@@ -1773,6 +2590,419 @@ a {
   color: #f0b429;
 }
 
+/* Settings popup (Profile Settings → Settings) ------------------------ */
+.fv-settings-modal__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(4, 9, 18, 0.6);
+}
+.fv-settings-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, calc(100vw - 32px));
+  height: min(600px, calc(100vh - 48px));
+  background: #11192a;
+  border: 1px solid #2a3447;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.fv-settings-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #2a3447;
+  background: #0e1626;
+}
+.fv-settings-modal__head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #cde3ff;
+}
+.fv-settings-modal__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: #8b98ad;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-settings-modal__close:hover {
+  color: #fff;
+  background: #172032;
+}
+.fv-settings-modal__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.fv-settings-modal__nav {
+  flex: 0 0 240px;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px;
+  border-right: 1px solid #2a3447;
+  background: #0d1424;
+}
+.fv-settings-modal__nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  color: #c9d4e2;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.fv-settings-modal__nav-item i {
+  width: 16px;
+  text-align: center;
+  color: #7c8aa0;
+}
+.fv-settings-modal__nav-item:hover {
+  background: #16202f;
+  color: #ffffff;
+}
+.fv-settings-modal__nav-item--active,
+.fv-settings-modal__nav-item--active:hover {
+  background: #17324e;
+  color: #cde3ff;
+}
+.fv-settings-modal__nav-item--active i {
+  color: #58a6ff;
+}
+.fv-settings-modal__content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 22px;
+  color: #cdd9e5;
+}
+.fv-settings-modal__content-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #e6edf3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fv-settings-modal__content-title i {
+  color: #58a6ff;
+}
+.fv-light .fv-settings-modal {
+  background: #ffffff;
+  border-color: #dbe3ec;
+}
+.fv-light .fv-settings-modal__head {
+  background: #f5f8fb;
+  border-bottom-color: #dbe3ec;
+}
+.fv-light .fv-settings-modal__head h3 {
+  color: #14212e;
+}
+.fv-light .fv-settings-modal__close:hover {
+  color: #14212e;
+  background: #eef2f6;
+}
+.fv-light .fv-settings-modal__nav {
+  background: #f5f8fb;
+  border-right-color: #dbe3ec;
+}
+.fv-light .fv-settings-modal__nav-item {
+  color: #33414f;
+}
+.fv-light .fv-settings-modal__nav-item i {
+  color: #6b7a8d;
+}
+.fv-light .fv-settings-modal__nav-item:hover {
+  background: #eef2f6;
+  color: #14212e;
+}
+.fv-light .fv-settings-modal__nav-item--active,
+.fv-light .fv-settings-modal__nav-item--active:hover {
+  background: #e3edf9;
+  color: #14212e;
+}
+.fv-light .fv-settings-modal__content {
+  color: #33414f;
+}
+.fv-light .fv-settings-modal__content-title {
+  color: #14212e;
+}
+
+/* Email templates panel ----------------------------------------------- */
+.fv-email-templates {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.fv-email-templates__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fv-email-templates__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+}
+.fv-email-templates__search i {
+  position: absolute;
+  left: 12px;
+  color: #7c8aa0;
+  font-size: 12px;
+  pointer-events: none;
+}
+.fv-email-templates__search input {
+  width: 100%;
+  padding: 9px 12px 9px 32px;
+  font-size: 13px;
+  color: #e6edf3;
+  background: #0e1626;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+}
+.fv-email-templates__search input:focus {
+  outline: none;
+  border-color: #1f6feb;
+}
+.fv-email-templates__new {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffffff;
+  background: #1f6feb;
+  border: 1px solid #1f6feb;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-email-templates__new:hover {
+  filter: brightness(1.08);
+}
+.fv-email-templates__reset {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  color: #8b98ad;
+  background: #0e1626;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-email-templates__reset:hover {
+  color: #cde3ff;
+  border-color: #3d4b63;
+}
+.fv-email-templates__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fv-email-templates__empty {
+  color: #8b98ad;
+  font-size: 13px;
+  margin: 8px 0;
+}
+.fv-email-template {
+  border: 1px solid #2a3447;
+  border-radius: 8px;
+  background: #0e1626;
+  padding: 12px 14px;
+}
+.fv-email-template__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.fv-email-template__titles {
+  min-width: 0;
+}
+.fv-email-template__cat {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #58a6ff;
+  margin-bottom: 2px;
+}
+.fv-email-template__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: #e6edf3;
+}
+.fv-email-template__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.fv-email-template__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #c9d4e2;
+  background: #16202f;
+  border: 1px solid #2a3447;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.fv-email-template__btn:hover:not(:disabled) {
+  color: #cde3ff;
+  border-color: #3d4b63;
+}
+.fv-email-template__btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.fv-email-template__btn--danger:hover:not(:disabled) {
+  color: #ff7b72;
+  border-color: #6b2b2b;
+}
+.fv-email-template__btn--primary {
+  color: #ffffff;
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+.fv-email-template__btn--primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.fv-email-template__body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #c3cdd9;
+  white-space: pre-wrap;
+}
+.fv-email-template--edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-color: #1f6feb;
+}
+.fv-email-template__field-row {
+  display: flex;
+  gap: 10px;
+}
+.fv-email-template__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fv-email-template__field--cat {
+  flex: 0 0 200px;
+}
+.fv-email-template__field span {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b98ad;
+}
+.fv-email-template__field input,
+.fv-email-template__field textarea {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  color: #e6edf3;
+  background: #11192a;
+  border: 1px solid #2a3447;
+  border-radius: 5px;
+  font-family: inherit;
+  resize: vertical;
+}
+.fv-email-template__field input:focus,
+.fv-email-template__field textarea:focus {
+  outline: none;
+  border-color: #1f6feb;
+}
+.fv-email-template__edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.fv-light .fv-email-templates__search input {
+  color: #14212e;
+  background: #ffffff;
+  border-color: #dbe3ec;
+}
+.fv-light .fv-email-templates__reset {
+  color: #6b7a8d;
+  background: #ffffff;
+  border-color: #dbe3ec;
+}
+.fv-light .fv-email-template {
+  background: #f7fafc;
+  border-color: #dbe3ec;
+}
+.fv-light .fv-email-template__title {
+  color: #14212e;
+}
+.fv-light .fv-email-template__body {
+  color: #33414f;
+}
+.fv-light .fv-email-template__btn {
+  color: #33414f;
+  background: #ffffff;
+  border-color: #dbe3ec;
+}
+.fv-light .fv-email-template__btn:hover:not(:disabled) {
+  color: #14212e;
+  border-color: #b9c6d6;
+}
+.fv-light .fv-email-template__btn--primary {
+  color: #ffffff;
+  border-color: #1f6feb;
+}
+.fv-light .fv-email-template__field input,
+.fv-light .fv-email-template__field textarea {
+  color: #14212e;
+  background: #ffffff;
+  border-color: #dbe3ec;
+}
+
 /* Profile settings button --------------------------------------------- */
 .fv-fleet__profile-btn {
   display: inline-flex;
@@ -1781,6 +3011,7 @@ a {
   width: 34px;
   height: 34px;
   margin-left: 4px;
+
   background: #243049;
   color: #e6edf3;
   border: 1px solid #2a3447;
@@ -5457,6 +6688,22 @@ select.fv-voyage__input {
   min-height: 0;
 }
 
+/* Minimized side panel — collapses to a slim bar so the map fills the page. */
+.fv-route__side-col--collapsed {
+  flex: 0 0 auto;
+}
+.fv-route__side-col--collapsed .fv-route__side-panel {
+  flex: 0 0 auto;
+}
+.fv-route__side-col--collapsed .fv-route__side-head {
+  justify-content: center;
+  padding: 10px 8px;
+}
+.fv-route__side-col--collapsed .fv-route__side-head h3,
+.fv-route__side-col--collapsed .fv-route__side-count {
+  display: none;
+}
+
 .fv-route__gen-panel {
   background: #0d1626;
   border: 1px solid #2a3447;
@@ -5611,6 +6858,18 @@ select.fv-voyage__input {
   border-radius: 8px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
   overflow: hidden;
+}
+
+.fv-route__modal--sm {
+  width: min(380px, calc(100vw - 32px));
+}
+
+.fv-route__modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .fv-route__modal-head {
@@ -5883,6 +7142,59 @@ select.fv-voyage__input {
   border: 1px solid #2a3447;
   border-radius: 10px;
   padding: 1px 8px;
+  margin-left: auto;
+}
+
+.fv-route__side-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #2a3447;
+  border-radius: 5px;
+  background: #0e1626;
+  color: #8b98ad;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.fv-route__side-toggle:hover {
+  color: #cde3ff;
+  border-color: #3d4b63;
+}
+
+/* Waypoint-detail toolbar (insert / delete / set speed). */
+.fv-route__side-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #2a3447;
+  background: #0e1626;
+}
+.fv-route__side-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #cdd9e5;
+  background: #11192a;
+  border: 1px solid #2a3447;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.fv-route__side-tool:hover:not(:disabled) {
+  color: #cde3ff;
+  border-color: #3d4b63;
+  background: #16202f;
+}
+.fv-route__side-tool:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .fv-route__map-actions {
@@ -5962,6 +7274,17 @@ select.fv-voyage__input {
   color: #58a6ff;
   font-weight: 700;
   text-align: center;
+}
+
+.fv-route__side-check {
+  width: 28px;
+  text-align: center;
+  padding-left: 8px;
+  padding-right: 0;
+}
+.fv-route__side-check input {
+  cursor: pointer;
+  accent-color: #1f6feb;
 }
 
 .fv-route__side-input {
@@ -6755,6 +8078,21 @@ select.fv-voyage__input {
   border: none !important;
 }
 
+/* Shared world-port location-pin icon. */
+.fv-port-icon-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+.fv-port-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  color: #f0b429;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
 .fv-route-map__pin {
   display: inline-flex;
   align-items: center;
@@ -6778,6 +8116,30 @@ select.fv-voyage__input {
 
 .fv-route-map__pin--drift {
   color: #d29922;
+}
+
+.fv-route-map__pin--waypoint {
+  color: #58a6ff;
+}
+
+/* Plain waypoint / drift shown as a dot. */
+.fv-route-map__dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: currentColor;
+  border: 2px solid #0b1220;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+/* Waypoint of a simulated route (coloured dot; colour set inline). */
+.fv-route-map__route-wp {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
 
 .fv-route-map__pin--selected {
@@ -7489,6 +8851,16 @@ select.fv-voyage__input {
   background: transparent !important;
   border: none !important;
 }
+.fv-route__ship-vessel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+.fv-route__ship-vessel--active {
+  filter: drop-shadow(0 0 3px rgba(88, 166, 255, 0.9))
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
 .fv-route__ship-dot {
   display: inline-block;
   border-radius: 50%;
@@ -7703,15 +9075,10 @@ select.fv-voyage__input {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  background: #58a6ff;
-  color: #0e1626;
-  font-size: 16px;
-  box-shadow: 0 0 0 3px #fff, 0 0 0 6px rgba(88, 166, 255, 0.5),
-    0 4px 14px rgba(0, 0, 0, 0.5);
-  animation: fv-voyage-overview-pulse 1.8s ease-in-out infinite;
+  width: 28px;
+  height: 28px;
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.6))
+    drop-shadow(0 2px 4px rgba(0, 0, 0, 0.55));
 }
 @keyframes fv-voyage-overview-pulse {
   0%, 100% { transform: scale(1); }
@@ -7722,13 +9089,13 @@ select.fv-voyage__input {
   border: none !important;
 }
 .fv-voyage-overview__port {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #f0b429;
-  border: 2px solid #fff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+  color: #f0b429;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 1px 4px rgba(0, 0, 0, 0.7);
 }
 .fv-voyage-overview__ship-tooltip,
 .fv-voyage-overview__port-tooltip {

@@ -26,7 +26,7 @@ const toDeg = (r: number) => (r * 180) / Math.PI;
  * Longitudes are kept continuous across the antimeridian so the arc never
  * jumps horizontally across the map.
  */
-function legPositions(
+export function legPositions(
   a: { lat: number; lon: number },
   b: { lat: number; lon: number },
   legType: 'rhumb' | 'greatcircle',
@@ -120,6 +120,8 @@ export interface ShipMarker {
   sublabel?: string;
   /** True when this route is the currently selected one (drawn emphasised). */
   active?: boolean;
+  /** Compass heading (deg) the vessel is pointing, for icon rotation. */
+  heading?: number;
 }
 
 interface RouteEditorMapProps {
@@ -132,6 +134,10 @@ interface RouteEditorMapProps {
   selectedRouteId?: string | null;
   /** Vessel markers animated along the routes during route-simulator playback. */
   shipMarkers?: ShipMarker[];
+  /** Colour of the planned route legs (black when it is the active route). */
+  plannedRouteColor?: string;
+  /** Route waypoint vertices to render as coloured dots. */
+  activeWaypoints?: Array<{ pos: [number, number]; color: string }>;
   /** Called when a ship marker is clicked, to select that route. */
   onSelectRoute?: (id: string) => void;
   onAddPoint: (lat: number, lon: number) => void;
@@ -144,48 +150,68 @@ function waypointIcon(opts: {
   kind: 'departure' | 'arrival' | 'drift' | 'waypoint';
   selected: boolean;
 }): L.DivIcon {
+  // Ports (departure/arrival) use a location-pin icon; plain waypoints and
+  // drift points are shown as dots (app-wide convention).
+  const isPort = opts.kind === 'departure' || opts.kind === 'arrival';
   const cls = [
     'fv-route-map__pin',
     `fv-route-map__pin--${opts.kind}`,
+    isPort ? 'fv-route-map__pin--port' : 'fv-route-map__pin--dot',
     opts.selected ? 'fv-route-map__pin--selected' : '',
   ]
     .filter(Boolean)
     .join(' ');
-  const icons: Record<typeof opts.kind, string> = {
-    departure: 'fa-anchor-circle-check',
-    arrival: 'fa-anchor',
-    drift: 'fa-water',
-    waypoint: 'fa-location-dot',
-  };
-  const label = `<i class="fas ${icons[opts.kind]}" aria-hidden="true"></i>`;
+  const inner = isPort
+    ? '<i class="fas fa-location-dot" aria-hidden="true"></i>'
+    : '<span class="fv-route-map__dot"></span>';
   return L.divIcon({
     className: 'fv-route-map__pin-wrap',
     iconSize: [26, 26],
     iconAnchor: [13, 13],
-    html: `<span class="${cls}">${label}</span>`,
+    html: `<span class="${cls}">${inner}</span>`,
   });
 }
 
 /**
- * Small vessel marker used by the route simulator. Icons are cached per
- * colour/active combination so playback re-renders don't churn the DOM.
+ * Vessel marker used by the route simulator — the same arrow-shaped ship icon
+ * as the main fleet map, rotated to the vessel's heading. Icons are cached per
+ * colour/active/heading so playback re-renders don't churn the DOM.
  */
 const shipIconCache = new Map<string, L.DivIcon>();
-function shipDivIcon(color: string, active: boolean): L.DivIcon {
-  const key = `${color}|${active ? 1 : 0}`;
+function shipDivIcon(color: string, active: boolean, heading: number): L.DivIcon {
+  const h = Math.round(heading);
+  const key = `${color}|${active ? 1 : 0}|${h}`;
   const cached = shipIconCache.get(key);
   if (cached) return cached;
-  const size = active ? 16 : 12;
+  const size = active ? 26 : 22;
   const icon = L.divIcon({
     className: 'fv-route__ship-icon-wrap',
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     html: `
-      <span class="fv-route__ship-dot${active ? ' fv-route__ship-dot--active' : ''}"
-        style="background:${color};width:${size}px;height:${size}px"></span>
+      <span class="fv-route__ship-vessel${active ? ' fv-route__ship-vessel--active' : ''}" style="transform:rotate(${h - 90}deg)">
+        <svg viewBox="0 0 24 24" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 7 H15 L22 12 L15 17 H3 Z" fill="${color}" stroke="#0e1626" stroke-width="1.4" stroke-linejoin="round" />
+        </svg>
+      </span>
     `,
   });
   shipIconCache.set(key, icon);
+  return icon;
+}
+
+/** Coloured dot marking a waypoint of a simulated route (cached per colour). */
+const wpDotCache = new Map<string, L.DivIcon>();
+function wpDotIcon(color: string): L.DivIcon {
+  const cached = wpDotCache.get(color);
+  if (cached) return cached;
+  const icon = L.divIcon({
+    className: 'fv-route-map__pin-wrap',
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+    html: `<span class="fv-route-map__route-wp" style="background:${color}"></span>`,
+  });
+  wpDotCache.set(color, icon);
   return icon;
 }
 
@@ -238,6 +264,23 @@ function FitBounds({ points }: { points: EditorPoint[] }) {
   return null;
 }
 
+/**
+ * Keeps the Leaflet map sized to its container. When the side panel is
+ * minimized the map grows; Leaflet caches its pixel size, so without
+ * invalidateSize() the map would stay clipped instead of filling the page.
+ */
+function MapResizeHandler() {
+  const map = useMap();
+  useEffect(() => {
+    const el = map.getContainer();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => map.invalidateSize());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [map]);
+  return null;
+}
+
 export function RouteEditorMap({
   points,
   plotMode,
@@ -245,6 +288,8 @@ export function RouteEditorMap({
   routes = [],
   selectedRouteId,
   shipMarkers = [],
+  plannedRouteColor = '#58a6ff',
+  activeWaypoints = [],
   onSelectRoute,
   onAddPoint,
   onInsertPoint,
@@ -273,6 +318,7 @@ export function RouteEditorMap({
 
       <ClickCapture plotMode={plotMode} onAddPoint={onAddPoint} />
       <FitBounds points={points} />
+      <MapResizeHandler />
 
       {/* Each leg is drawn as a straight rhumb line or a curved great-circle
           arc depending on its originating waypoint's `legType`. A wide
@@ -289,12 +335,12 @@ export function RouteEditorMap({
           <Fragment key={`seg-${p.id}`}>
             <Polyline
               positions={visible}
-              pathOptions={{ color: '#58a6ff', weight: 3 }}
+              pathOptions={{ color: plannedRouteColor, weight: 3 }}
               interactive={false}
             />
             <Polyline
               positions={hit}
-              pathOptions={{ color: '#58a6ff', weight: 12, opacity: 0 }}
+              pathOptions={{ color: plannedRouteColor, weight: 12, opacity: 0 }}
               eventHandlers={{
                 click: (e) => {
                   if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
@@ -324,8 +370,7 @@ export function RouteEditorMap({
               pathOptions={{
                 color: r.color,
                 weight: isSel ? 5 : 3,
-                opacity: isSel ? 1 : 0.55,
-                dashArray: isSel ? undefined : '6 7',
+                opacity: isSel ? 1 : 0.75,
               }}
               interactive={false}
             />
@@ -383,12 +428,16 @@ export function RouteEditorMap({
           </Tooltip>
         </Marker>
       ))}
+      {/* Waypoints of the simulated routes (coloured dots). */}
+      {activeWaypoints.map((w, i) => (
+        <Marker key={`awp-${i}`} position={w.pos} icon={wpDotIcon(w.color)} interactive={false} />
+      ))}
       {/* Animated vessel markers driven by the route simulator playback. */}
       {shipMarkers.map((s) => (
         <Marker
           key={`ship-${s.id}`}
           position={s.pos}
-          icon={shipDivIcon(s.color, s.active ?? false)}
+          icon={shipDivIcon(s.color, s.active ?? false, s.heading ?? 0)}
           zIndexOffset={s.active ? 1000 : 500}
           eventHandlers={
             onSelectRoute ? { click: () => onSelectRoute(s.id) } : undefined

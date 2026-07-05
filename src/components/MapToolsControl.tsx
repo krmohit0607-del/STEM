@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  CircleMarker,
   Marker,
   Polyline,
   Tooltip,
@@ -73,6 +72,19 @@ function rulerDotIcon(): L.DivIcon {
   });
 }
 
+/** Location-pin icon used for world ports (shared, cached). */
+let portIconCache: L.DivIcon | null = null;
+function portIcon(): L.DivIcon {
+  if (portIconCache) return portIconCache;
+  portIconCache = L.divIcon({
+    className: 'fv-port-icon-wrap',
+    iconSize: [20, 22],
+    iconAnchor: [10, 20],
+    html: '<span class="fv-port-icon"><i class="fas fa-location-dot" aria-hidden="true"></i></span>',
+  });
+  return portIconCache;
+}
+
 /**
  * Ports control — a toggle button that overlays every world port that
  * currently falls within the map viewport. Only visible ports are drawn
@@ -117,18 +129,12 @@ export function PortsControl({
       </ControlPortal>
 
       {visible.map((p) => (
-        <CircleMarker
+        <Marker
           key={p.code}
-          center={[p.lat, p.lon]}
-          radius={4}
-          pathOptions={{
-            color: '#0b1220',
-            weight: 1,
-            fillColor: '#f0b429',
-            fillOpacity: 0.95,
-          }}
+          position={[p.lat, p.lon]}
+          icon={portIcon()}
         >
-          <Tooltip direction="top" offset={[0, -4]}>
+          <Tooltip direction="top" offset={[0, -18]}>
             <div className="fv-route-map__tip">
               <strong className="fv-route-map__tip-title">{p.name}</strong>
               <span>{p.country}</span>
@@ -139,7 +145,7 @@ export function PortsControl({
               <span>{p.code}</span>
             </div>
           </Tooltip>
-        </CircleMarker>
+        </Marker>
       ))}
     </>
   );

@@ -17,7 +17,6 @@ import { PassageDetailsPage } from './components/PassageDetailsPage';
 import { CreateVoyagePage } from './components/CreateVoyagePage';
 import { RouteExplorerPage } from './components/RouteExplorerPage';
 
-import { RouteSimulatorPage } from './components/RouteSimulatorPage';
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
 import { PageShell } from './components/PageShell';
 
@@ -148,14 +147,6 @@ export function App() {
               element={
                 <Layout>
                   <RouteExplorerPage />
-                </Layout>
-              }
-            />
-            <Route
-              path="/route-simulator"
-              element={
-                <Layout>
-                  <RouteSimulatorPage />
                 </Layout>
               }
             />

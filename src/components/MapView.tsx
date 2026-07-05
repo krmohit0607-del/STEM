@@ -148,6 +148,7 @@ function todo(label: string) {
 export function MapView() {
   const mapRef = useRef<LeafletMap | null>(null);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [basemapId, setBasemapId] = useState<string>(() => {
     const saved = localStorage.getItem('fv.map.basemap');
@@ -172,6 +173,20 @@ export function MapView() {
   useEffect(() => {
     localStorage.setItem('fv.map.overlays', JSON.stringify([...overlayIds]));
   }, [overlayIds]);
+
+  // Keep the Leaflet map sized to its container. When the bottom panel is
+  // expanded/collapsed the map container shrinks/grows; Leaflet caches its
+  // pixel size, so without invalidateSize() the map stays clipped behind the
+  // panel instead of reflowing to fill the visible area.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      mapRef.current?.invalidateSize();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Close panel on outside-click + Escape.
   useEffect(() => {
@@ -205,7 +220,7 @@ export function MapView() {
   const resetView = () => mapRef.current?.setView([20, 0], 3);
 
   return (
-    <div className="fv-map-container">
+    <div className="fv-map-container" ref={containerRef}>
       <MapContainer
         ref={(instance) => {
           mapRef.current = instance;

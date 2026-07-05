@@ -4,18 +4,16 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { PORT_COORDS } from '../data/fleet';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
-import {
-  sampleEnvironment,
-  type OptimizedRoute,
-} from '../data/routeOptimizer';
-import {
-  ensureLiveData,
-  sampleLiveField,
-  getLiveDataTime,
-  type LatLngBounds,
-} from '../data/openMeteo';
+import { type OptimizedRoute } from '../data/routeOptimizer';
 import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
-import { RouteEditorMap, type EditorPoint } from './RouteEditorMap';
+import {
+  setActiveSimRoute,
+  useMapCompareRoutes,
+  useMapShipMarkers,
+  useMapPlannedColor,
+  useMapRouteWaypoints,
+} from '../data/routeSimulatorStore';
+import { RouteEditorMap, type EditorPoint, legPositions } from './RouteEditorMap';
 import { PortInput } from './PortInput';
 
 /**
@@ -326,16 +324,6 @@ function recomputeGeometry(list: Waypoint[]): Waypoint[] {
 /** Assumed service speed used to turn distance into a transit time / ETA. */
 const SERVICE_SPEED_KN = 12;
 
-/** Palette used to colour saved routes pushed onto the simulator. */
-const SAVED_SIM_COLORS = [
-  '#f778ba',
-  '#a371f7',
-  '#3fb950',
-  '#d29922',
-  '#39c5cf',
-  '#ff7b72',
-];
-
 /** A computed candidate route: its profile plus the optimizer result. */
 type ComputedRoute = RouteVariantMeta & { info: OptimizedRoute };
 
@@ -349,123 +337,6 @@ function formatDuration(hours: number): string {
   const d = Math.floor(hours / 24);
   const h = Math.round(hours % 24);
   return d > 0 ? `${d}d ${h}h` : `${h}h`;
-}
-
-/** Linearly interpolate a `[lat, lon]` polyline at fractional `progress`. */
-function samplePath(
-  path: Array<[number, number]>,
-  progress: number,
-): [number, number] {
-  const last = path.length - 1;
-  if (last < 0) return [0, 0];
-  const p = Math.max(0, Math.min(last, progress));
-  const i0 = Math.floor(p);
-  const i1 = Math.min(last, i0 + 1);
-  const t = p - i0;
-  const [lat0, lon0] = path[i0];
-  const [lat1, lon1] = path[i1];
-  return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
-}
-
-/** How long a full play-through of the slowest route takes (ms). */
-const SIM_PLAY_DURATION_MS = 12000;
-
-/** Number of samples taken along each route for the weather-factor chart. */
-const SIM_WEATHER_SAMPLES = 48;
-
-/** Individual weather components the user can pick to compare. */
-type WeatherFactorId = 'waves' | 'swell' | 'wind' | 'current';
-
-interface WeatherFactorDef {
-  id: WeatherFactorId;
-  label: string;
-  icon: string;
-  /** Display unit for the factor's magnitude. */
-  unit: string;
-  /** Matching Open-Meteo factor id used for live data. */
-  liveId: string;
-}
-
-const WEATHER_FACTORS: WeatherFactorDef[] = [
-  { id: 'waves', label: 'Waves', icon: 'fa-water', unit: 'm', liveId: 'waves' },
-  { id: 'swell', label: 'Swell', icon: 'fa-wave-square', unit: 'm', liveId: 'swell' },
-  { id: 'wind', label: 'Wind', icon: 'fa-wind', unit: 'kn', liveId: 'wind' },
-  {
-    id: 'current',
-    label: 'Current',
-    icon: 'fa-arrows-turn-right',
-    unit: 'kn',
-    liveId: 'currents',
-  },
-];
-
-const WEATHER_FACTOR_BY_ID: Record<WeatherFactorId, WeatherFactorDef> =
-  Object.fromEntries(WEATHER_FACTORS.map((f) => [f.id, f])) as Record<
-    WeatherFactorId,
-    WeatherFactorDef
-  >;
-
-/**
- * Synthetic magnitude of a factor at a point, in its display unit (m or kn).
- * Used as a fallback while the live Open-Meteo grid is loading or when a
- * request fails (e.g. the marine API returns nothing over land).
- */
-function factorMagnitudeSynthetic(
-  lat: number,
-  lon: number,
-  factor: WeatherFactorId,
-): number {
-  const env = sampleEnvironment(lat, lon);
-  switch (factor) {
-    case 'waves':
-      return env.waveHeight;
-    case 'swell':
-      return Math.max(0, env.waveHeight * 0.6 + 1.1 * Math.sin(lat * 0.12 - lon * 0.09));
-    case 'wind':
-      return env.windSpeed;
-    case 'current':
-      return Math.max(
-        0,
-        0.9 + 0.8 * Math.sin(lon * 0.14 + lat * 0.1) + 0.5 * Math.cos(lat * 0.07),
-      );
-    default:
-      return 0;
-  }
-}
-
-/**
- * Weather factor magnitude at a fractional position `frac` in [0, 1] along a
- * route. Prefers the live Open-Meteo value (bilinear-sampled from the cached
- * grid over `bounds`) and falls back to the synthetic field when live data is
- * unavailable, so routes can be compared on one factor at a time.
- */
-function weatherAt(
-  path: Array<[number, number]>,
-  frac: number,
-  factor: WeatherFactorDef,
-  bounds: LatLngBounds | null,
-  hour: number,
-): number {
-  const lastIdx = path.length - 1;
-  const clamped = Math.max(0, Math.min(1, frac));
-  const [lat, lon] = samplePath(path, clamped * lastIdx);
-  if (bounds) {
-    const live = sampleLiveField(lat, lon, factor.liveId, bounds, hour);
-    if (live && Number.isFinite(live.magnitude)) return Math.max(0, live.magnitude);
-  }
-  return factorMagnitudeSynthetic(lat, lon, factor.id);
-}
-
-/** Whether the live grid for a factor has loaded over the given bounds. */
-function isLiveLoaded(
-  bounds: LatLngBounds | null,
-  liveId: string,
-  hour: number,
-): boolean {
-  if (!bounds) return false;
-  const cLat = (bounds.north + bounds.south) / 2;
-  const cLon = (bounds.west + bounds.east) / 2;
-  return sampleLiveField(cLat, cLon, liveId, bounds, hour) != null;
 }
 
 export function RouteExplorerPage() {
@@ -488,14 +359,23 @@ export function RouteExplorerPage() {
     console.warn(`[STEM] '${label}' is not wired yet — see MIGRATION.md.`);
   };
 
+  /**
+   * Open the selected vessel's live position on MarineTraffic in a new tab.
+   * Deep-links to the vessel details page by IMO (the format MarineTraffic
+   * supports directly, e.g. .../ais/details/ships/imo:9074729).
+   */
+  const viewOnMarineTraffic = () => {
+    const imo = selectedVoyage?.imo?.trim();
+    const url = imo
+      ? `https://www.marinetraffic.com/en/ais/details/ships/imo:${encodeURIComponent(imo)}`
+      : 'https://www.marinetraffic.com/';
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   // --- Map plotting + saved routes ---------------------------------
   const [plotMode, setPlotMode] = useState(false);
   const [routeName, setRouteName] = useState('');
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() => readSavedRoutes());
-  // Checkbox selection in the saved-routes table + the subset the user has
-  // pushed onto the simulator to compare.
-  const [savedSel, setSavedSel] = useState<string[]>([]);
-  const [compareIds, setCompareIds] = useState<string[]>([]);
 
   // --- Auto sea-route generator ------------------------------------
   const [depInput, setDepInput] = useState(selectedVoyage?.portFrom ?? '');
@@ -507,6 +387,29 @@ export function RouteExplorerPage() {
   // "Generate Optimized Sea Route" popup, opened from the map "Optimize" button.
   const [genModalOpen, setGenModalOpen] = useState(false);
 
+  // Whether the Waypoint details side panel is collapsed.
+  const [sideCollapsed, setSideCollapsed] = useState(false);
+
+  // Waypoints checked via the per-row checkbox in the details list.
+  const [checkedIds, setCheckedIds] = useState<string[]>([]);
+
+  // "Set speed" popup for the checked waypoints.
+  const [speedModalOpen, setSpeedModalOpen] = useState(false);
+  const [speedInput, setSpeedInput] = useState('12');
+
+  const toggleWaypointChecked = (id: string) => {
+    setCheckedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  /** Check every waypoint, or clear the selection if all are already checked. */
+  const toggleAllChecked = () => {
+    setCheckedIds((prev) =>
+      prev.length === waypoints.length ? [] : waypoints.map((wp) => wp.id),
+    );
+  };
+
   // Candidate optimized routes computed in the background after the straight
   // line is drawn. The user picks their preferred one from the list.
   const [routeResults, setRouteResults] = useState<ComputedRoute[] | null>(null);
@@ -514,23 +417,6 @@ export function RouteExplorerPage() {
   const [optimizing, setOptimizing] = useState(false);
   const optimizeRunRef = useRef(0);
   const workerRef = useRef<Worker | null>(null);
-
-  // --- Route simulator playback ------------------------------------
-  // A single normalized clock [0, 1] drives a vessel marker along every
-  // candidate route. Each route advances at the same service speed, so the
-  // shorter routes reach their destination (clock → their ETA) sooner, while
-  // the slower ones are still under way — letting you compare arrival times
-  // and weather exposure at a glance.
-  const [simClock, setSimClock] = useState(0);
-  const [simPlaying, setSimPlaying] = useState(false);
-  const [simMinimized, setSimMinimized] = useState(false);
-  const simRafRef = useRef<number | null>(null);
-  const simLastTsRef = useRef<number | null>(null);
-  // Which single weather factor the routes are compared on.
-  const [simFactor, setSimFactor] = useState<WeatherFactorId>('waves');
-  // Bumped whenever a live Open-Meteo grid finishes loading, to re-sample.
-  const [liveVersion, setLiveVersion] = useState(0);
-  const simFactorDef = WEATHER_FACTOR_BY_ID[simFactor];
 
   // Spin up the routing Web Worker once; it computes the candidate routes off
   // the main thread and streams each land-clean result back as it finishes.
@@ -650,259 +536,26 @@ export function RouteExplorerPage() {
   const selectedRoute =
     routeResults?.find((r) => r.id === selectedRouteId) ?? null;
 
-  // --- Route simulator derived data --------------------------------
-  /** Playable routes with per-route transit time + weather factor. */
-  const simRoutes = useMemo(() => {
-    const optimized = (routeResults ?? [])
-      .filter((r) => r.info.path.length >= 2)
-      .map((r) => ({
-        id: r.id,
-        label: t(`routeVariant.${r.id}`, r.label),
-        color: r.color,
-        path: r.info.path,
-        distanceNm: r.info.distanceNm,
-        hours: transitHours(r.info.distanceNm),
-        weatherFactor: r.info.weatherPenalty,
-      }));
-
-    // The route currently drawn on the map (editable waypoints), so the
-    // simulator can play it back even before any optimization runs.
-    const mapPath = waypoints
-      .map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number])
-      .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
-    const mapDistanceNm = waypoints.reduce(
-      (sum, wp) => sum + wp.distanceFromPrev,
-      0,
-    );
-    const mapRoute =
-      mapPath.length >= 2
-        ? [
-            {
-              id: 'map',
-              label: t('plannedRoute', 'Planned route'),
-              color: '#58a6ff',
-              path: mapPath,
-              distanceNm: Math.round(mapDistanceNm),
-              hours: transitHours(mapDistanceNm),
-              weatherFactor: 0,
-            },
-          ]
-        : [];
-
-    // Saved routes the user selected and pushed onto the simulator to compare.
-    const compared = savedRoutes
-      .filter((r) => compareIds.includes(r.id))
-      .map((r) => {
-        const path = r.waypoints
-          .map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number])
-          .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
-        let dist = 0;
-        for (let k = 1; k < path.length; k += 1) {
-          dist += haversineNM(path[k - 1][0], path[k - 1][1], path[k][0], path[k][1]);
-        }
-        return {
-          id: `saved-${r.id}`,
-          label: r.name,
-          color:
-            SAVED_SIM_COLORS[
-              compareIds.indexOf(r.id) % SAVED_SIM_COLORS.length
-            ],
-          path,
-          distanceNm: Math.round(dist),
-          hours: transitHours(dist),
-          weatherFactor: 0,
-        };
-      })
-      .filter((r) => r.path.length >= 2);
-
-    return [...mapRoute, ...compared, ...optimized];
-  }, [routeResults, waypoints, savedRoutes, compareIds, l]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /** Longest transit time across all routes — the full playback span. */
-  const simMaxHours = useMemo(
-    () => simRoutes.reduce((m, r) => Math.max(m, r.hours), 0),
-    [simRoutes],
+  /** Candidate optimized routes overlaid on the map, each in its own colour. */
+  const mapRoutes = useMemo(
+    () =>
+      (routeResults ?? [])
+        .filter((r) => r.info.path.length >= 2)
+        .map((r) => ({ id: r.id, color: r.color, path: r.info.path })),
+    [routeResults],
   );
 
-  /** Bounding box covering every route, used to fetch the live weather grid. */
-  const simBounds = useMemo<LatLngBounds | null>(() => {
-    let south = Infinity;
-    let north = -Infinity;
-    let west = Infinity;
-    let east = -Infinity;
-    simRoutes.forEach((r) =>
-      r.path.forEach(([lat, lon]) => {
-        if (lat < south) south = lat;
-        if (lat > north) north = lat;
-        if (lon < west) west = lon;
-        if (lon > east) east = lon;
-      }),
-    );
-    if (!Number.isFinite(south)) return null;
-    // Pad slightly so the grid comfortably covers the tracks.
-    const padLat = Math.max(0.5, (north - south) * 0.08);
-    const padLon = Math.max(0.5, (east - west) * 0.08);
-    return {
-      south: south - padLat,
-      north: north + padLat,
-      west: west - padLon,
-      east: east + padLon,
-    };
-  }, [simRoutes]);
+  // Saved routes the user is comparing in the simulator, echoed onto the map.
+  const compareRoutes = useMapCompareRoutes();
+  const overlayRoutes = useMemo(
+    () => [...mapRoutes, ...compareRoutes],
+    [mapRoutes, compareRoutes],
+  );
 
-  /** Whether the simulator UI should be shown — always visible below the map. */
-  const showSimulator = true;
-
-  // Fetch the live Open-Meteo grid for the selected factor over all routes.
-  // `ensureLiveData` de-dupes/caches, and bumps `liveVersion` when ready so the
-  // weather series re-samples with real data (falling back to synthetic until).
-  useEffect(() => {
-    if (!showSimulator || !simBounds) return;
-    ensureLiveData(simFactorDef.liveId, simBounds, 0, () =>
-      setLiveVersion((v) => v + 1),
-    );
-  }, [showSimulator, simFactorDef.liveId, simBounds]);
-
-  /** True once real Open-Meteo data is available for the current factor. */
-  const simLiveActive = isLiveLoaded(simBounds, simFactorDef.liveId, 0);
-
-  /** Base UTC time the live weather data represents (voyage departure). */
-  const simBaseDate = useMemo(() => {
-    void liveVersion; // recompute once the grid loads
-    if (!simLiveActive || !simBounds) return null;
-    const iso = getLiveDataTime(simFactorDef.liveId, simBounds, 0);
-    if (!iso) return null;
-    // Open-Meteo returns local-to-UTC strings like "2026-07-02T00:00".
-    const d = new Date(`${iso}Z`);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }, [simLiveActive, simBounds, simFactorDef.liveId, liveVersion]);
-
-  /**
-   * Weather factor sampled along every route, expressed against voyage time
-   * (hours from departure) so the chart compares what each vessel experiences
-   * at the moment it reaches that point. Uses live Open-Meteo data when loaded,
-   * otherwise the synthetic field.
-   */
-  const simWeather = useMemo(() => {
-    const series = simRoutes.map((r) => {
-      const points: Array<{ t: number; w: number }> = [];
-      for (let i = 0; i <= SIM_WEATHER_SAMPLES; i += 1) {
-        const f = i / SIM_WEATHER_SAMPLES;
-        points.push({
-          t: f * r.hours,
-          w: weatherAt(r.path, f, simFactorDef, simBounds, 0),
-        });
-      }
-      return { id: r.id, color: r.color, label: r.label, points };
-    });
-    let maxW = 0;
-    series.forEach((s) => s.points.forEach((p) => {
-      if (p.w > maxW) maxW = p.w;
-    }));
-    return { series, maxW: Math.max(0.2, maxW) };
-  }, [simRoutes, simFactorDef, simBounds, liveVersion]);
-
-  // Reset the clock whenever the set of routes changes or optimizing restarts.
-  useEffect(() => {
-    setSimPlaying(false);
-    setSimClock(0);
-  }, [routeResults, optimizing]);
-
-  // Drive the playback clock with requestAnimationFrame while playing.
-  useEffect(() => {
-    if (!simPlaying) {
-      if (simRafRef.current != null) {
-        window.cancelAnimationFrame(simRafRef.current);
-        simRafRef.current = null;
-      }
-      simLastTsRef.current = null;
-      return;
-    }
-    const speed = 1 / SIM_PLAY_DURATION_MS; // clock units per ms
-    const tick = (ts: number) => {
-      if (simLastTsRef.current == null) simLastTsRef.current = ts;
-      const dt = ts - simLastTsRef.current;
-      simLastTsRef.current = ts;
-      setSimClock((prev) => {
-        const next = prev + dt * speed;
-        if (next >= 1) {
-          setSimPlaying(false);
-          return 1;
-        }
-        return next;
-      });
-      simRafRef.current = window.requestAnimationFrame(tick);
-    };
-    simRafRef.current = window.requestAnimationFrame(tick);
-    return () => {
-      if (simRafRef.current != null) {
-        window.cancelAnimationFrame(simRafRef.current);
-        simRafRef.current = null;
-      }
-      simLastTsRef.current = null;
-    };
-  }, [simPlaying]);
-
-  /** Elapsed voyage hours represented by the current clock position. */
-  const simElapsedHours = simClock * simMaxHours;
-
-  /**
-   * Projected UTC date/time at the current slider position: the base live-data
-   * time advanced by the elapsed voyage hours, so it updates as the slider
-   * moves. Falls back to the base "valid" time when the slider is at departure.
-   */
-  const simForecastTime = useMemo(() => {
-    if (!simBaseDate) return null;
-    const d = new Date(simBaseDate.getTime() + simElapsedHours * 3600_000);
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-      timeZone: 'UTC',
-    }).format(d);
-  }, [simBaseDate, simElapsedHours]);
-
-  /**
-   * Live per-route weather factor at the position each vessel currently
-   * occupies, plus which route is the calmest at this instant.
-   */
-  const simLive = useMemo(() => {
-    const byId: Record<string, { frac: number; weather: number }> = {};
-    let bestId: string | null = null;
-    let bestW = Infinity;
-    simRoutes.forEach((r) => {
-      const frac = r.hours > 0 ? Math.min(1, simElapsedHours / r.hours) : 0;
-      const weather = weatherAt(r.path, frac, simFactorDef, simBounds, 0);
-      byId[r.id] = { frac, weather };
-      if (weather < bestW) {
-        bestW = weather;
-        bestId = r.id;
-      }
-    });
-    return { byId, bestId };
-  }, [simRoutes, simElapsedHours, simFactorDef, simBounds, liveVersion]);
-
-  /** Vessel markers for each route at the current clock position. */
-  const shipMarkers = useMemo(() => {
-    if (!showSimulator) return [];
-    const factorLabel = t(
-      `weatherFactor.${simFactor}`,
-      simFactorDef.label,
-    );
-    return simRoutes.map((r) => {
-      const live = simLive.byId[r.id] ?? { frac: 0, weather: 0 };
-      const lastIdx = r.path.length - 1;
-      const pos = samplePath(r.path, live.frac * lastIdx);
-      const pct = Math.round(live.frac * 100);
-      return {
-        id: r.id,
-        color: r.color,
-        pos,
-        label: r.label,
-        sublabel: `${pct}% · ${factorLabel} ${live.weather.toFixed(1)} ${simFactorDef.unit}`,
-        active: r.id === selectedRouteId,
-      };
-    });
-  }, [showSimulator, simRoutes, simLive, simFactorDef, selectedRouteId, l]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Vessel positions published by the simulator while it plays back.
+  const shipMarkers = useMapShipMarkers();
+  const plannedColor = useMapPlannedColor();
+  const activeWaypoints = useMapRouteWaypoints();
 
   /** Replace the editable waypoints with the selected candidate route. */
   const applySelectedRoute = () => {
@@ -965,6 +618,37 @@ export function RouteExplorerPage() {
       })
       .filter((p) => !Number.isNaN(p.lat) && !Number.isNaN(p.lon));
   }, [waypoints]);
+
+  // Publish the route currently drawn on the map so the Route Simulator (in
+  // the bottom drawer) can play it back as the "Active" route. The path is
+  // densified per leg (great-circle arcs) so the animated vessel follows the
+  // exact track drawn on the map instead of cutting straight between points.
+  useEffect(() => {
+    const path: Array<[number, number]> = [];
+    for (let i = 0; i < mapPoints.length - 1; i += 1) {
+      const seg = legPositions(
+        mapPoints[i],
+        mapPoints[i + 1],
+        mapPoints[i].legType ?? 'rhumb',
+      ).map((p) => p as [number, number]);
+      if (i === 0) path.push(...seg);
+      else path.push(...seg.slice(1));
+    }
+    if (path.length >= 2) {
+      const distanceNm = waypoints.reduce((sum, wp) => sum + wp.distanceFromPrev, 0);
+      setActiveSimRoute({
+        id: 'active-planned',
+        label: t('plannedRoute', 'Planned route'),
+        color: '#1f6feb',
+        path,
+        distanceNm: Math.round(distanceNm),
+      });
+    } else {
+      setActiveSimRoute(null);
+    }
+  }, [mapPoints, waypoints]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => () => setActiveSimRoute(null), []);
 
   const addPointFromMap = (lat: number, lon: number) => {
     setWaypoints((prev) => {
@@ -1041,6 +725,74 @@ export function RouteExplorerPage() {
     });
   };
 
+  // --- Waypoint-detail toolbar (operates on the checked rows) ----------------
+  /** Insert a new waypoint after the last checked waypoint (or at the end). */
+  const insertCheckedWaypoint = () => {
+    setWaypoints((prev) => {
+      if (prev.length === 0) return prev;
+      const checkedIdx = prev
+        .map((wp, i) => (checkedIds.includes(wp.id) ? i : -1))
+        .filter((i) => i >= 0);
+      let pos = checkedIdx.length ? checkedIdx[checkedIdx.length - 1] : prev.length - 1;
+      // Never insert after the arrival port — step back before it.
+      if (prev[pos].isPort && pos === prev.length - 1) pos = Math.max(0, pos - 1);
+      const ref = prev[pos];
+      const nextRef = prev[pos + 1];
+      const lat1 = dmToDec(ref.lat);
+      const lon1 = dmToDec(ref.lon);
+      const lat = nextRef ? (lat1 + dmToDec(nextRef.lat)) / 2 : lat1 + 0.5;
+      const lon = nextRef ? (lon1 + dmToDec(nextRef.lon)) / 2 : lon1 + 0.5;
+      const newWp: Waypoint = {
+        id: `wp-${Date.now()}`,
+        name: `Waypoint ${prev.length + 1}`,
+        lat: decToDM(lat, true),
+        lon: decToDM(lon, false),
+        course: 0,
+        speed: ref.speed,
+        distanceFromPrev: 0,
+        eta: ref.eta,
+        drift: false,
+        isPort: false,
+      };
+      const next = [...prev];
+      next.splice(pos + 1, 0, newWp);
+      return recomputeGeometry(next);
+    });
+  };
+
+  /** Delete every checked waypoint (departure / arrival ports are kept). */
+  const deleteCheckedWaypoints = () => {
+    if (checkedIds.length === 0) return;
+    setWaypoints((prev) =>
+      recomputeGeometry(prev.filter((wp) => wp.isPort || !checkedIds.includes(wp.id))),
+    );
+    setSelected((prev) => prev.filter((id) => !checkedIds.includes(id)));
+    setCheckedIds([]);
+  };
+
+  /** Open the "Set speed" popup for the checked waypoints. */
+  const setSpeedForChecked = () => {
+    if (checkedIds.length === 0) return;
+    // Seed the field with the current speed if all checked waypoints share one.
+    const speeds = new Set(
+      waypoints.filter((wp) => checkedIds.includes(wp.id)).map((wp) => wp.speed),
+    );
+    setSpeedInput(speeds.size === 1 ? String([...speeds][0]) : '12');
+    setSpeedModalOpen(true);
+  };
+
+  /** Apply the popup's speed (knots) to every checked waypoint. */
+  const applySpeedToChecked = () => {
+    const speed = Number(speedInput);
+    if (!Number.isFinite(speed) || speed < 0) return;
+    setWaypoints((prev) =>
+      recomputeGeometry(
+        prev.map((wp) => (checkedIds.includes(wp.id) ? { ...wp, speed } : wp)),
+      ),
+    );
+    setSpeedModalOpen(false);
+  };
+
   const saveRoute = () => {
     const name = routeName.trim() || `Route ${savedRoutes.length + 1}`;
     const route: SavedRoute = {
@@ -1053,39 +805,6 @@ export function RouteExplorerPage() {
     setSavedRoutes(next);
     writeSavedRoutes(next);
     setRouteName('');
-  };
-
-  const loadRoute = (id: string) => {
-    const route = savedRoutes.find((r) => r.id === id);
-    if (!route) return;
-    setWaypoints(recomputeGeometry(route.waypoints));
-    setSelected([]);
-    setPlotMode(false);
-  };
-
-  const toggleSavedSel = (id: string) => {
-    setSavedSel((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
-  };
-
-  const toggleSavedSelAll = () => {
-    setSavedSel((prev) =>
-      prev.length === savedRoutes.length ? [] : savedRoutes.map((r) => r.id),
-    );
-  };
-
-  const deleteSelectedRoutes = () => {
-    if (savedSel.length === 0) return;
-    const next = savedRoutes.filter((r) => !savedSel.includes(r.id));
-    setSavedRoutes(next);
-    writeSavedRoutes(next);
-    setCompareIds((prev) => prev.filter((id) => !savedSel.includes(id)));
-    setSavedSel([]);
-  };
-
-  const compareSelectedRoutes = () => {
-    setCompareIds(savedSel);
   };
 
   const clearRoute = () => {
@@ -1262,15 +981,68 @@ export function RouteExplorerPage() {
         </header>
 
         <div className="fv-route__map-layout">
-          <div className="fv-route__side-col">
-          <aside className="fv-route__side-panel" aria-label={t('expectedRoute', 'Expected Route')}>
+          <div
+            className={`fv-route__side-col${
+              sideCollapsed ? ' fv-route__side-col--collapsed' : ''
+            }`}
+          >
+          <aside className="fv-route__side-panel" aria-label={t('waypointDetails', 'Waypoint details')}>
             <header className="fv-route__side-head">
               <h3>
                 <i className="fas fa-route" aria-hidden="true" />{' '}
-                {t('expectedRoute', 'Expected Route')}
+                {t('waypointDetails', 'Waypoint details')}
               </h3>
               <span className="fv-route__side-count">{waypoints.length}</span>
+              <button
+                type="button"
+                className="fv-route__side-toggle"
+                onClick={() => setSideCollapsed((prev) => !prev)}
+                aria-expanded={!sideCollapsed}
+                title={
+                  sideCollapsed
+                    ? t('showWaypointDetails', 'Show waypoint details')
+                    : t('hideWaypointDetails', 'Hide waypoint details')
+                }
+                aria-label={
+                  sideCollapsed
+                    ? t('showWaypointDetails', 'Show waypoint details')
+                    : t('hideWaypointDetails', 'Hide waypoint details')
+                }
+              >
+                <i
+                  className={`fas ${sideCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}
+                  aria-hidden="true"
+                />
+              </button>
             </header>
+            {!sideCollapsed && (
+            <>
+            <div className="fv-route__side-tools">
+              <button
+                type="button"
+                className="fv-route__side-tool"
+                onClick={insertCheckedWaypoint}
+                disabled={waypoints.length === 0}
+              >
+                <i className="fas fa-plus" aria-hidden="true" /> {t('insert', 'Insert')}
+              </button>
+              <button
+                type="button"
+                className="fv-route__side-tool"
+                onClick={deleteCheckedWaypoints}
+                disabled={checkedIds.length === 0}
+              >
+                <i className="fas fa-trash" aria-hidden="true" /> {t('delete', 'Delete')}
+              </button>
+              <button
+                type="button"
+                className="fv-route__side-tool"
+                onClick={setSpeedForChecked}
+                disabled={checkedIds.length === 0}
+              >
+                <i className="fas fa-gauge-high" aria-hidden="true" /> {t('setSpeed', 'Set speed')}
+              </button>
+            </div>
             <div className="fv-route__side-scroll">
               {waypoints.length === 0 ? (
                 <p className="fv-route__side-empty">{t('noPoints', 'No points yet.')}</p>
@@ -1278,6 +1050,22 @@ export function RouteExplorerPage() {
                 <table className="fv-route__side-table">
                   <thead>
                     <tr>
+                      <th className="fv-route__side-check">
+                        <input
+                          type="checkbox"
+                          checked={
+                            waypoints.length > 0 && checkedIds.length === waypoints.length
+                          }
+                          ref={(el) => {
+                            if (el)
+                              el.indeterminate =
+                                checkedIds.length > 0 &&
+                                checkedIds.length < waypoints.length;
+                          }}
+                          onChange={toggleAllChecked}
+                          aria-label={t('selectAllWaypoints', 'Select all waypoints')}
+                        />
+                      </th>
                       <th>#</th>
                       <th>{t('lat', 'Lat')}</th>
                       <th>{t('lon', 'Lon')}</th>
@@ -1290,6 +1078,17 @@ export function RouteExplorerPage() {
                           className={selected.includes(wp.id) ? 'fv-route__side-row--selected' : ''}
                           onClick={() => setSelected(selected[0] === wp.id ? [] : [wp.id])}
                         >
+                          <td
+                            className="fv-route__side-check"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checkedIds.includes(wp.id)}
+                              onChange={() => toggleWaypointChecked(wp.id)}
+                              aria-label={t('selectWaypoint', 'Select waypoint')}
+                            />
+                          </td>
                           <td className="fv-route__side-row-num">
                             {wp.isPort ? (
                               <i
@@ -1307,7 +1106,7 @@ export function RouteExplorerPage() {
                         </tr>
                         {selectedWaypoint?.id === wp.id && (
                           <tr className="fv-route__wp-detail-row-cell">
-                            <td colSpan={3}>
+                            <td colSpan={4}>
                               <div className="fv-route__wp-detail">
                                 <div className="fv-route__wp-detail-head">
                                   <i className="fas fa-location-dot" aria-hidden="true" />{' '}
@@ -1442,106 +1241,9 @@ export function RouteExplorerPage() {
                 </table>
               )}
             </div>
+            </>
+            )}
           </aside>
-          {savedRoutes.length > 0 && (
-            <div className="fv-route__saved">
-              <div className="fv-route__saved-head">
-                <span className="fv-route__saved-label">
-                  {t('savedRoutes', 'Saved routes')}
-                  {savedSel.length > 0 && ` (${savedSel.length})`}
-                </span>
-                <div className="fv-route__saved-actions">
-                  <button
-                    type="button"
-                    className="fv-route__saved-act"
-                    onClick={compareSelectedRoutes}
-                    disabled={savedSel.length === 0}
-                    title={t('compareOnSimulator', 'Compare on simulator')}
-                  >
-                    <i className="fas fa-clapperboard" aria-hidden="true" />{' '}
-                    {t('compare', 'Compare')}
-                  </button>
-                  <button
-                    type="button"
-                    className="fv-route__saved-act fv-route__saved-act--danger"
-                    onClick={deleteSelectedRoutes}
-                    disabled={savedSel.length === 0}
-                    title={t('deleteSelected', 'Delete selected routes')}
-                  >
-                    <i className="fas fa-trash" aria-hidden="true" />{' '}
-                    {t('delete', 'Delete')}
-                  </button>
-                </div>
-              </div>
-              <table className="fv-route__saved-table">
-                <thead>
-                  <tr>
-                    <th className="fv-route__saved-check">
-                      <input
-                        type="checkbox"
-                        checked={
-                          savedRoutes.length > 0 &&
-                          savedSel.length === savedRoutes.length
-                        }
-                        onChange={toggleSavedSelAll}
-                        aria-label={t('selectAll', 'Select all')}
-                      />
-                    </th>
-                    <th>{t('routeName', 'Route name')}</th>
-                    <th>{t('dateCreated', 'Date created')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {savedRoutes.map((r) => (
-                    <tr
-                      key={r.id}
-                      className={
-                        compareIds.includes(r.id)
-                          ? 'fv-route__saved-trow--compare'
-                          : undefined
-                      }
-                    >
-                      <td className="fv-route__saved-check">
-                        <input
-                          type="checkbox"
-                          checked={savedSel.includes(r.id)}
-                          onChange={() => toggleSavedSel(r.id)}
-                          aria-label={r.name}
-                        />
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="fv-route__saved-load"
-                          onClick={() => loadRoute(r.id)}
-                          title={t('loadRoute', 'Load this route')}
-                        >
-                          {compareIds.includes(r.id) ? (
-                            <span
-                              className="fv-route__saved-swatch"
-                              style={{
-                                background:
-                                  SAVED_SIM_COLORS[
-                                    compareIds.indexOf(r.id) % SAVED_SIM_COLORS.length
-                                  ],
-                              }}
-                              aria-hidden="true"
-                            />
-                          ) : (
-                            <i className="fas fa-route" aria-hidden="true" />
-                          )}{' '}
-                          {r.name}
-                        </button>
-                      </td>
-                      <td className="fv-route__saved-date">
-                        {new Date(r.savedAt).toLocaleDateString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
           </div>
 
           <div className="fv-route__map-col">
@@ -1565,7 +1267,15 @@ export function RouteExplorerPage() {
               <button
                 type="button"
                 className="fv-route__btn"
-                onClick={notImplemented('View on MT')}
+                onClick={viewOnMarineTraffic}
+                title={
+                  selectedVoyage?.vessel
+                    ? t('viewVesselOnMt', 'View {vessel} on MarineTraffic').replace(
+                        '{vessel}',
+                        selectedVoyage.vessel,
+                      )
+                    : t('viewOnMt', 'View on MT')
+                }
               >
                 <i className="fas fa-arrow-up-right-from-square" aria-hidden="true" />{' '}
                 {t('viewOnMt', 'View on MT')}
@@ -1583,15 +1293,11 @@ export function RouteExplorerPage() {
               points={mapPoints}
               plotMode={plotMode}
               selected={selected}
-              routes={simRoutes
-                .filter((r) => r.id !== 'map')
-                .map((r) => ({
-                  id: r.id,
-                  color: r.color,
-                  path: r.path,
-                }))}
+              routes={overlayRoutes}
               selectedRouteId={selectedRouteId}
               shipMarkers={shipMarkers}
+              plannedRouteColor={plannedColor}
+              activeWaypoints={activeWaypoints}
               onSelectRoute={setSelectedRouteId}
               onAddPoint={addPointFromMap}
               onInsertPoint={insertPointFromMap}
@@ -1686,301 +1392,6 @@ export function RouteExplorerPage() {
               </div>
             )}
           </div>
-          {showSimulator && (
-              <div
-                className={`fv-route__sim-panel${simMinimized ? ' fv-route__sim-panel--min' : ''}`}
-                role="group"
-                aria-label={t('routeSimulator', 'Route simulator')}
-              >
-                <div className="fv-route__sim-panel-head">
-                  <span className="fv-route__sim-panel-title">
-                    <i className="fas fa-clapperboard" aria-hidden="true" />{' '}
-                    {t('routeSimulator', 'Route simulator')}
-                  </span>
-                  <span className="fv-route__sim-panel-clock">
-                    <i className="fas fa-clock" aria-hidden="true" />{' '}
-                    {formatDuration(simElapsedHours)} / {formatDuration(simMaxHours)}
-                  </span>
-                  <button
-                    type="button"
-                    className="fv-route__sim-min"
-                    onClick={() => setSimMinimized((m) => !m)}
-                    aria-expanded={!simMinimized}
-                    title={
-                      simMinimized
-                        ? t('expand', 'Expand')
-                        : t('minimize', 'Minimize')
-                    }
-                    aria-label={
-                      simMinimized
-                        ? t('expand', 'Expand')
-                        : t('minimize', 'Minimize')
-                    }
-                  >
-                    <i
-                      className={`fas ${simMinimized ? 'fa-chevron-up' : 'fa-chevron-down'}`}
-                      aria-hidden="true"
-                    />
-                  </button>
-                </div>
-                {!simMinimized && (
-                <>
-                <div className="fv-route__sim-controls">
-                  <button
-                    type="button"
-                    className="fv-route__sim-ctrl"
-                    onClick={() => {
-                      setSimPlaying(false);
-                      setSimClock(0);
-                    }}
-                    title={t('restart', 'Restart')}
-                    aria-label={t('restart', 'Restart')}
-                  >
-                    <i className="fas fa-backward-step" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className={`fv-route__play-btn${simPlaying ? ' fv-route__play-btn--on' : ''}`}
-                    onClick={() => {
-                      // Restart from the beginning if we're parked at the end.
-                      if (!simPlaying && simClock >= 1) setSimClock(0);
-                      setSimPlaying((p) => !p);
-                    }}
-                  >
-                    <i className={simPlaying ? 'fas fa-pause' : 'fas fa-play'} aria-hidden="true" />{' '}
-                    {simPlaying ? t('pause', 'Pause') : t('play', 'Play')}
-                  </button>
-                  <button
-                    type="button"
-                    className="fv-route__sim-ctrl"
-                    onClick={() => {
-                      setSimPlaying(false);
-                      setSimClock(1);
-                    }}
-                    title={t('skipToEnd', 'Skip to end')}
-                    aria-label={t('skipToEnd', 'Skip to end')}
-                  >
-                    <i className="fas fa-forward-step" aria-hidden="true" />
-                  </button>
-                  <input
-                    type="range"
-                    className="fv-route__slider"
-                    min={0}
-                    max={1}
-                    step={0.0001}
-                    value={simClock}
-                    style={{ ['--fv-progress' as string]: `${simClock * 100}%` }}
-                    onChange={(e) => {
-                      setSimPlaying(false);
-                      setSimClock(Number(e.target.value));
-                    }}
-                    aria-label={t('voyageProgress', 'Voyage progress')}
-                  />
-                </div>
-                <div className="fv-route__sim-factors" role="radiogroup" aria-label={t('compareFactor', 'Compare factor')}>
-                  {WEATHER_FACTORS.map((f) => {
-                    const on = simFactor === f.id;
-                    return (
-                      <label
-                        key={f.id}
-                        className={`fv-route__sim-factor${on ? ' fv-route__sim-factor--on' : ''}`}
-                      >
-                        <input
-                          type="radio"
-                          name="fv-sim-factor"
-                          checked={on}
-                          onChange={() => setSimFactor(f.id)}
-                        />
-                        <i className={`fas ${f.icon}`} aria-hidden="true" />
-                        {t(`weatherFactor.${f.id}`, f.label)}
-                      </label>
-                    );
-                  })}
-                </div>
-                <div className="fv-route__sim-chart">
-                  <div className="fv-route__sim-chart-head">
-                    <span>
-                      <i className="fas fa-cloud-sun-rain" aria-hidden="true" />{' '}
-                      {t(`weatherFactor.${simFactor}`, simFactorDef.label)}{' '}
-                      {t('alongVoyage', 'along voyage')}
-                      <span
-                        className={`fv-route__sim-live${simLiveActive ? ' fv-route__sim-live--on' : ''}`}
-                        title={
-                          simLiveActive
-                            ? t('liveDataHint', 'Live Open-Meteo data')
-                            : t('sampleDataHint', 'Sample data (loading live…)')
-                        }
-                      >
-                        <i
-                          className={`fas ${simLiveActive ? 'fa-satellite-dish' : 'fa-flask'}`}
-                          aria-hidden="true"
-                        />{' '}
-                        {simLiveActive
-                          ? t('live', 'Live')
-                          : t('sampleData', 'Sample')}
-                      </span>
-                      {simForecastTime && (
-                        <span
-                          className="fv-route__sim-time"
-                          title={t('forecastTimeHint', 'Projected date/time at the current position (UTC)')}
-                        >
-                          <i className="fas fa-calendar-day" aria-hidden="true" />{' '}
-                          {simForecastTime} {t('utc', 'UTC')}
-                        </span>
-                      )}
-                    </span>
-                    <span className="fv-route__sim-chart-ymax">
-                      {t('max', 'max')} {simWeather.maxW.toFixed(1)} {simFactorDef.unit}
-                    </span>
-                  </div>
-                  <div className="fv-route__sim-chart-plot">
-                  <svg
-                    className="fv-route__sim-chart-svg"
-                    viewBox="0 0 100 100"
-                    preserveAspectRatio="none"
-                    role="img"
-                    aria-label={t('weatherFactorCompare', 'Weather factor along voyage')}
-                  >
-                    <line
-                      x1="0"
-                      y1="50"
-                      x2="100"
-                      y2="50"
-                      className="fv-route__sim-chart-grid"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                    {simWeather.series.map((s) => {
-                      const pts = s.points
-                        .map((p) => {
-                          const x = simMaxHours > 0 ? (p.t / simMaxHours) * 100 : 0;
-                          const y = 100 - (p.w / simWeather.maxW) * 100;
-                          return `${x.toFixed(2)},${y.toFixed(2)}`;
-                        })
-                        .join(' ');
-                      const dim = selectedRouteId && selectedRouteId !== s.id;
-                      return (
-                        <polyline
-                          key={s.id}
-                          points={pts}
-                          fill="none"
-                          stroke={s.color}
-                          strokeWidth={s.id === selectedRouteId ? 2.5 : 1.5}
-                          strokeOpacity={dim ? 0.35 : 1}
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                          vectorEffect="non-scaling-stroke"
-                        />
-                      );
-                    })}
-                    <line
-                      x1={simClock * 100}
-                      y1="0"
-                      x2={simClock * 100}
-                      y2="100"
-                      className="fv-route__sim-chart-cursor"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  </svg>
-                  <div className="fv-route__sim-chart-overlay">
-                    <span className="fv-route__sim-chart-ytick" style={{ top: '0%' }}>
-                      {simWeather.maxW.toFixed(1)}
-                    </span>
-                    <span className="fv-route__sim-chart-ytick" style={{ top: '50%' }}>
-                      {(simWeather.maxW / 2).toFixed(1)}
-                    </span>
-                    <span className="fv-route__sim-chart-ytick" style={{ top: '100%' }}>
-                      0
-                    </span>
-                    {simRoutes.map((r) => {
-                      const live = simLive.byId[r.id] ?? { frac: 0, weather: 0 };
-                      const dim = selectedRouteId && selectedRouteId !== r.id;
-                      const left = simClock * 100;
-                      const top = 100 - (live.weather / simWeather.maxW) * 100;
-                      return (
-                        <span
-                          key={r.id}
-                          className={`fv-route__sim-chart-val${dim ? ' fv-route__sim-chart-val--dim' : ''}`}
-                          style={{
-                            left: `${left}%`,
-                            top: `${Math.max(0, Math.min(100, top))}%`,
-                            ['--fv-val-color' as string]: r.color,
-                          }}
-                        >
-                          <span
-                            className="fv-route__sim-chart-dot"
-                            style={{ background: r.color }}
-                          />
-                          <span
-                            className="fv-route__sim-chart-tag"
-                            style={{ borderColor: r.color }}
-                          >
-                            {live.weather.toFixed(1)}
-                          </span>
-                        </span>
-                      );
-                    })}
-                  </div>
-                  </div>
-                  <div className="fv-route__sim-chart-axis">
-                    <span>{t('departure', 'Departure')}</span>
-                    <span>{formatDuration(simMaxHours)}</span>
-                  </div>
-                </div>
-                <ul className="fv-route__sim-legend">
-                  {simRoutes.map((r) => {
-                    const live = simLive.byId[r.id] ?? { frac: 0, weather: 0 };
-                    const isSel = r.id === selectedRouteId;
-                    const isBest = r.id === simLive.bestId;
-                    return (
-                      <li key={r.id}>
-                        <button
-                          type="button"
-                          className={`fv-route__sim-leg${isSel ? ' fv-route__sim-leg--active' : ''}`}
-                          onClick={() => setSelectedRouteId(r.id)}
-                        >
-                          <span
-                            className="fv-route__sim-leg-swatch"
-                            style={{ background: r.color }}
-                          />
-                          <span className="fv-route__sim-leg-label">{r.label}</span>
-                          <span
-                            className={`fv-route__sim-leg-weather${
-                              isBest ? ' fv-route__sim-leg-weather--best' : ''
-                            }`}
-                            title={t('weatherFactorNow', 'Current conditions at this position')}
-                          >
-                            <i className="fas fa-cloud-sun-rain" aria-hidden="true" />{' '}
-                            {live.weather.toFixed(1)} {simFactorDef.unit}
-                            {isBest && (
-                              <i
-                                className="fas fa-star fv-route__sim-leg-best"
-                                aria-hidden="true"
-                                title={t('calmestNow', 'Calmest right now')}
-                              />
-                            )}
-                          </span>
-                          <span className="fv-route__sim-leg-bar">
-                            <span
-                              className="fv-route__sim-leg-fill"
-                              style={{ width: `${live.frac * 100}%`, background: r.color }}
-                            />
-                          </span>
-                          <span className="fv-route__sim-leg-pct">
-                            {live.frac >= 1 ? (
-                              <i className="fas fa-flag-checkered" aria-hidden="true" />
-                            ) : (
-                              `${Math.round(live.frac * 100)}%`
-                            )}
-                          </span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-                </>
-                )}
-              </div>
-          )}
           </div>
         </div>
       </section>
@@ -2066,6 +1477,80 @@ export function RouteExplorerPage() {
                 )}
               </span>
             </div>
+          </div>
+        </div>
+      )}
+
+      {speedModalOpen && (
+        <div
+          className="fv-route__modal-overlay"
+          role="presentation"
+          onClick={() => setSpeedModalOpen(false)}
+        >
+          <div
+            className="fv-route__modal fv-route__modal--sm"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('setSpeed', 'Set speed')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="fv-route__modal-head">
+              <h3>
+                <i className="fas fa-gauge-high" aria-hidden="true" />{' '}
+                {t('setSpeed', 'Set speed')}
+              </h3>
+              <button
+                type="button"
+                className="fv-route__modal-close"
+                onClick={() => setSpeedModalOpen(false)}
+                aria-label={t('close', 'Close')}
+              >
+                <i className="fas fa-xmark" aria-hidden="true" />
+              </button>
+            </header>
+            <form
+              className="fv-route__gen"
+              onSubmit={(e) => {
+                e.preventDefault();
+                applySpeedToChecked();
+              }}
+            >
+              <label className="fv-route__gen-field">
+                <span>
+                  {t('speedForSelected', 'Speed (knots) for')}{' '}
+                  {checkedIds.length}{' '}
+                  {checkedIds.length === 1
+                    ? t('waypoint', 'waypoint')
+                    : t('waypoints', 'waypoints')}
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  autoFocus
+                  value={speedInput}
+                  onChange={(e) => setSpeedInput(e.target.value)}
+                />
+              </label>
+              <div className="fv-route__modal-actions">
+                <button
+                  type="button"
+                  className="fv-route__btn"
+                  onClick={() => setSpeedModalOpen(false)}
+                >
+                  {t('cancel', 'Cancel')}
+                </button>
+                <button
+                  type="submit"
+                  className="fv-route__btn fv-route__btn--primary"
+                  disabled={
+                    !Number.isFinite(Number(speedInput)) || Number(speedInput) < 0
+                  }
+                >
+                  <i className="fas fa-check" aria-hidden="true" /> {t('save', 'Save')}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

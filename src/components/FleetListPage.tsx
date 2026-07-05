@@ -5,6 +5,7 @@ import { useL } from '../i18n/LocalizationProvider';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
 import { useTheme } from '../theme';
 import { FleetMapView, type MapVessel } from './FleetMapView';
+import { SettingsModal } from './SettingsModal';
 
 /**
  * Fleet List View page — `/main`.
@@ -666,6 +667,7 @@ export function FleetListPage() {
   // Switch mode (light theme) is off by default on every load.
   const [theme, toggleTheme] = useTheme();
   const [profileOpen, setProfileOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Open/close a column filter panel, resetting the search box each time.
   const toggleFilterPanel = (label: string) => {
@@ -907,7 +909,15 @@ export function FleetListPage() {
                   <i className="fas fa-id-badge" aria-hidden="true" />
                   <span>{t('accountDetails', 'Account Details')}</span>
                 </button>
-                <button type="button" className="fv-fleet__profile-item" role="menuitem">
+                <button
+                  type="button"
+                  className="fv-fleet__profile-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    setSettingsOpen(true);
+                  }}
+                >
                   <i className="fas fa-gear" aria-hidden="true" />
                   <span>{t('settings', 'Settings')}</span>
                 </button>
@@ -1118,6 +1128,7 @@ export function FleetListPage() {
           </table>
         </div>
       )}
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

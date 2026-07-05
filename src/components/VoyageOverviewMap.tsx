@@ -48,14 +48,27 @@ function samplePath(
   return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
 }
 
-function shipIcon(): L.DivIcon {
+function bearingDeg(a: [number, number], b: [number, number]): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const [lat1, lon1] = a;
+  const [lat2, lon2] = b;
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+  return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
+}
+
+function shipIcon(heading: number): L.DivIcon {
   return L.divIcon({
     className: 'fv-voyage-overview__ship-wrap',
-    iconSize: [34, 34],
-    iconAnchor: [17, 17],
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
     html: `
-      <span class="fv-voyage-overview__ship">
-        <i class="fas fa-ship" aria-hidden="true"></i>
+      <span class="fv-voyage-overview__ship" style="transform:rotate(${Math.round(heading) - 90}deg)">
+        <svg viewBox="0 0 24 24" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 7 H15 L22 12 L15 17 H3 Z" fill="#58a6ff" stroke="#0e1626" stroke-width="1.4" stroke-linejoin="round" />
+        </svg>
       </span>
     `,
   });
@@ -155,7 +168,15 @@ function VoyageOverviewInner({ row }: InnerProps) {
   }, [lastIdx]);
 
   const shipPos = useMemo(() => samplePath(path, progress), [path, progress]);
-  const icon = useMemo(() => shipIcon(), []);
+  const shipHeading = useMemo(
+    () =>
+      bearingDeg(
+        samplePath(path, Math.max(0, progress - 0.5)),
+        samplePath(path, Math.min(lastIdx, progress + 0.5)),
+      ),
+    [path, progress, lastIdx],
+  );
+  const icon = useMemo(() => shipIcon(shipHeading), [shipHeading]);
 
   const portMarkers = useMemo(() => {
     const ports = [
@@ -280,9 +301,9 @@ function VoyageOverviewInner({ row }: InnerProps) {
               position={p.coords}
               icon={L.divIcon({
                 className: 'fv-voyage-overview__port-wrap',
-                iconSize: [12, 12],
-                iconAnchor: [6, 6],
-                html: '<span class="fv-voyage-overview__port"></span>',
+                iconSize: [22, 22],
+                iconAnchor: [11, 20],
+                html: '<span class="fv-voyage-overview__port"><i class="fas fa-location-dot" aria-hidden="true"></i></span>',
               })}
             >
               <Tooltip

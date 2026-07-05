@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useTheme } from '../theme';
+import { SettingsModal } from './SettingsModal';
 
 /**
  * Collapsible left sidebar (icon-tab edition).
@@ -157,6 +158,7 @@ export function LeftSidebar(_props: { iconOnly?: boolean } = {}) {
   const [activeTab, setActiveTab] = useState<TabId>(() => readActiveTab());
   const [theme, toggleTheme] = useTheme();
   const [profileOpen, setProfileOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -269,7 +271,15 @@ export function LeftSidebar(_props: { iconOnly?: boolean } = {}) {
                 <i className="fas fa-id-badge" aria-hidden="true" />
                 <span>{t('accountDetails', 'Account Details')}</span>
               </button>
-              <button type="button" className="fv-left-sidebar__profile-item" role="menuitem">
+              <button
+                type="button"
+                className="fv-left-sidebar__profile-item"
+                role="menuitem"
+                onClick={() => {
+                  setProfileOpen(false);
+                  setSettingsOpen(true);
+                }}
+              >
                 <i className="fas fa-gear" aria-hidden="true" />
                 <span>{t('settings', 'Settings')}</span>
               </button>
@@ -282,6 +292,7 @@ export function LeftSidebar(_props: { iconOnly?: boolean } = {}) {
           )}
         </div>
       </div>
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </aside>
   );
 }
