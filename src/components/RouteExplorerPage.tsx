@@ -15,6 +15,7 @@ import {
 } from '../data/routeSimulatorStore';
 import { RouteEditorMap, type EditorPoint, legPositions } from './RouteEditorMap';
 import { PortInput } from './PortInput';
+import { useVesselPosition } from '../data/vesselPosition';
 
 /**
  * Route Explorer page — `/route-explorer`.
@@ -387,8 +388,14 @@ export function RouteExplorerPage() {
   // "Generate Optimized Sea Route" popup, opened from the map "Optimize" button.
   const [genModalOpen, setGenModalOpen] = useState(false);
 
-  // Whether the Waypoint details side panel is collapsed.
-  const [sideCollapsed, setSideCollapsed] = useState(false);
+  // Whether the Waypoint details side panel is collapsed. Minimized by
+  // default; it opens automatically while editing the route (plot mode) or
+  // when the user intentionally expands it.
+  const [sideCollapsed, setSideCollapsed] = useState(true);
+
+  useEffect(() => {
+    if (plotMode) setSideCollapsed(false);
+  }, [plotMode]);
 
   // Waypoints checked via the per-row checkbox in the details list.
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
@@ -556,6 +563,27 @@ export function RouteExplorerPage() {
   const shipMarkers = useMapShipMarkers();
   const plannedColor = useMapPlannedColor();
   const activeWaypoints = useMapRouteWaypoints();
+
+  // Last reported vessel position (from the tracksheet's last row).
+  const vesselPos = useVesselPosition();
+  const allShipMarkers = useMemo(
+    () =>
+      vesselPos
+        ? [
+            ...shipMarkers,
+            {
+              id: 'tracksheet-vessel',
+              color: '#f0b429',
+              pos: [vesselPos.lat, vesselPos.lon] as [number, number],
+              label: vesselPos.label ?? 'Vessel',
+              sublabel: 'Last reported position',
+              active: false,
+              heading: 0,
+            },
+          ]
+        : shipMarkers,
+    [shipMarkers, vesselPos],
+  );
 
   /** Replace the editable waypoints with the selected candidate route. */
   const applySelectedRoute = () => {
@@ -1295,7 +1323,7 @@ export function RouteExplorerPage() {
               selected={selected}
               routes={overlayRoutes}
               selectedRouteId={selectedRouteId}
-              shipMarkers={shipMarkers}
+              shipMarkers={allShipMarkers}
               plannedRouteColor={plannedColor}
               activeWaypoints={activeWaypoints}
               onSelectRoute={setSelectedRouteId}

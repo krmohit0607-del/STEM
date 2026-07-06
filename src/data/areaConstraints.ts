@@ -23,7 +23,21 @@ export interface AreaConstraint {
   speedMax: string;
   /** One or more polygon rings, each an ordered list of [lat, lon] vertices. */
   rings: [number, number][][];
+  /**
+   * When set, this constraint was created for a specific voyage rather than
+   * being a global/admin constraint. Bundled constraints below leave it unset.
+   */
+  voyageId?: string;
 }
+
+/** Scope of an area constraint: bundled admin vs voyage-specific. */
+export type AreaConstraintScope = 'admin' | 'voyage';
+
+/** Bundled constraints are admin; anything tagged with a `voyageId` is voyage-specific. */
+export function constraintScope(c: AreaConstraint): AreaConstraintScope {
+  return c.voyageId ? 'voyage' : 'admin';
+}
+
 
 export const AREA_CONSTRAINTS: AreaConstraint[] = [
   {"id":"ac-1","name":"Global Limited Passage Zones #1","rawName":"Imported constraint #1 from _global_zones/GlobalLimitedPassageZones.kml","zoneType":"limited-passage-zone","geomType":"limited-passage","rpmMin":"","rpmMax":"","speedMin":"","speedMax":"","rings":[[[15.72576,71.45402],[15.34999,72.09588],[16.45398,72.55989],[16.59365,71.82543]],[[21.68325,118.17167],[21.67274,118.18286],[21.68337,118.19379],[21.69481,118.18269]],[[22.24937,119.32881],[22.06397,120.17731],[21.68006,120.49582],[21.51477,120.73061],[21.30647,120.75217],[21.21704,120.68971],[21.18165,120.71705],[21.14882,120.77017],[21.07689,120.81786],[21.14821,120.92201],[21.37924,121.14162],[21.45567,121.3954],[21.38637,121.42319],[21.30301,121.61179],[21.38706,121.79804],[21.57804,121.88894],[22.03845,122.14623],[22.51281,121.91698],[22.81708,121.76744],[22.9172,121.64091],[22.99608,121.66624],[23.58988,121.80589],[24.05573,121.91608],[24.42796,122.11552],[25.01294,120.76853],[26.21997,119.46559],[24.83514,118.02287],[22.49319,118.80336],[22.08705,119.1496]],[[11.87949,118.60367],[11.88164,118.67436],[11.968,118.67253],[11.97516,118.63224]],[[-19.97032,54.09024],[-19.87386,54.21534],[-19.70225,54.31929],[-19.58662,54.27473],[-19.55673,54.10811],[-19.68358,53.98242],[-19.82724,53.88283],[-19.93395,53.93559]]]},
@@ -1106,3 +1120,75 @@ export const AREA_CONSTRAINTS: AreaConstraint[] = [
   {"id":"ac-1078","name":"Constraint #1078","rawName":"Senkaku Island_2","zoneType":"no-go-zone","geomType":"no-go","rpmMin":"","rpmMax":"","speedMin":"","speedMax":"","rings":[[[26.31268,124.56219],[26.28226,124.73226],[26.1956,124.87644],[26.06592,124.97278],[25.91295,125.00661],[25.75998,124.97278],[25.6303,124.87644],[25.54365,124.73226],[25.51322,124.56219],[25.54365,124.39212],[25.6303,124.24795],[25.75998,124.15161],[25.91295,124.11778],[26.06592,124.15161],[26.1956,124.24795],[26.28226,124.39212]]]},
   {"id":"ac-1079","name":"Constraint #1079","rawName":"Senkaku Islands_3","zoneType":"no-go-zone","geomType":"no-go","rpmMin":"","rpmMax":"","speedMin":"","speedMax":"","rings":[[[26.33955,123.71239],[26.30912,123.8825],[26.22247,124.02671],[26.09279,124.12307],[25.93982,124.15691],[25.78685,124.12307],[25.65717,124.02671],[25.57052,123.8825],[25.54009,123.71239],[25.57052,123.54228],[25.65717,123.39807],[25.78685,123.30172],[25.93982,123.26788],[26.09279,123.30172],[26.22247,123.39807],[26.30912,123.54228]]]},
 ];
+
+// --- Voyage-specific constraints ---------------------------------------------
+// Constraints created for a single voyage are stored in localStorage keyed by
+// voyage id, kept separate from the bundled admin constraints above. Creation
+// is handled from the left menu's Area Constraints tool; this module just
+// persists and reads them back.
+
+const VOYAGE_STORAGE_PREFIX = 'fv.areaConstraints.voyage.';
+
+export function loadVoyageConstraints(voyageId: string): AreaConstraint[] {
+  if (!voyageId) return [];
+  try {
+    const raw = window.localStorage.getItem(VOYAGE_STORAGE_PREFIX + voyageId);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return (parsed as AreaConstraint[]).map((c) => ({ ...c, voyageId }));
+    }
+  } catch {
+    /* fall back to empty */
+  }
+  return [];
+}
+
+export function saveVoyageConstraints(
+  voyageId: string,
+  constraints: AreaConstraint[],
+): void {
+  if (!voyageId) return;
+  try {
+    window.localStorage.setItem(
+      VOYAGE_STORAGE_PREFIX + voyageId,
+      JSON.stringify(constraints.map((c) => ({ ...c, voyageId }))),
+    );
+  } catch {
+    /* storage unavailable — ignore */
+  }
+}
+
+export function newVoyageConstraintId(): string {
+  return `vac-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// --- Admin deletions ---------------------------------------------------------
+// Bundled admin constraints can't be removed from the source file, so deleted
+// ids are remembered in localStorage and filtered out when the list is loaded.
+
+const ADMIN_DELETED_KEY = 'fv.areaConstraints.deleted';
+
+export function loadDeletedAdminIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(ADMIN_DELETED_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+export function saveDeletedAdminIds(ids: string[]): void {
+  try {
+    window.localStorage.setItem(ADMIN_DELETED_KEY, JSON.stringify(ids));
+  } catch {
+    /* storage unavailable — ignore */
+  }
+}
+
+

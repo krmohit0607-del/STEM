@@ -1,8 +1,8 @@
 import { Fragment, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { InterimTabs } from './InterimTabs';
 import type { Voyage } from '../data/voyages';
 
 /**
@@ -498,37 +498,11 @@ export function InterimDashboardPage() {
           <span className="fv-voyage__heading-icon" aria-hidden="true">
             <i className="fas fa-bolt" />
           </span>
-          <div>
-            <h1>{t('interimDashboard', 'Interim Dashboard')}</h1>
-            <p className="fv-voyage__sub">
-              {selectedVoyage
-                ? `${selectedVoyage.vessel} \u00b7 IMO ${selectedVoyage.imo} \u00b7 ${selectedVoyage.client} \u00b7 ${selectedVoyage.portFrom} \u2192 ${selectedVoyage.portTo}`
-                : 'No voyage selected \u2014 open one from the Fleet List.'}
-            </p>
-          </div>
+          <h1>{t('interimDashboard', 'Interim Dashboard')}</h1>
         </div>
       </header>
 
-      <nav className="fv-voyage__tabs" aria-label="Interim sections">
-        <Link
-          to={selectedVoyage ? `/interim?voyage=${encodeURIComponent(selectedVoyage.id)}` : '/interim'}
-          className="fv-voyage__tab fv-voyage__tab--active"
-          aria-current="page"
-        >
-          <i className="fas fa-bolt" aria-hidden="true" /> {t('interimDashboard', 'Interim Dashboard')}
-        </Link>
-        <Link
-          to={
-            selectedVoyage
-              ? `/optimization?voyage=${encodeURIComponent(selectedVoyage.id)}`
-              : '/optimization'
-          }
-          className="fv-voyage__tab"
-        >
-          <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
-          {t('optimizationDetails', 'Optimization Details')}
-        </Link>
-      </nav>
+      <InterimTabs active="interim" />
 
       <div className="fv-interim__topbar">
         <div className="fv-interim__leg-picker">

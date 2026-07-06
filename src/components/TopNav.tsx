@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { buildView } from './voyage/buildView';
+import { ModuleSelector } from './ModuleSelector';
 
 /**
  * Top navigation bar for the home page.
@@ -70,6 +71,7 @@ export function TopNav() {
           <i className="fas fa-ship" aria-hidden="true" />
           STEM
         </span>
+        <ModuleSelector />
         <div className="fv-topnav__vessel">
           <span className="fv-topnav__vessel-name">{vesselName}</span>
           {clientName && (

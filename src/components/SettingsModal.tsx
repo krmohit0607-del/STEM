@@ -9,6 +9,15 @@ import {
   saveEmailTemplates,
   type EmailTemplate,
 } from '../data/emailTemplates';
+import {
+  CLIENT_ROLES,
+  loadClients,
+  newClientId,
+  resetClients,
+  saveClients,
+  type Client,
+} from '../data/clients';
+import { AreaConstraintsPage } from './AreaConstraintsPage';
 
 /**
  * Settings popup opened from the profile menu (Profile Settings → Settings).
@@ -111,6 +120,12 @@ export function SettingsModal({
               {t(active.labelKey, active.labelFallback)}
             </h4>
             {active.id === 'email-templates' && <EmailTemplatesPanel />}
+            {active.id === 'client-details' && <ClientsPanel />}
+            {active.id === 'area-constraints' && (
+              <div className="fv-settings-area">
+                <AreaConstraintsPage mode="admin" />
+              </div>
+            )}
           </section>
         </div>
       </div>
@@ -360,6 +375,430 @@ function TemplateEditor({
           onChange={(e) => onChange({ ...value, body: e.target.value })}
         />
       </label>
+      <div className="fv-email-template__edit-actions">
+        <button type="button" className="fv-email-template__btn" onClick={onCancel}>
+          {t('cancel', 'Cancel')}
+        </button>
+        <button
+          type="submit"
+          className="fv-email-template__btn fv-email-template__btn--primary"
+          disabled={!canSave}
+        >
+          <i className="fas fa-check" aria-hidden="true" /> {t('save', 'Save')}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function clientToText(c: Client): string {
+  return [
+    `Name: ${c.name}`,
+    `Location: ${c.location}`,
+    `Contact: ${c.contactName}`,
+    `Email: ${c.email}`,
+    `Phone: ${c.phone}`,
+    `Username: ${c.username}`,
+    `Role: ${c.role}`,
+    `Status: ${c.active ? 'Active' : 'Inactive'}`,
+  ].join('\n');
+}
+
+function ClientsPanel() {
+  const l = useL();
+  const t = (key: string, fallback: string) => {
+    const v = l(key);
+    return v === key ? fallback : v;
+  };
+
+  const [clients, setClients] = useState<Client[]>(() => loadClients());
+  const [query, setQuery] = useState('');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [revealId, setRevealId] = useState<string | null>(null);
+  // `editing` holds the client currently in the editor (id === '' for a new one).
+  const [editing, setEditing] = useState<Client | null>(null);
+
+  useEffect(() => {
+    saveClients(clients);
+  }, [clients]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? clients.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          c.location.toLowerCase().includes(q) ||
+          c.email.toLowerCase().includes(q) ||
+          c.contactName.toLowerCase().includes(q) ||
+          c.username.toLowerCase().includes(q) ||
+          c.role.toLowerCase().includes(q),
+      )
+    : clients;
+
+  const copy = async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      window.setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
+  const startNew = () =>
+    setEditing({
+      id: '',
+      name: '',
+      location: '',
+      email: '',
+      contactName: '',
+      phone: '',
+      username: '',
+      password: '',
+      role: CLIENT_ROLES[0],
+      active: true,
+    });
+
+  const startEdit = (c: Client) => setEditing({ ...c });
+
+  const duplicate = (c: Client) => {
+    setEditing({
+      ...c,
+      id: '',
+      name: `${c.name} (copy)`,
+      username: '',
+      password: '',
+    });
+  };
+
+  const deleteClient = (id: string) => {
+    if (!window.confirm(t('confirmDeleteClient', 'Delete this client?'))) return;
+    setClients((prev) => prev.filter((x) => x.id !== id));
+    setEditing((e) => (e && e.id === id ? null : e));
+  };
+
+  const saveEditing = () => {
+    if (!editing) return;
+    const name = editing.name.trim();
+    const email = editing.email.trim();
+    if (!name || !email) return;
+    const next: Client = {
+      ...editing,
+      name,
+      email,
+      location: editing.location.trim(),
+      contactName: editing.contactName.trim(),
+      phone: editing.phone.trim(),
+      username: editing.username.trim(),
+      role: editing.role.trim() || CLIENT_ROLES[0],
+    };
+    setClients((prev) => {
+      if (editing.id) {
+        return prev.map((x) => (x.id === editing.id ? next : x));
+      }
+      return [{ ...next, id: newClientId() }, ...prev];
+    });
+    setEditing(null);
+  };
+
+  const restoreDefaults = () => {
+    if (
+      !window.confirm(
+        t(
+          'confirmRestoreClients',
+          'Restore the built-in clients? Your custom changes will be lost.',
+        ),
+      )
+    )
+      return;
+    setClients(resetClients());
+    setEditing(null);
+  };
+
+  return (
+    <div className="fv-email-templates">
+      <div className="fv-email-templates__bar">
+        <div className="fv-email-templates__search">
+          <i className="fas fa-magnifying-glass" aria-hidden="true" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('searchClients', 'Search clients…')}
+            aria-label={t('searchClients', 'Search clients…')}
+          />
+        </div>
+        <button type="button" className="fv-email-templates__new" onClick={startNew}>
+          <i className="fas fa-plus" aria-hidden="true" /> {t('newClient', 'New client')}
+        </button>
+        <button
+          type="button"
+          className="fv-email-templates__reset"
+          onClick={restoreDefaults}
+          title={t('restoreDefaults', 'Restore defaults')}
+          aria-label={t('restoreDefaults', 'Restore defaults')}
+        >
+          <i className="fas fa-rotate-left" aria-hidden="true" />
+        </button>
+      </div>
+
+      {editing && editing.id === '' && (
+        <ClientEditor
+          t={t}
+          value={editing}
+          onChange={setEditing}
+          onSave={saveEditing}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+
+      <div className="fv-email-templates__list">
+        {filtered.length === 0 ? (
+          <p className="fv-email-templates__empty">
+            {t('noClientsMatch', 'No clients match your search.')}
+          </p>
+        ) : (
+          filtered.map((c) =>
+            editing && editing.id === c.id ? (
+              <ClientEditor
+                key={c.id}
+                t={t}
+                value={editing}
+                onChange={setEditing}
+                onSave={saveEditing}
+                onCancel={() => setEditing(null)}
+              />
+            ) : (
+              <article key={c.id} className="fv-client-card">
+                <header className="fv-email-template__head">
+                  <div className="fv-email-template__titles">
+                    <span className="fv-email-template__cat">{c.role}</span>
+                    <h5 className="fv-email-template__title">
+                      {c.name}
+                      <span
+                        className={`fv-client-card__status fv-client-card__status--${
+                          c.active ? 'on' : 'off'
+                        }`}
+                      >
+                        {c.active ? t('active', 'Active') : t('inactive', 'Inactive')}
+                      </span>
+                    </h5>
+                  </div>
+                  <div className="fv-email-template__actions">
+                    <button
+                      type="button"
+                      className="fv-email-template__btn"
+                      onClick={() => copy(c.id, clientToText(c))}
+                    >
+                      <i
+                        className={`fas ${copiedId === c.id ? 'fa-check' : 'fa-copy'}`}
+                        aria-hidden="true"
+                      />{' '}
+                      {copiedId === c.id ? t('copied', 'Copied') : t('copy', 'Copy')}
+                    </button>
+                    <button
+                      type="button"
+                      className="fv-email-template__btn"
+                      onClick={() => duplicate(c)}
+                      aria-label={t('duplicate', 'Duplicate')}
+                      title={t('duplicate', 'Duplicate')}
+                    >
+                      <i className="fas fa-clone" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="fv-email-template__btn"
+                      onClick={() => startEdit(c)}
+                      aria-label={t('edit', 'Edit')}
+                      title={t('edit', 'Edit')}
+                    >
+                      <i className="fas fa-pen" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="fv-email-template__btn fv-email-template__btn--danger"
+                      onClick={() => deleteClient(c.id)}
+                      aria-label={t('delete', 'Delete')}
+                      title={t('delete', 'Delete')}
+                    >
+                      <i className="fas fa-trash" aria-hidden="true" />
+                    </button>
+                  </div>
+                </header>
+                <dl className="fv-client-card__grid">
+                  <div>
+                    <dt>{t('clientLocation', 'Location')}</dt>
+                    <dd>{c.location || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('clientContact', 'Contact')}</dt>
+                    <dd>{c.contactName || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('clientEmail', 'Email')}</dt>
+                    <dd>{c.email || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('clientPhone', 'Phone')}</dt>
+                    <dd>{c.phone || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('clientUsername', 'Username')}</dt>
+                    <dd>{c.username || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('clientPassword', 'Password')}</dt>
+                    <dd className="fv-client-card__password">
+                      <span>{revealId === c.id ? c.password || '—' : '••••••••'}</span>
+                      <button
+                        type="button"
+                        className="fv-client-card__reveal"
+                        onClick={() =>
+                          setRevealId((r) => (r === c.id ? null : c.id))
+                        }
+                        aria-label={
+                          revealId === c.id
+                            ? t('hidePassword', 'Hide password')
+                            : t('showPassword', 'Show password')
+                        }
+                        title={
+                          revealId === c.id
+                            ? t('hidePassword', 'Hide password')
+                            : t('showPassword', 'Show password')
+                        }
+                      >
+                        <i
+                          className={`fas ${revealId === c.id ? 'fa-eye-slash' : 'fa-eye'}`}
+                          aria-hidden="true"
+                        />
+                      </button>
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            ),
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ClientEditor({
+  t,
+  value,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  t: (key: string, fallback: string) => string;
+  value: Client;
+  onChange: (client: Client) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const canSave = value.name.trim().length > 0 && value.email.trim().length > 0;
+  return (
+    <form
+      className="fv-email-template fv-email-template--edit"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave();
+      }}
+    >
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field">
+          <span>{t('clientName', 'Client name')}</span>
+          <input
+            type="text"
+            value={value.name}
+            autoFocus
+            onChange={(e) => onChange({ ...value, name: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('clientLocation', 'Location')}</span>
+          <input
+            type="text"
+            value={value.location}
+            onChange={(e) => onChange({ ...value, location: e.target.value })}
+          />
+        </label>
+      </div>
+
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field">
+          <span>{t('clientContact', 'Contact name')}</span>
+          <input
+            type="text"
+            value={value.contactName}
+            onChange={(e) => onChange({ ...value, contactName: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('clientPhone', 'Phone')}</span>
+          <input
+            type="tel"
+            value={value.phone}
+            onChange={(e) => onChange({ ...value, phone: e.target.value })}
+          />
+        </label>
+      </div>
+
+      <label className="fv-email-template__field">
+        <span>{t('clientEmail', 'Email')}</span>
+        <input
+          type="email"
+          value={value.email}
+          onChange={(e) => onChange({ ...value, email: e.target.value })}
+        />
+      </label>
+
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field">
+          <span>{t('clientUsername', 'Username')}</span>
+          <input
+            type="text"
+            autoComplete="off"
+            value={value.username}
+            onChange={(e) => onChange({ ...value, username: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('clientPassword', 'Password')}</span>
+          <input
+            type="text"
+            autoComplete="new-password"
+            value={value.password}
+            onChange={(e) => onChange({ ...value, password: e.target.value })}
+          />
+        </label>
+      </div>
+
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field fv-email-template__field--cat">
+          <span>{t('clientRole', 'Role')}</span>
+          <select
+            value={value.role}
+            onChange={(e) => onChange({ ...value, role: e.target.value })}
+          >
+            {CLIENT_ROLES.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="fv-email-template__field fv-client-editor__active">
+          <span>{t('clientStatus', 'Login enabled')}</span>
+          <input
+            type="checkbox"
+            checked={value.active}
+            onChange={(e) => onChange({ ...value, active: e.target.checked })}
+          />
+        </label>
+      </div>
+
       <div className="fv-email-template__edit-actions">
         <button type="button" className="fv-email-template__btn" onClick={onCancel}>
           {t('cancel', 'Cancel')}

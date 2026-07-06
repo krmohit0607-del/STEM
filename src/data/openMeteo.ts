@@ -338,3 +338,78 @@ export async function fetchPointForecast(
     return { time: String(time), values };
   });
 }
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+/**
+ * Fetch the supported factors (wind / waves / currents) at a single lat/lon
+ * for a specific UTC date-time. Picks the matching hour from the hourly
+ * series. Best-effort: factors whose request fails are omitted, and dates
+ * outside the API's available range simply return nothing.
+ */
+export async function fetchPointWeatherAt(
+  lat: number,
+  lon: number,
+  when: Date,
+): Promise<Record<string, PointFactor>> {
+  const date = `${when.getUTCFullYear()}-${pad2(when.getUTCMonth() + 1)}-${pad2(
+    when.getUTCDate(),
+  )}`;
+  const hour = when.getUTCHours();
+  const out: Record<string, PointFactor> = {};
+
+  const bases: Record<'forecast' | 'marine', string> = {
+    forecast: 'https://api.open-meteo.com/v1/forecast',
+    marine: 'https://marine-api.open-meteo.com/v1/marine',
+  };
+
+  const groups: Array<{ api: 'forecast' | 'marine'; ids: string[] }> = [
+    { api: 'forecast', ids: ['wind'] },
+    { api: 'marine', ids: ['waves', 'currents'] },
+  ];
+
+  await Promise.all(
+    groups.map(async ({ api, ids }) => {
+      const queries = ids.map((id) => ({ id, q: FACTOR_QUERY[id] }));
+      const vars = new Set<string>();
+      for (const { q } of queries) {
+        vars.add(q.magVar);
+        if (q.dirVar) vars.add(q.dirVar);
+      }
+      const url =
+        `${bases[api]}?latitude=${lat}&longitude=${lon}` +
+        `&hourly=${[...vars].join(',')}&wind_speed_unit=kn&timezone=UTC` +
+        `&start_date=${date}&end_date=${date}`;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          hourly?: Record<string, Array<number | string>>;
+        };
+        const hr = json.hourly ?? {};
+        const times = (hr.time as string[] | undefined) ?? [];
+        let idx = times.findIndex((t) => t.startsWith(`${date}T${pad2(hour)}`));
+        if (idx < 0) {
+          const anyArr = hr[queries[0].q.magVar] as number[] | undefined;
+          idx = Math.min(hour, (anyArr?.length ?? 1) - 1);
+        }
+        for (const { id, q } of queries) {
+          const rawMag = Number((hr[q.magVar] as number[] | undefined)?.[idx]);
+          if (!Number.isFinite(rawMag)) continue;
+          const dir = q.dirVar
+            ? Number((hr[q.dirVar] as number[] | undefined)?.[idx])
+            : NaN;
+          out[id] = {
+            id,
+            magnitude: q.scale ? q.scale(rawMag) : rawMag,
+            directionDeg: Number.isFinite(dir) ? dir : null,
+          };
+        }
+      } catch {
+        /* ignore — factor omitted */
+      }
+    }),
+  );
+
+  return out;
+}

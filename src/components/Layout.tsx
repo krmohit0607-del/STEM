@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 
 import { useFleetView } from '../context/FleetViewContext';
-import { GlobalNav } from './GlobalNav';
 import { LeftSidebar } from './LeftSidebar';
 import { MapView } from './MapView';
 import { TopNav } from './TopNav';
@@ -43,7 +42,6 @@ export function Layout({ children }: { children?: ReactNode }) {
 
   return (
     <div id="page-wrapper">
-      <GlobalNav />
       <div id="dynamicStuff">
         <div id="HiddenMap" />
         <div id="TestImage" />

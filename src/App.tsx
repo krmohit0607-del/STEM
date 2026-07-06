@@ -6,7 +6,9 @@ import { Layout } from './components/Layout';
 import { FleetListPage } from './components/FleetListPage';
 import { InterimDashboardPage } from './components/InterimDashboardPage';
 import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
-import { OptimizationStudioPage } from './components/OptimizationStudioPage';
+import { RobCalculationPage } from './components/RobCalculationPage';
+import { VoyageEstimationPage } from './components/VoyageEstimationPage';
+import { WeatherMarginsPage } from './components/WeatherMarginsPage';
 import { VoyageDetailsPage } from './components/VoyageDetailsPage';
 import { ConfigHistoryPage } from './components/ConfigHistoryPage';
 import { AreaConstraintsPage } from './components/AreaConstraintsPage';
@@ -16,6 +18,7 @@ import { EmailDetailsPage } from './components/EmailDetailsPage';
 import { PassageDetailsPage } from './components/PassageDetailsPage';
 import { CreateVoyagePage } from './components/CreateVoyagePage';
 import { RouteExplorerPage } from './components/RouteExplorerPage';
+import { LimitsConstraintsPage } from './components/LimitsConstraintsPage';
 
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
 import { PageShell } from './components/PageShell';
@@ -71,10 +74,26 @@ export function App() {
               }
             />
             <Route
-              path="/optimization-studio"
+              path="/rob-calculation"
               element={
                 <Layout>
-                  <OptimizationStudioPage />
+                  <RobCalculationPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/voyage-estimation"
+              element={
+                <Layout>
+                  <VoyageEstimationPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/weather-margins"
+              element={
+                <Layout>
+                  <WeatherMarginsPage />
                 </Layout>
               }
             />
@@ -147,6 +166,14 @@ export function App() {
               element={
                 <Layout>
                   <RouteExplorerPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/limits"
+              element={
+                <Layout>
+                  <LimitsConstraintsPage />
                 </Layout>
               }
             />

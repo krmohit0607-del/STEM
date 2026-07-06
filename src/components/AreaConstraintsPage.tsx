@@ -13,7 +13,17 @@ import {
   getZoneStyle,
   speedKnots,
 } from './AreaConstraintsLayer';
-import { AREA_CONSTRAINTS, type AreaConstraint } from '../data/areaConstraints';
+import {
+  AREA_CONSTRAINTS,
+  constraintScope,
+  loadDeletedAdminIds,
+  loadVoyageConstraints,
+  newVoyageConstraintId,
+  saveDeletedAdminIds,
+  saveVoyageConstraints,
+  type AreaConstraint,
+} from '../data/areaConstraints';
+import { useSelectedVoyage } from '../data/selectedVoyage';
 
 /**
  * Standalone page that lists every imported area constraint alongside a map
@@ -88,7 +98,7 @@ function limitSummary(c: AreaConstraint): string {
 }
 
 // Apply persisted ring edits (by constraint id) on top of the bundled data.
-function loadInitial(): AreaConstraint[] {
+function loadInitial(voyageId?: string): AreaConstraint[] {
   let edits: Record<string, [number, number][][]> = {};
   try {
     const raw = localStorage.getItem(EDITS_KEY);
@@ -96,12 +106,34 @@ function loadInitial(): AreaConstraint[] {
   } catch {
     /* ignore */
   }
-  return AREA_CONSTRAINTS.map((c) =>
+  const deleted = new Set(loadDeletedAdminIds());
+  const admin = AREA_CONSTRAINTS.filter((c) => !deleted.has(c.id)).map((c) =>
     edits[c.id] ? { ...c, rings: cloneRings(edits[c.id]) } : c
   );
+  // Voyage-specific constraints are only relevant on the voyage view.
+  const voyage = voyageId ? loadVoyageConstraints(voyageId) : [];
+  return [...admin, ...voyage];
 }
 
-export function AreaConstraintsPage() {
+/** Zone types the user can create for a voyage. */
+const CREATABLE_ZONE_TYPES: { zoneType: string; geomType: string }[] = [
+  { zoneType: 'speed-control-zone', geomType: 'none' },
+  { zoneType: 'limited-passage-zone', geomType: 'limited-passage' },
+  { zoneType: 'no-go-zone', geomType: 'no-go' },
+];
+
+type ScopeView = 'all' | 'admin' | 'voyage';
+
+/**
+ * Area constraints management surface.
+ *
+ *   - `admin`  (Settings → Area Constraints): manage the bundled/global
+ *     constraints only. No scope selector.
+ *   - `voyage` (left menu `/area-constraints`): view the admin constraints
+ *     together with the ones created for the selected voyage, with a map
+ *     control to choose which set is shown.
+ */
+export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voyage' }) {
   const l = useL();
   const [theme] = useTheme();
   const t = (key: string, fallback: string) => {
@@ -109,11 +141,21 @@ export function AreaConstraintsPage() {
     return v === key ? fallback : v;
   };
 
+  const voyage = useSelectedVoyage();
+  const voyageId = mode === 'voyage' ? voyage?.id : undefined;
+
   const mapRef = useRef<LeafletMap | null>(null);
-  const [data, setData] = useState<AreaConstraint[]>(() => loadInitial());
+  const [data, setData] = useState<AreaConstraint[]>(() => loadInitial(voyageId));
   const [search, setSearch] = useState('');
   const [zoneFilter, setZoneFilter] = useState<string | null>(null);
+  const [scopeView, setScopeView] = useState<ScopeView>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  // Reload when the selected voyage changes (voyage view only).
+  useEffect(() => {
+    setData(loadInitial(voyageId));
+  }, [voyageId]);
 
   // Make sure Leaflet measures the container after the flex layout settles,
   // otherwise the map can render as a thin sliver.
@@ -124,17 +166,37 @@ export function AreaConstraintsPage() {
     return () => window.clearTimeout(id);
   }, []);
 
+  // What the map draws: admin view shows everything; voyage view follows the
+  // on-map scope selector (all / admin / this voyage).
+  const mapConstraints = useMemo(
+    () =>
+      mode === 'admin' || scopeView === 'all'
+        ? data
+        : data.filter((c) => constraintScope(c) === scopeView),
+    [data, mode, scopeView],
+  );
+
+  // The sidebar list is voyage-only on the left-menu view — admin constraints
+  // are visible on the map (via the scope selector) but not listed here.
+  const listSource = useMemo(
+    () =>
+      mode === 'voyage'
+        ? data.filter((c) => constraintScope(c) === 'voyage')
+        : data,
+    [data, mode],
+  );
+
   const zoneCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const c of data) {
+    for (const c of listSource) {
       counts.set(c.zoneType, (counts.get(c.zoneType) ?? 0) + 1);
     }
     return counts;
-  }, [data]);
+  }, [listSource]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return data.filter((c) => {
+    return listSource.filter((c) => {
       if (zoneFilter && c.zoneType !== zoneFilter) return false;
       if (!q) return true;
       return (
@@ -143,7 +205,7 @@ export function AreaConstraintsPage() {
         c.rawName.toLowerCase().includes(q)
       );
     });
-  }, [data, search, zoneFilter]);
+  }, [listSource, search, zoneFilter]);
 
   const selected = data.find((c) => c.id === selectedId) ?? null;
 
@@ -207,12 +269,19 @@ export function AreaConstraintsPage() {
       const edits: Record<string, [number, number][][]> = {};
       const original = new Map(AREA_CONSTRAINTS.map((c) => [c.id, c]));
       for (const c of data) {
+        if (constraintScope(c) === 'voyage') continue;
         const orig = original.get(c.id);
         if (orig && JSON.stringify(orig.rings) !== JSON.stringify(c.rings)) {
           edits[c.id] = c.rings;
         }
       }
       localStorage.setItem(EDITS_KEY, JSON.stringify(edits));
+      if (voyageId) {
+        saveVoyageConstraints(
+          voyageId,
+          data.filter((c) => constraintScope(c) === 'voyage'),
+        );
+      }
     } catch {
       /* ignore */
     }
@@ -222,6 +291,77 @@ export function AreaConstraintsPage() {
     const orig = AREA_CONSTRAINTS.find((c) => c.id === id);
     if (!orig) return;
     mutateRings(id, () => cloneRings(orig.rings));
+  };
+
+  // Admin mode can delete any constraint; voyage mode can only delete the
+  // voyage's own constraints (bundled admin ones are read-only there).
+  const canDelete = (c: AreaConstraint) =>
+    mode === 'admin' || constraintScope(c) === 'voyage';
+
+  const deleteConstraint = (id: string) => {
+    const target = data.find((c) => c.id === id);
+    if (!target || !canDelete(target)) return;
+    if (
+      !window.confirm(
+        t('confirmDeleteConstraint', 'Delete this area constraint?'),
+      )
+    )
+      return;
+
+    if (constraintScope(target) === 'voyage') {
+      if (voyageId) {
+        saveVoyageConstraints(
+          voyageId,
+          data.filter((c) => constraintScope(c) === 'voyage' && c.id !== id),
+        );
+      }
+    } else {
+      const deleted = loadDeletedAdminIds();
+      if (!deleted.includes(id)) saveDeletedAdminIds([...deleted, id]);
+    }
+
+    setData((prev) => prev.filter((c) => c.id !== id));
+    setSelectedId((sel) => (sel === id ? null : sel));
+  };
+
+  const createConstraint = (zoneType: string, geomType: string) => {
+    if (!voyageId) return;
+    const style = getZoneStyle(zoneType);
+    const center = mapRef.current?.getCenter();
+    const clat = center?.lat ?? 20;
+    const clng = center?.lng ?? 20;
+    const d = 3;
+    const ring: [number, number][] = [
+      [Math.round((clat + d) * 1e5) / 1e5, Math.round((clng - d) * 1e5) / 1e5],
+      [Math.round((clat + d) * 1e5) / 1e5, Math.round((clng + d) * 1e5) / 1e5],
+      [Math.round((clat - d) * 1e5) / 1e5, Math.round((clng + d) * 1e5) / 1e5],
+      [Math.round((clat - d) * 1e5) / 1e5, Math.round((clng - d) * 1e5) / 1e5],
+    ];
+    const created: AreaConstraint = {
+      id: newVoyageConstraintId(),
+      name: `New ${style.label} zone`,
+      rawName: `Voyage constraint · ${style.label}`,
+      zoneType,
+      geomType,
+      rpmMin: '',
+      rpmMax: '',
+      speedMin: '',
+      speedMax: '',
+      rings: [ring],
+      voyageId,
+    };
+    setData((prev) => {
+      const next = [...prev, created];
+      saveVoyageConstraints(
+        voyageId,
+        next.filter((c) => constraintScope(c) === 'voyage'),
+      );
+      return next;
+    });
+    setScopeView('voyage');
+    setCreating(false);
+    setSelectedId(created.id);
+    flyTo(created);
   };
 
   const tileUrl =
@@ -238,9 +378,62 @@ export function AreaConstraintsPage() {
             {t('areaConstraints', 'Area Constraints')}
           </h2>
           <p className="fv-area-page__count">
-            {filtered.length} of {data.length}
+            {filtered.length} of {listSource.length}
           </p>
         </div>
+
+        {mode === 'voyage' && (
+          <div className="fv-area-page__create">
+            {!creating ? (
+              <button
+                type="button"
+                className="fv-area-create-btn"
+                onClick={() => setCreating(true)}
+                disabled={!voyageId}
+                title={
+                  voyageId
+                    ? t('newConstraint', 'New area constraint')
+                    : t('selectVoyageFirst', 'Select a voyage first')
+                }
+              >
+                <i className="fas fa-plus" aria-hidden="true" />{' '}
+                {t('newConstraint', 'New area constraint')}
+              </button>
+            ) : (
+              <div className="fv-area-create">
+                <div className="fv-area-create__label">
+                  {t('chooseZoneType', 'Choose zone type')}
+                </div>
+                <div className="fv-area-create__types">
+                  {CREATABLE_ZONE_TYPES.map((z) => {
+                    const style = getZoneStyle(z.zoneType);
+                    return (
+                      <button
+                        key={z.zoneType}
+                        type="button"
+                        className="fv-area-create__type"
+                        onClick={() => createConstraint(z.zoneType, z.geomType)}
+                      >
+                        <span
+                          className="fv-area-chip__swatch"
+                          style={{ background: style.color }}
+                        />
+                        {style.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  className="fv-area-create__cancel"
+                  onClick={() => setCreating(false)}
+                >
+                  {t('cancel', 'Cancel')}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="fv-area-page__search">
           <i className="fas fa-magnifying-glass" aria-hidden="true" />
@@ -321,6 +514,11 @@ export function AreaConstraintsPage() {
                     onSave={saveEdits}
                     onReset={() => resetConstraint(selected.id)}
                     onZoom={() => flyTo(selected)}
+                    onDelete={
+                      canDelete(selected)
+                        ? () => deleteConstraint(selected.id)
+                        : undefined
+                    }
                     t={t}
                   />
                 )}
@@ -329,7 +527,14 @@ export function AreaConstraintsPage() {
           })}
           {filtered.length === 0 && (
             <li className="fv-area-page__empty">
-              {t('noConstraintsMatch', 'No constraints match your search.')}
+              {search.trim()
+                ? t('noConstraintsMatch', 'No constraints match your search.')
+                : mode === 'voyage'
+                  ? t(
+                      'noVoyageConstraints',
+                      'No area constraints for this voyage yet. Use “New area constraint” to add one.',
+                    )
+                  : t('noConstraintsMatch', 'No constraints match your search.')}
             </li>
           )}
         </ul>
@@ -360,10 +565,39 @@ export function AreaConstraintsPage() {
           <WeatherPointControl position="topright" />
           <MapCursorPosition />
           <AreaConstraintsLayer
-            constraints={data}
+            constraints={mapConstraints}
             selectedId={selectedId ?? undefined}
           />
         </MapContainer>
+
+        {mode === 'voyage' && (
+          <div className="fv-area-map-scope" role="group" aria-label={t('constraintScope', 'Constraint scope')}>
+            <button
+              type="button"
+              className={`fv-area-map-scope__btn${scopeView === 'all' ? ' fv-area-map-scope__btn--on' : ''}`}
+              onClick={() => setScopeView('all')}
+              title={t('scopeAll', 'All')}
+            >
+              <i className="fas fa-layer-group" aria-hidden="true" /> {t('scopeAll', 'All')}
+            </button>
+            <button
+              type="button"
+              className={`fv-area-map-scope__btn${scopeView === 'admin' ? ' fv-area-map-scope__btn--on' : ''}`}
+              onClick={() => setScopeView('admin')}
+              title={t('scopeAdmin', 'Admin')}
+            >
+              <i className="fas fa-globe" aria-hidden="true" /> {t('scopeAdmin', 'Admin')}
+            </button>
+            <button
+              type="button"
+              className={`fv-area-map-scope__btn${scopeView === 'voyage' ? ' fv-area-map-scope__btn--on' : ''}`}
+              onClick={() => setScopeView('voyage')}
+              title={t('scopeVoyage', 'This voyage')}
+            >
+              <i className="fas fa-route" aria-hidden="true" /> {t('scopeVoyage', 'This voyage')}
+            </button>
+          </div>
+        )}
 
         <div className="fv-area-legend">
           {Object.entries(ZONE_STYLES).map(([zt, z]) => (
@@ -397,6 +631,7 @@ interface CoordinateEditorProps {
   onSave: () => void;
   onReset: () => void;
   onZoom: () => void;
+  onDelete?: () => void;
   t: (key: string, fallback: string) => string;
 }
 
@@ -410,6 +645,7 @@ function CoordinateEditor({
   onSave,
   onReset,
   onZoom,
+  onDelete,
   t,
 }: CoordinateEditorProps) {
   const [saved, setSaved] = useState(false);
@@ -469,6 +705,17 @@ function CoordinateEditor({
         >
           <i className="fas fa-crosshairs" aria-hidden="true" />
         </button>
+        {onDelete && (
+          <button
+            type="button"
+            className="fv-area-editor__action fv-area-editor__action--danger"
+            onClick={onDelete}
+            title={t('delete', 'Delete')}
+          >
+            <i className="fas fa-trash" aria-hidden="true" />{' '}
+            {t('delete', 'Delete')}
+          </button>
+        )}
       </div>
 
       <div className="fv-area-editor__note">

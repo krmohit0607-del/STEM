@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { TracksheetGrid } from './TracksheetGrid';
@@ -17,21 +18,16 @@ import { RouteSimulatorPanel } from './RouteSimulatorPanel';
 
 type PanelView = 'tracksheet' | 'simulator';
 
-const COLLAPSED_KEY = 'fv.bottomPanel.collapsed';
 const HEIGHT_KEY = 'fv.bottomPanel.height';
+
+/** The route editor page — the tracksheet opens by default only here. */
+const ROUTE_EDITOR_PATH = '/route-explorer';
+/** The interim dashboard page. */
+const INTERIM_PATH = '/interim';
 
 const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 600;
 const DEFAULT_HEIGHT = 280;
-
-function readBool(key: string, fallback: boolean): boolean {
-  try {
-    const v = window.localStorage.getItem(key);
-    return v === null ? fallback : v === '1';
-  } catch {
-    return fallback;
-  }
-}
 
 function readNumber(key: string, fallback: number): number {
   try {
@@ -52,18 +48,18 @@ export function BottomPanel() {
   };
 
   const [view, setView] = useState<PanelView>('tracksheet');
-  const [collapsed, setCollapsed] = useState(() => readBool(COLLAPSED_KEY, false));
+  const location = useLocation();
+  const isRouteEditor = location.pathname.startsWith(ROUTE_EDITOR_PATH);
+  // Minimized by default on every page; re-applied on each navigation while
+  // the user can still expand/collapse within a page.
+  const [collapsed, setCollapsed] = useState(true);
   const [height, setHeight] = useState(() =>
     Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, readNumber(HEIGHT_KEY, DEFAULT_HEIGHT))),
   );
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0');
-    } catch {
-      /* ignore */
-    }
-  }, [collapsed]);
+    setCollapsed(true);
+  }, [location.pathname]);
 
   useEffect(() => {
     try {
@@ -112,6 +108,12 @@ export function BottomPanel() {
     }
     setCollapsed((prev) => !prev);
   };
+
+  // The bottom (tracksheet) panel only appears on the route editor and the
+  // interim dashboard; it is hidden on every other page.
+  const visible =
+    isRouteEditor || location.pathname.startsWith(INTERIM_PATH);
+  if (!visible) return null;
 
   return (
     <div className="fv-bottom-panel" style={{ height: collapsed ? 36 : 36 + height }}>

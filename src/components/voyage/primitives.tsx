@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 
+import {
+  fromDateInput,
+  fromDateTimeInput,
+  toDateInput,
+  toDateTimeInput,
+} from '../../data/dateFields';
+
 /** Shared presentational primitives used by the voyage section components. */
 
 interface CardProps {
@@ -121,9 +128,11 @@ interface FieldProps {
   display?: React.ReactNode;
   /** When provided, the field renders as a dropdown while editing. */
   options?: string[];
+  /** When set, the field renders a native date / datetime picker. */
+  type?: 'date' | 'datetime';
 }
 
-export function Field({ label, value, editing, onChange, inline, display, options }: FieldProps) {
+export function Field({ label, value, editing, onChange, inline, display, options, type }: FieldProps) {
   return (
     <div className={`fv-voyage__info${inline ? ' fv-voyage__info--inline' : ''}`}>
       <span className="fv-voyage__info-label">{label}</span>
@@ -141,6 +150,19 @@ export function Field({ label, value, editing, onChange, inline, display, option
               </option>
             ))}
           </select>
+        ) : type ? (
+          <input
+            className="fv-voyage__input"
+            type={type === 'date' ? 'date' : 'datetime-local'}
+            value={type === 'date' ? toDateInput(value) : toDateTimeInput(value)}
+            onChange={(e) =>
+              onChange(
+                type === 'date'
+                  ? fromDateInput(e.target.value)
+                  : fromDateTimeInput(e.target.value),
+              )
+            }
+          />
         ) : (
           <input
             className="fv-voyage__input"
@@ -187,9 +209,11 @@ interface CellProps {
   value: string;
   onChange: (value: string) => void;
   options?: string[];
+  /** When set, the cell renders a native date / datetime picker. */
+  type?: 'date' | 'datetime';
 }
 
-export function Cell({ editing, value, onChange, options }: CellProps) {
+export function Cell({ editing, value, onChange, options, type }: CellProps) {
   if (!editing) return <>{value || '—'}</>;
   if (options) {
     return (
@@ -205,6 +229,22 @@ export function Cell({ editing, value, onChange, options }: CellProps) {
           </option>
         ))}
       </select>
+    );
+  }
+  if (type) {
+    return (
+      <input
+        className="fv-voyage__cell-input"
+        type={type === 'date' ? 'date' : 'datetime-local'}
+        value={type === 'date' ? toDateInput(value) : toDateTimeInput(value)}
+        onChange={(e) =>
+          onChange(
+            type === 'date'
+              ? fromDateInput(e.target.value)
+              : fromDateTimeInput(e.target.value),
+          )
+        }
+      />
     );
   }
   return (

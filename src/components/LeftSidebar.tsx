@@ -16,7 +16,6 @@ import { SettingsModal } from './SettingsModal';
 type TabId =
   | 'dashboard'
   | 'interim'
-  | 'optimization'
   | 'route'
   | 'limits'
   | 'area'
@@ -60,22 +59,12 @@ const TABS: TabDef[] = [
   {
     id: 'interim',
     icon: 'fa-bolt',
-    labelKey: 'interimDashboard',
-    labelFallback: 'Interim Dashboard',
+    labelKey: 'dashboardAndTools',
+    labelFallback: 'Dashboard & Tools',
     route: '/interim',
     planned: [
       { label: 'Interim dashboard', route: '/interim' },
       { label: 'Optimization details', route: '/optimization' },
-    ],
-  },
-  {
-    id: 'optimization',
-    icon: 'fa-wand-magic-sparkles',
-    labelKey: 'optimization',
-    labelFallback: 'Optimization',
-    route: '/optimization-studio',
-    planned: [
-      { label: 'Optimization studio', route: '/optimization-studio' },
     ],
   },
   {
@@ -91,6 +80,7 @@ const TABS: TabDef[] = [
     icon: 'fa-sliders',
     labelKey: 'limitsConstraints',
     labelFallback: 'Limits & Constraints',
+    route: '/limits',
     planned: [
       'Clients → optimization',
       'Masters → weather limits',

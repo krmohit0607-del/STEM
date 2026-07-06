@@ -498,7 +498,7 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                   editing={editing && !hasSub}
                   onChange={(x) => setLeg(i, 'to', x)}
                 />
-                <Field label="ETD" value={leg.etd} editing={editing} onChange={(x) => setLeg(i, 'etd', x)} />
+                <Field label="ETD" value={leg.etd} editing={editing} onChange={(x) => setLeg(i, 'etd', x)} type="datetime" />
                 <BoolField label="Input ETD in Local Time" value={leg.etdLocalTime} editing={editing} onChange={(b) => setLeg(i, 'etdLocalTime', b)} />
                 <div className="fv-voyage__info">
                   <span className="fv-voyage__info-label">ETD Time Zone</span>
@@ -666,7 +666,7 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                               <td><Cell editing={editing} value={s.type} onChange={(x) => setSubLeg(i, si, 'type', x)} options={LEG_VOYAGE_TYPE_OPTIONS} /></td>
                               <td>{s.from || '—'}</td>
                               <td><Cell editing={editing} value={s.to} onChange={(x) => setSubLeg(i, si, 'to', x)} /></td>
-                              <td><Cell editing={editing} value={s.etd} onChange={(x) => setSubLeg(i, si, 'etd', x)} /></td>
+                              <td><Cell editing={editing} value={s.etd} onChange={(x) => setSubLeg(i, si, 'etd', x)} type="datetime" /></td>
                               <td>
                                 <button
                                   type="button"

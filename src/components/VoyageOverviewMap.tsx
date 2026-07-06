@@ -178,6 +178,22 @@ function VoyageOverviewInner({ row }: InnerProps) {
   );
   const icon = useMemo(() => shipIcon(shipHeading), [shipHeading]);
 
+  // Keep the Leaflet map sized to its container. When the bottom (tracksheet)
+  // panel is expanded/collapsed the map container shrinks/grows; Leaflet
+  // caches its pixel size, so without invalidateSize() the map stays clipped
+  // instead of reflowing to fill the visible area.
+  const mapRef = useRef<L.Map | null>(null);
+  const mapWrapRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = mapWrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      mapRef.current?.invalidateSize();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const portMarkers = useMemo(() => {
     const ports = [
       { name: row.departurePort, label: 'Departure' },
@@ -272,8 +288,11 @@ function VoyageOverviewInner({ row }: InnerProps) {
         </Section>
       </aside>
 
-      <div className="fv-voyage-overview__map">
+      <div className="fv-voyage-overview__map" ref={mapWrapRef}>
         <MapContainer
+          ref={(instance) => {
+            mapRef.current = instance;
+          }}
           {...(bounds ? { bounds } : { center: [20, 0] as LatLngExpression, zoom: 3 })}
           minZoom={2}
           maxZoom={10}
