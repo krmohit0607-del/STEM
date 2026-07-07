@@ -15,6 +15,9 @@ import {
   setMapRouteWaypoints,
   useActiveSimRoute,
 } from '../data/routeSimulatorStore';
+import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute } from '../data/optimizationStore';
+import { computeRouteMetrics, DEFAULT_MARKET_FACTORS, type RouteMetrics } from '../data/routeMetrics';
+import { openScenarioReport } from '../data/optimizationReport';
 
 /**
  * Route Simulator panel — multi-route comparison + playback, styled after the
@@ -519,6 +522,10 @@ interface SimRoute {
   hours: number;
   active: boolean;
   sentAt: string | null;
+  /** Set for system-generated optimized routes appended after saved routes. */
+  optimized?: boolean;
+  scenarioId?: string;
+  metrics?: RouteMetrics;
 }
 
 export function RouteSimulatorPanel() {
@@ -529,6 +536,11 @@ export function RouteSimulatorPanel() {
   };
 
   const activeRoute = useActiveSimRoute();
+
+  // System-generated optimized routes (from the route editor's Optimize run),
+  // appended after the saved routes in the table + chart + map.
+  const optimizedResults = useOptimizationResults();
+  const optimizationRun = useOptimizationRun();
 
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() => readSavedRoutes());
   // The single "active" (primary) route for the vessel — shown black.
@@ -548,6 +560,14 @@ export function RouteSimulatorPanel() {
       window.removeEventListener('storage', onStorage);
     };
   }, []);
+
+  // Re-read saved routes + active route when the Optimization "Follow route"
+  // action (or any in-tab change) bumps the shared version.
+  const savedRoutesVersion = useSavedRoutesVersion();
+  useEffect(() => {
+    setSavedRoutes(readSavedRoutes());
+    setActiveRouteId(readActiveRouteId());
+  }, [savedRoutesVersion]);
 
   // --- Playback state --------------------------------------------------------
   const [simClock, setSimClock] = useState(0);
@@ -594,7 +614,7 @@ export function RouteSimulatorPanel() {
     });
     // The active route is black; the rest take distinct palette colours.
     let ci = 0;
-    return base.map((r) => {
+    const mapped: SimRoute[] = base.map((r) => {
       const isActive = r.id === activeRouteId;
       return {
         ...r,
@@ -604,7 +624,25 @@ export function RouteSimulatorPanel() {
           : SAVED_SIM_COLORS[ci++ % SAVED_SIM_COLORS.length],
       };
     });
-  }, [activeRoute, savedRoutes, activeRouteId]);
+    // Append the system-generated optimized routes (in their scenario colours).
+    const optimized: SimRoute[] = optimizedResults
+      .filter((o) => o.path.length >= 2)
+      .map((o) => ({
+        id: o.id,
+        savedId: null,
+        label: o.name,
+        color: o.color,
+        path: o.path,
+        distanceNm: Math.round(o.metrics.distanceNm),
+        hours: o.metrics.durationH,
+        active: false,
+        sentAt: null,
+        optimized: true,
+        scenarioId: o.scenarioId,
+        metrics: o.metrics,
+      }));
+    return [...mapped, ...optimized];
+  }, [activeRoute, savedRoutes, activeRouteId, optimizedResults]);
 
   const hasRoutes = simRoutes.length > 0;
 
@@ -629,11 +667,11 @@ export function RouteSimulatorPanel() {
     return list;
   }, [visibleRoutes, activeSimRoute]);
 
-  // Publish the saved route lines shown on the map (visible + active).
+  // Publish the saved + optimized route lines shown on the map (visible + active).
   useEffect(() => {
     setMapCompareRoutes(
       mapRoutes
-        .filter((r) => r.savedId != null)
+        .filter((r) => r.savedId != null || r.optimized)
         .map((r) => ({ id: r.id, color: r.color, path: r.path })),
     );
   }, [mapRoutes]);
@@ -1247,6 +1285,24 @@ export function RouteSimulatorPanel() {
               <span className="fv-sim2__routes-count">
                 {simRoutes.length} {t('routes', 'Routes')}
               </span>
+              {optimizedResults.length > 0 && (
+                <button
+                  type="button"
+                  className="fv-sim2__routes-btn"
+                  onClick={() => {
+                    const visible = optimizedResults.filter((o) => !hiddenIds.includes(o.id));
+                    openScenarioReport(
+                      visible.map((o) => ({ name: o.name, metrics: o.metrics })),
+                      optimizationRun,
+                      t('nmUnit', 'NM'),
+                    );
+                  }}
+                  title={t('optimizationReport', 'Optimization report')}
+                >
+                  <i className="fas fa-file-lines" aria-hidden="true" />{' '}
+                  {t('optimizationReport', 'Optimization report')}
+                </button>
+              )}
             </div>
             <div className="fv-sim2__table-wrap">
               <table className="fv-sim2__table">
@@ -1297,8 +1353,14 @@ export function RouteSimulatorPanel() {
                     <th>{t('ecaTimeToGo', 'ECA time to go')}</th>
                     <th>{t('distanceToGo', 'Distance to go')}</th>
                     <th>{t('ecaDistanceToGo', 'ECA distance to go')}</th>
+                    <th>{t('avgSpeed', 'Avg speed')}</th>
                     <th>{t('totalCostToGo', 'Total cost to go')}</th>
                     <th>{t('fuelCostToGo', 'Fuel cost to go')}</th>
+                    <th>{t('hireCost', 'Hire cost')}</th>
+                    <th>{t('fuelReq', 'Fuel req.')}</th>
+                    <th>{t('ecaFuelReq', 'ECA fuel req.')}</th>
+                    <th>{t('euaCost', 'EUA cost')}</th>
+                    <th>{t('euaAllowance', 'EUA allow.')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1312,6 +1374,19 @@ export function RouteSimulatorPanel() {
                     const fuelCost = fuelTons * FUEL_PRICE_PER_TON;
                     const hireCost = (hoursToGo / 24) * HIRE_PER_DAY;
                     const isSel = r.id === selectedRouteId;
+                    // Full-voyage decision metrics (fuel required, EUA, etc.).
+                    // Optimized routes carry their own scenario-specific metrics.
+                    const m =
+                      r.optimized && r.metrics
+                        ? r.metrics
+                        : computeRouteMetrics({
+                            path: r.path,
+                            distanceNm: r.distanceNm,
+                            speedKn: SERVICE_SPEED_KN,
+                            etd: simBaseDate,
+                            market: DEFAULT_MARKET_FACTORS,
+                            consPerDay: SERVICE_SPEED_KN * FUEL_TONS_PER_NM * 24,
+                          });
                     return (
                       <tr key={r.id} className={isSel ? 'fv-sim2__trow--sel' : undefined}
                         onClick={() => setSelectedRouteId(r.id)}>
@@ -1328,7 +1403,9 @@ export function RouteSimulatorPanel() {
                           <span className="fv-sim2__route-meta">
                             <span className="fv-sim2__route-name">{r.label}</span>
                             <span className="fv-sim2__route-sub">
-                              {r.active ? (
+                              {r.optimized ? (
+                                <span className="fv-sim2__badge">{t('optimized', 'Optimized')}</span>
+                              ) : r.active ? (
                                 <span className="fv-sim2__badge fv-sim2__badge--active">{t('active', 'Active')}</span>
                               ) : (
                                 r.sentAt && `${t('saved', 'Saved')}: ${fmtDay(new Date(r.sentAt))}`
@@ -1336,34 +1413,55 @@ export function RouteSimulatorPanel() {
                             </span>
                           </span>
                           <span className="fv-sim2__row-actions" onClick={(e) => e.stopPropagation()}>
-                            <button type="button" className="fv-sim2__row-btn"
-                              title={t('assignVoyage', 'Assign to voyage')}
-                              aria-label={t('assignVoyage', 'Assign to voyage')}>
-                              <i className="fas fa-suitcase" aria-hidden="true" />
-                            </button>
-                            {r.savedId && (
-                              <button type="button" className="fv-sim2__row-btn"
-                                onClick={() => renameSavedRoute(r.savedId!, r.label)}
-                                title={t('renameRoute', 'Rename route')}
-                                aria-label={t('renameRoute', 'Rename route')}>
-                                <i className="fas fa-pen" aria-hidden="true" />
-                              </button>
-                            )}
-                            <button type="button"
-                              className={`fv-sim2__row-btn fv-sim2__row-active${r.active ? ' fv-sim2__row-active--on' : ''}`}
-                              onClick={() => setRouteActive(r.id)}
-                              disabled={r.active}
-                              title={r.active ? t('activeRoute', 'Active route') : t('setActive', 'Set as active')}
-                              aria-label={r.active ? t('activeRoute', 'Active route') : t('setActive', 'Set as active')}>
-                              <i className="fas fa-circle-check" aria-hidden="true" />
-                            </button>
-                            {r.savedId && (
-                              <button type="button" className="fv-sim2__row-btn fv-sim2__row-btn--danger"
-                                onClick={() => deleteSavedRoute(r.savedId!)}
-                                title={t('deleteRoute', 'Delete route')}
-                                aria-label={t('deleteRoute', 'Delete route')}>
-                                <i className="fas fa-trash" aria-hidden="true" />
-                              </button>
+                            {r.optimized ? (
+                              <>
+                                <button type="button" className="fv-sim2__follow-btn"
+                                  onClick={() => {
+                                    const o = optimizedResults.find((x) => x.id === r.id);
+                                    if (o) followOptimizedRoute(o);
+                                  }}
+                                  title={t('followRoute', 'Follow route')}>
+                                  <i className="fas fa-circle-check" aria-hidden="true" /> {t('follow', 'Follow')}
+                                </button>
+                                <button type="button" className="fv-sim2__row-btn fv-sim2__row-btn--danger"
+                                  onClick={() => removeOptimizationResult(r.id)}
+                                  title={t('remove', 'Remove')}
+                                  aria-label={t('remove', 'Remove')}>
+                                  <i className="fas fa-trash" aria-hidden="true" />
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button type="button" className="fv-sim2__row-btn"
+                                  title={t('assignVoyage', 'Assign to voyage')}
+                                  aria-label={t('assignVoyage', 'Assign to voyage')}>
+                                  <i className="fas fa-suitcase" aria-hidden="true" />
+                                </button>
+                                {r.savedId && (
+                                  <button type="button" className="fv-sim2__row-btn"
+                                    onClick={() => renameSavedRoute(r.savedId!, r.label)}
+                                    title={t('renameRoute', 'Rename route')}
+                                    aria-label={t('renameRoute', 'Rename route')}>
+                                    <i className="fas fa-pen" aria-hidden="true" />
+                                  </button>
+                                )}
+                                <button type="button"
+                                  className={`fv-sim2__row-btn fv-sim2__row-active${r.active ? ' fv-sim2__row-active--on' : ''}`}
+                                  onClick={() => setRouteActive(r.id)}
+                                  disabled={r.active}
+                                  title={r.active ? t('activeRoute', 'Active route') : t('setActive', 'Set as active')}
+                                  aria-label={r.active ? t('activeRoute', 'Active route') : t('setActive', 'Set as active')}>
+                                  <i className="fas fa-circle-check" aria-hidden="true" />
+                                </button>
+                                {r.savedId && (
+                                  <button type="button" className="fv-sim2__row-btn fv-sim2__row-btn--danger"
+                                    onClick={() => deleteSavedRoute(r.savedId!)}
+                                    title={t('deleteRoute', 'Delete route')}
+                                    aria-label={t('deleteRoute', 'Delete route')}>
+                                    <i className="fas fa-trash" aria-hidden="true" />
+                                  </button>
+                                )}
+                              </>
                             )}
                           </span>
                         </td>
@@ -1372,8 +1470,14 @@ export function RouteSimulatorPanel() {
                         <td>{formatDuration(hoursToGo * 0.06)}</td>
                         <td>{Math.round(distToGo).toLocaleString()} {t('nmUnit', 'NM')}</td>
                         <td>{Math.round(distToGo * 0.07).toLocaleString()} {t('nmUnit', 'NM')}</td>
+                        <td>{m.speedKn.toFixed(1)} kn</td>
                         <td>{usd(fuelCost + hireCost)}</td>
                         <td>{usd(fuelCost)}</td>
+                        <td>{usd(m.hireCost)}</td>
+                        <td>{Math.round(m.fuelTons).toLocaleString()} t</td>
+                        <td>{Math.round(m.ecaFuelTons).toLocaleString()} t</td>
+                        <td>{usd(m.euaCost)}</td>
+                        <td>{Math.round(m.euaAllowanceTons).toLocaleString()} t</td>
                       </tr>
                     );
                   })}

@@ -11,14 +11,21 @@ import {
 } from '../data/emailTemplates';
 import {
   CLIENT_ROLES,
+  STEM_PICS,
   loadClients,
   newClientId,
   resetClients,
   saveClients,
   type Client,
 } from '../data/clients';
-import { ports as portsApi, type PortDto } from '../api/fleetData';
-import { ApiError } from '../api/client';
+import { VesselsPanel } from './VesselsPanel';
+import { loadPortIndex, searchPortIndex, type PortHit } from '../data/portIndex';
+import {
+  getSavedPorts,
+  newSavedPortId,
+  setSavedPorts,
+  type SavedPort,
+} from '../data/savedPorts';
 import { AreaConstraintsPage } from './AreaConstraintsPage';
 
 /**
@@ -122,6 +129,7 @@ export function SettingsModal({
               {t(active.labelKey, active.labelFallback)}
             </h4>
             {active.id === 'email-templates' && <EmailTemplatesPanel />}
+            {active.id === 'vessel-details' && <VesselsPanel />}
             {active.id === 'client-details' && <ClientsPanel />}
             {active.id === 'port-details' && <PortsPanel />}
             {active.id === 'area-constraints' && (
@@ -403,6 +411,7 @@ function clientToText(c: Client): string {
     `Phone: ${c.phone}`,
     `Username: ${c.username}`,
     `Role: ${c.role}`,
+    `STEM PIC: ${c.pic || 'Unassigned'}`,
     `Status: ${c.active ? 'Active' : 'Inactive'}`,
   ].join('\n');
 }
@@ -434,7 +443,8 @@ function ClientsPanel() {
           c.email.toLowerCase().includes(q) ||
           c.contactName.toLowerCase().includes(q) ||
           c.username.toLowerCase().includes(q) ||
-          c.role.toLowerCase().includes(q),
+          c.role.toLowerCase().includes(q) ||
+          c.pic.toLowerCase().includes(q),
       )
     : clients;
 
@@ -459,6 +469,7 @@ function ClientsPanel() {
       username: '',
       password: '',
       role: CLIENT_ROLES[0],
+      pic: '',
       active: true,
     });
 
@@ -494,6 +505,7 @@ function ClientsPanel() {
       phone: editing.phone.trim(),
       username: editing.username.trim(),
       role: editing.role.trim() || CLIENT_ROLES[0],
+      pic: editing.pic,
     };
     setClients((prev) => {
       if (editing.id) {
@@ -650,6 +662,10 @@ function ClientsPanel() {
                     <dd>{c.username || '—'}</dd>
                   </div>
                   <div>
+                    <dt>{t('clientPic', 'STEM PIC')}</dt>
+                    <dd>{c.pic || t('unassigned', 'Unassigned')}</dd>
+                  </div>
+                  <div>
                     <dt>{t('clientPassword', 'Password')}</dt>
                     <dd className="fv-client-card__password">
                       <span>{revealId === c.id ? c.password || '—' : '••••••••'}</span>
@@ -792,6 +808,23 @@ function ClientEditor({
             ))}
           </select>
         </label>
+        <label className="fv-email-template__field fv-email-template__field--cat">
+          <span>{t('clientPic', 'STEM PIC (assigned to)')}</span>
+          <select
+            value={value.pic}
+            onChange={(e) => onChange({ ...value, pic: e.target.value })}
+          >
+            <option value="">{t('unassigned', 'Unassigned')}</option>
+            {STEM_PICS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="fv-email-template__field-row">
         <label className="fv-email-template__field fv-client-editor__active">
           <span>{t('clientStatus', 'Login enabled')}</span>
           <input
@@ -820,16 +853,63 @@ function ClientEditor({
 
 // --- Ports -----------------------------------------------------------------
 
-/** A port being edited (`id === 0` means a new, unsaved port). */
+/** A port being edited (`id === ''` means a new, unsaved port). */
 interface PortDraft {
-  id: number;
+  id: string;
   name: string;
   lat: string;
   lon: string;
+  unlocode: string;
+  country: string;
 }
 
-function toDraft(p: PortDto): PortDraft {
-  return { id: p.id, name: p.name, lat: String(p.lat), lon: String(p.lon) };
+function toDraft(p: SavedPort): PortDraft {
+  return {
+    id: p.id,
+    name: p.name,
+    lat: String(p.lat),
+    lon: String(p.lon),
+    unlocode: p.unlocode ?? '',
+    country: p.country ?? '',
+  };
+}
+
+/**
+ * Parse a latitude/longitude typed in a flexible format into signed
+ * decimal degrees. Accepts, for either axis:
+ *   - decimal degrees:      "-35.5", "35.5 S", "151.2 E"
+ *   - degrees dec. minutes: "35 30.5 S", "35°30.5' S"
+ *   - degrees min. seconds: "35 30 15 S", "35°30'15\" S"
+ * Hemisphere letters (N/S/E/W) or a leading minus set the sign. Returns
+ * `null` when the value can't be parsed or is out of range.
+ */
+function parseCoordinate(raw: string, axis: 'lat' | 'lon'): number | null {
+  if (raw == null) return null;
+  let s = String(raw).trim().toUpperCase();
+  if (s === '') return null;
+
+  let sign = 1;
+  const hemi = s.match(/[NSEW]/);
+  if (hemi) {
+    if (hemi[0] === 'S' || hemi[0] === 'W') sign = -1;
+    s = s.replace(/[NSEW]/g, ' ');
+  } else if (s.startsWith('-')) {
+    sign = -1;
+  }
+
+  // Normalise degree/minute/second symbols and separators to spaces.
+  s = s.replace(/[°ºd:'′`"″,]/g, ' ').replace(/-/g, ' ');
+  const nums = s.match(/\d+(?:\.\d+)?/g);
+  if (!nums || nums.length === 0) return null;
+
+  const [d, m = '0', sec = '0'] = nums;
+  const value =
+    sign * (Math.abs(Number(d)) + Number(m) / 60 + Number(sec) / 3600);
+  if (!Number.isFinite(value)) return null;
+
+  const limit = axis === 'lat' ? 90 : 180;
+  if (value < -limit || value > limit) return null;
+  return Math.round(value * 1e5) / 1e5;
 }
 
 function PortsPanel() {
@@ -839,87 +919,112 @@ function PortsPanel() {
     return v === key ? fallback : v;
   };
 
-  const [ports, setPorts] = useState<PortDto[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [ports, setPorts] = useState<SavedPort[]>(() => getSavedPorts());
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState<PortDraft | null>(null);
-  const [saving, setSaving] = useState(false);
 
-  // Load ports from the backend on mount.
+  // "Add from World Port Index" lookup state.
+  const [lookupOpen, setLookupOpen] = useState(false);
+  const [lookupQuery, setLookupQuery] = useState('');
+  const [lookupHits, setLookupHits] = useState<PortHit[]>([]);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+
+  // Debounced search against the (lazily-loaded) World Port Index.
   useEffect(() => {
+    if (!lookupOpen) return;
+    const q = lookupQuery.trim();
+    if (q.length < 2) {
+      setLookupHits([]);
+      setLookupLoading(false);
+      return;
+    }
     let cancelled = false;
-    setLoading(true);
-    portsApi
-      .list()
-      .then((rows) => {
-        if (!cancelled) {
-          setPorts([...rows].sort((a, b) => a.name.localeCompare(b.name)));
-          setError(null);
-        }
-      })
-      .catch(() => {
-        if (!cancelled)
-          setError(t('portsLoadFailed', 'Could not load ports from the server.'));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    setLookupLoading(true);
+    setLookupError(null);
+    const id = window.setTimeout(() => {
+      searchPortIndex(q)
+        .then((hits) => {
+          if (!cancelled) setLookupHits(hits);
+        })
+        .catch(() => {
+          if (!cancelled) setLookupError(t('portIndexFailed', 'Could not load the World Port Index.'));
+        })
+        .finally(() => {
+          if (!cancelled) setLookupLoading(false);
+        });
+    }, 250);
     return () => {
       cancelled = true;
+      window.clearTimeout(id);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookupQuery, lookupOpen]);
 
-  const q = query.trim().toLowerCase();
-  const filtered = q ? ports.filter((p) => p.name.toLowerCase().includes(q)) : ports;
-
-  const startNew = () => setEditing({ id: 0, name: '', lat: '', lon: '' });
-  const startEdit = (p: PortDto) => setEditing(toDraft(p));
-
-  const upsertLocal = (port: PortDto) =>
-    setPorts((prev) => {
-      const next = prev.some((p) => p.id === port.id)
-        ? prev.map((p) => (p.id === port.id ? port : p))
-        : [...prev, port];
-      return next.sort((a, b) => a.name.localeCompare(b.name));
-    });
-
-  const saveEditing = async () => {
-    if (!editing) return;
-    const name = editing.name.trim();
-    const lat = Number(editing.lat);
-    const lon = Number(editing.lon);
-    if (!name || Number.isNaN(lat) || Number.isNaN(lon)) return;
-
-    setSaving(true);
-    setError(null);
-    try {
-      const saved = editing.id
-        ? await portsApi.update(editing.id, { name, lat, lon })
-        : await portsApi.create({ name, lat, lon });
-      upsertLocal(saved);
-      setEditing(null);
-    } catch (err) {
-      const msg =
-        err instanceof ApiError && err.status === 409
-          ? err.message
-          : t('portSaveFailed', 'Could not save the port. Is the server running?');
-      setError(msg);
-    } finally {
-      setSaving(false);
-    }
+  const openLookup = () => {
+    setEditing(null);
+    setLookupOpen(true);
+    loadPortIndex().catch(() =>
+      setLookupError(t('portIndexFailed', 'Could not load the World Port Index.')),
+    );
   };
 
-  const deletePort = async (p: PortDto) => {
-    if (!window.confirm(t('confirmDeletePort', `Delete the port “${p.name}”?`))) return;
-    setError(null);
-    try {
-      await portsApi.remove(p.id);
-      setPorts((prev) => prev.filter((x) => x.id !== p.id));
-      setEditing((e) => (e && e.id === p.id ? null : e));
-    } catch {
-      setError(t('portDeleteFailed', 'Could not delete the port. Is the server running?'));
+  const pickPortHit = (hit: PortHit) => {
+    setEditing({
+      id: '',
+      name: hit.name,
+      lat: hit.lat,
+      lon: hit.lon,
+      unlocode: hit.unlocode,
+      country: hit.country,
+    });
+    setLookupOpen(false);
+    setLookupQuery('');
+    setLookupHits([]);
+  };
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? ports.filter(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          (p.unlocode ?? '').toLowerCase().includes(q) ||
+          (p.country ?? '').toLowerCase().includes(q),
+      )
+    : ports;
+
+  // Persist to the shared store (also updates the map) and mirror to state.
+  const commit = (next: SavedPort[]) => {
+    setSavedPorts(next);
+    setPorts(getSavedPorts());
+  };
+
+  const startNew = () =>
+    setEditing({ id: '', name: '', lat: '', lon: '', unlocode: '', country: '' });
+  const startEdit = (p: SavedPort) => setEditing(toDraft(p));
+
+  const saveEditing = () => {
+    if (!editing) return;
+    const name = editing.name.trim();
+    const lat = parseCoordinate(editing.lat, 'lat');
+    const lon = parseCoordinate(editing.lon, 'lon');
+    if (!name || lat === null || lon === null) return;
+    const unlocode = editing.unlocode.trim().toUpperCase();
+    const country = editing.country.trim();
+
+    if (editing.id) {
+      const id = editing.id;
+      commit(ports.map((p) => (p.id === id ? { ...p, name, lat, lon, unlocode, country } : p)));
+    } else {
+      commit([...ports, { id: newSavedPortId(), name, lat, lon, unlocode, country }]);
     }
+    setEditing(null);
+  };
+
+  const deletePort = (p: SavedPort) => {
+    if (!window.confirm(t('confirmDeletePort', `Delete the port “${p.name}”?`))) return;
+    commit(ports.filter((x) => x.id !== p.id));
+    setEditing((e) => (e && e.id === p.id ? null : e));
   };
 
   return (
@@ -935,41 +1040,97 @@ function PortsPanel() {
             aria-label={t('searchPorts', 'Search ports…')}
           />
         </div>
-        <button type="button" className="fv-email-templates__new" onClick={startNew}>
-          <i className="fas fa-plus" aria-hidden="true" /> {t('newPort', 'New port')}
-        </button>
+        <div className="fv-email-templates__bar-actions">
+          <button type="button" className="fv-email-template__btn" onClick={openLookup}>
+            <i className="fas fa-magnifying-glass-location" aria-hidden="true" />{' '}
+            {t('addFromPortIndex', 'Add from World Port Index')}
+          </button>
+          <button type="button" className="fv-email-templates__new" onClick={startNew}>
+            <i className="fas fa-plus" aria-hidden="true" /> {t('newPort', 'New port')}
+          </button>
+        </div>
       </div>
 
-      {error && (
-        <p className="fv-email-templates__empty" role="alert">
-          <i className="fas fa-triangle-exclamation" aria-hidden="true" /> {error}
-        </p>
+      {lookupOpen && (
+        <div className="fv-imo-lookup">
+          <div className="fv-imo-lookup__head">
+            <div className="fv-imo-lookup__search">
+              <i className="fas fa-magnifying-glass" aria-hidden="true" />
+              <input
+                type="search"
+                autoFocus
+                value={lookupQuery}
+                onChange={(e) => setLookupQuery(e.target.value)}
+                placeholder={t('portIndexSearch', 'Search port name, UN/LOCODE or country…')}
+              />
+            </div>
+            <button type="button" className="fv-email-template__btn" onClick={() => setLookupOpen(false)}>
+              {t('close', 'Close')}
+            </button>
+          </div>
+          {lookupError ? (
+            <p className="fv-email-templates__empty" role="alert">
+              <i className="fas fa-triangle-exclamation" aria-hidden="true" /> {lookupError}
+            </p>
+          ) : lookupLoading ? (
+            <p className="fv-imo-lookup__hint">{t('searching', 'Searching…')}</p>
+          ) : lookupQuery.trim().length < 2 ? (
+            <p className="fv-imo-lookup__hint">
+              {t(
+                'portIndexHint',
+                'Type at least 2 characters (port name, UN/LOCODE or country). The World Port Index (~3,700 ports) loads on first search.',
+              )}
+            </p>
+          ) : lookupHits.length === 0 ? (
+            <p className="fv-imo-lookup__hint">{t('portIndexNoMatch', 'No ports match.')}</p>
+          ) : (
+            <ul className="fv-imo-lookup__list">
+              {lookupHits.map((hit, i) => (
+                <li key={`${hit.name}-${i}`}>
+                  <button type="button" className="fv-imo-lookup__hit" onClick={() => pickPortHit(hit)}>
+                    <span className="fv-imo-lookup__hit-main">
+                      <span className="fv-imo-lookup__hit-name">
+                        {hit.name}
+                        {hit.unlocode && <span className="fv-vessel-code">{hit.unlocode}</span>}
+                      </span>
+                      <span className="fv-imo-lookup__hit-meta">
+                        {hit.country || '—'} · {hit.lat}, {hit.lon}
+                      </span>
+                    </span>
+                    <span className="fv-imo-lookup__hit-add">
+                      <i className="fas fa-plus" aria-hidden="true" /> {t('add', 'Add')}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
-      {editing && editing.id === 0 && (
+      {editing && editing.id === '' && (
         <PortEditor
           t={t}
           value={editing}
-          saving={saving}
           onChange={setEditing}
           onSave={saveEditing}
           onCancel={() => setEditing(null)}
         />
       )}
 
-      {loading ? (
-        <p className="fv-email-templates__empty">{t('loadingPorts', 'Loading ports…')}</p>
-      ) : filtered.length === 0 ? (
+      {filtered.length === 0 ? (
         <p className="fv-email-templates__empty">
           {q
             ? t('noPortsMatch', 'No ports match your search.')
-            : t('noPorts', 'No ports yet. Add one to get started.')}
+            : t('noPorts', 'No ports yet. Add one from the World Port Index or create one.')}
         </p>
       ) : (
         <table className="fv-ports-table">
           <thead>
             <tr>
               <th>{t('portName', 'Port')}</th>
+              <th>{t('portUnlocode', 'UN/LOCODE')}</th>
+              <th>{t('portCountry', 'Country')}</th>
               <th>{t('portLat', 'Latitude')}</th>
               <th>{t('portLon', 'Longitude')}</th>
               <th aria-label={t('actions', 'Actions')} />
@@ -979,11 +1140,10 @@ function PortsPanel() {
             {filtered.map((p) =>
               editing && editing.id === p.id ? (
                 <tr key={p.id}>
-                  <td colSpan={4}>
+                  <td colSpan={6}>
                     <PortEditor
                       t={t}
                       value={editing}
-                      saving={saving}
                       onChange={setEditing}
                       onSave={saveEditing}
                       onCancel={() => setEditing(null)}
@@ -993,6 +1153,8 @@ function PortsPanel() {
               ) : (
                 <tr key={p.id}>
                   <td>{p.name}</td>
+                  <td>{p.unlocode || '\u2014'}</td>
+                  <td>{p.country || '\u2014'}</td>
                   <td>{p.lat.toFixed(2)}</td>
                   <td>{p.lon.toFixed(2)}</td>
                   <td className="fv-ports-table__actions">
@@ -1028,24 +1190,22 @@ function PortsPanel() {
 function PortEditor({
   t,
   value,
-  saving,
   onChange,
   onSave,
   onCancel,
 }: {
   t: (key: string, fallback: string) => string;
   value: PortDraft;
-  saving: boolean;
   onChange: (port: PortDraft) => void;
   onSave: () => void;
   onCancel: () => void;
 }) {
   const canSave =
     value.name.trim().length > 0 &&
-    value.lat.trim() !== '' &&
-    !Number.isNaN(Number(value.lat)) &&
-    value.lon.trim() !== '' &&
-    !Number.isNaN(Number(value.lon));
+    parseCoordinate(value.lat, 'lat') !== null &&
+    parseCoordinate(value.lon, 'lon') !== null;
+  const latDecimal = parseCoordinate(value.lat, 'lat');
+  const lonDecimal = parseCoordinate(value.lon, 'lon');
   return (
     <form
       className="fv-email-template fv-email-template--edit"
@@ -1065,26 +1225,59 @@ function PortEditor({
           />
         </label>
         <label className="fv-email-template__field">
+          <span>{t('portUnlocode', 'UN/LOCODE')}</span>
+          <input
+            type="text"
+            value={value.unlocode}
+            placeholder="e.g. SGSIN"
+            maxLength={10}
+            onChange={(e) => onChange({ ...value, unlocode: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('portCountry', 'Country')}</span>
+          <input
+            type="text"
+            value={value.country}
+            placeholder="e.g. Singapore"
+            onChange={(e) => onChange({ ...value, country: e.target.value })}
+          />
+        </label>
+      </div>
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field">
           <span>{t('portLat', 'Latitude')}</span>
           <input
-            type="number"
-            step="any"
-            min={-90}
-            max={90}
+            type="text"
+            inputMode="text"
             value={value.lat}
+            placeholder="e.g. 1.29 or 01 17.4 N"
             onChange={(e) => onChange({ ...value, lat: e.target.value })}
           />
+          <small className="fv-port-coord-hint">
+            {value.lat.trim() === ''
+              ? t('portCoordFormats', 'Decimal or deg/min, e.g. 1.29 · 01 17.4 N')
+              : latDecimal === null
+                ? t('portCoordInvalid', 'Unrecognised latitude')
+                : `= ${latDecimal.toFixed(5)}°`}
+          </small>
         </label>
         <label className="fv-email-template__field">
           <span>{t('portLon', 'Longitude')}</span>
           <input
-            type="number"
-            step="any"
-            min={-180}
-            max={180}
+            type="text"
+            inputMode="text"
             value={value.lon}
+            placeholder="e.g. 103.85 or 103 51.0 E"
             onChange={(e) => onChange({ ...value, lon: e.target.value })}
           />
+          <small className="fv-port-coord-hint">
+            {value.lon.trim() === ''
+              ? t('portCoordFormats', 'Decimal or deg/min, e.g. 103.85 · 103 51.0 E')
+              : lonDecimal === null
+                ? t('portCoordInvalid', 'Unrecognised longitude')
+                : `= ${lonDecimal.toFixed(5)}°`}
+          </small>
         </label>
       </div>
       <div className="fv-email-template__edit-actions">
@@ -1094,10 +1287,9 @@ function PortEditor({
         <button
           type="submit"
           className="fv-email-template__btn fv-email-template__btn--primary"
-          disabled={!canSave || saving}
+          disabled={!canSave}
         >
-          <i className="fas fa-check" aria-hidden="true" />{' '}
-          {saving ? t('saving', 'Saving…') : t('save', 'Save')}
+          <i className="fas fa-check" aria-hidden="true" /> {t('save', 'Save')}
         </button>
       </div>
     </form>

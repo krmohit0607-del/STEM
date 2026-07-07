@@ -14,6 +14,7 @@ import {
   useMapRouteWaypoints,
 } from '../data/routeSimulatorStore';
 import { RouteEditorMap, type EditorPoint, legPositions } from './RouteEditorMap';
+import { OptimizationRunDialog } from './OptimizationRunDialog';
 import { PortInput } from './PortInput';
 import { useVesselPosition } from '../data/vesselPosition';
 
@@ -387,6 +388,8 @@ export function RouteExplorerPage() {
 
   // "Generate Optimized Sea Route" popup, opened from the map "Optimize" button.
   const [genModalOpen, setGenModalOpen] = useState(false);
+  // "Run Optimization" dialog (route/scenario/ETD/market factors).
+  const [optDialogOpen, setOptDialogOpen] = useState(false);
 
   // Whether the Waypoint details side panel is collapsed. Minimized by
   // default; it opens automatically while editing the route (plot mode) or
@@ -1287,7 +1290,7 @@ export function RouteExplorerPage() {
               <button
                 type="button"
                 className="fv-route__btn"
-                onClick={() => setGenModalOpen(true)}
+                onClick={() => setOptDialogOpen(true)}
               >
                 <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
                 {t('optimize', 'Optimize')}
@@ -1423,6 +1426,8 @@ export function RouteExplorerPage() {
           </div>
         </div>
       </section>
+
+      <OptimizationRunDialog open={optDialogOpen} onClose={() => setOptDialogOpen(false)} />
 
       {genModalOpen && (
         <div

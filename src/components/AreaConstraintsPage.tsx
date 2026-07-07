@@ -13,6 +13,7 @@ import {
   getZoneStyle,
   speedKnots,
 } from './AreaConstraintsLayer';
+import { AreaConstraintEditLayer } from './AreaConstraintEditLayer';
 import {
   AREA_CONSTRAINTS,
   constraintScope,
@@ -260,6 +261,19 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
       const ring = rings[ri];
       const last = ring[ring.length - 1] ?? [0, 0];
       ring.push([last[0], last[1]]);
+      return rings;
+    });
+  };
+
+  // Insert a point right after index `pi` (used by the on-map midpoint handles).
+  const insertPoint = (
+    id: string,
+    ri: number,
+    pi: number,
+    coord: [number, number]
+  ) => {
+    mutateRings(id, (rings) => {
+      rings[ri].splice(pi + 1, 0, coord);
       return rings;
     });
   };
@@ -568,6 +582,15 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
             constraints={mapConstraints}
             selectedId={selectedId ?? undefined}
           />
+          {selected && (
+            <AreaConstraintEditLayer
+              constraint={selected}
+              color={getZoneStyle(selected.zoneType).color}
+              onMove={(ri, pi, coord) => updatePoint(selected.id, ri, pi, coord)}
+              onRemove={(ri, pi) => deletePoint(selected.id, ri, pi)}
+              onInsert={(ri, pi, coord) => insertPoint(selected.id, ri, pi, coord)}
+            />
+          )}
         </MapContainer>
 
         {mode === 'voyage' && (
@@ -723,6 +746,13 @@ function CoordinateEditor({
         {zoneLabel} · {c.rings.reduce((n, r) => n + r.length, 0)}{' '}
         {t('coordinates', 'coordinates')}
       </div>
+      <p className="fv-area-editor__hint">
+        <i className="fas fa-hand-pointer" aria-hidden="true" />{' '}
+        {t(
+          'mapEditHint',
+          'On the map: drag a point to move it, click a point to remove it, or click a hollow midpoint to add one.',
+        )}
+      </p>
 
       {c.rings.map((ring, ri) => (
         <div key={ri} className="fv-area-editor__ring">

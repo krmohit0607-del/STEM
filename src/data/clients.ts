@@ -25,6 +25,8 @@ export interface Client {
   password: string;
   /** Assigned role controlling access. */
   role: string;
+  /** STEM PIC — company person-in-charge this client is assigned to. */
+  pic: string;
   /** Whether the login is enabled. */
   active: boolean;
 }
@@ -39,6 +41,20 @@ export const CLIENT_ROLES = [
   'Viewer',
 ] as const;
 
+/**
+ * Company (STEM) persons-in-charge a client can be assigned to when
+ * created in Settings → Client Details.
+ */
+export const STEM_PICS = [
+  'Amit Sharma',
+  'Rahul Verma',
+  'Priya Nair',
+  'Tom Becker',
+  'Liang Wei',
+  'Sofia Marin',
+  'James Okoro',
+] as const;
+
 export const CLIENTS: Client[] = [
   {
     id: 'cl-oceanic',
@@ -50,6 +66,7 @@ export const CLIENTS: Client[] = [
     username: 'oceanic.ops',
     password: 'Change#2026',
     role: 'Operations Manager',
+    pic: 'Amit Sharma',
     active: true,
   },
   {
@@ -62,6 +79,7 @@ export const CLIENTS: Client[] = [
     username: 'northstar.chart',
     password: 'Charter!77',
     role: 'Chartering',
+    pic: 'Priya Nair',
     active: true,
   },
   {
@@ -74,6 +92,7 @@ export const CLIENTS: Client[] = [
     username: 'pacifica.acct',
     password: 'Invoice$09',
     role: 'Accounts',
+    pic: 'Tom Becker',
     active: false,
   },
 ];
@@ -88,7 +107,8 @@ export function loadClients(): Client[] {
     if (!raw) return [...CLIENTS];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every(isClient)) {
-      return parsed as Client[];
+      // Normalise older records saved before `pic` existed.
+      return (parsed as Client[]).map((c) => ({ ...c, pic: c.pic ?? '' }));
     }
   } catch {
     /* fall back to defaults */

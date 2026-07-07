@@ -19,6 +19,12 @@ import { PassageDetailsPage } from './components/PassageDetailsPage';
 import { CreateVoyagePage } from './components/CreateVoyagePage';
 import { RouteExplorerPage } from './components/RouteExplorerPage';
 import { LimitsConstraintsPage } from './components/LimitsConstraintsPage';
+import { OrderConfirmationPage } from './components/OrderConfirmationPage';
+import { ReportingInstructionsPage } from './components/ReportingInstructionsPage';
+import { RouteRecommendationPage } from './components/RouteRecommendationPage';
+import { VoyagePlanPage } from './components/VoyagePlanPage';
+import { ForecastPage } from './components/ForecastPage';
+import { PerformanceReportPage } from './components/PerformanceReportPage';
 
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
 import { PageShell } from './components/PageShell';
@@ -174,6 +180,54 @@ export function App() {
               element={
                 <Layout>
                   <LimitsConstraintsPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/reports/order-confirmation"
+              element={
+                <Layout>
+                  <OrderConfirmationPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/reports/instructions"
+              element={
+                <Layout>
+                  <ReportingInstructionsPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/reports/route-recommendation"
+              element={
+                <Layout>
+                  <RouteRecommendationPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/reports/voyage-plan"
+              element={
+                <Layout>
+                  <VoyagePlanPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/reports/forecast"
+              element={
+                <Layout>
+                  <ForecastPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/reports/performance"
+              element={
+                <Layout>
+                  <PerformanceReportPage />
                 </Layout>
               }
             />

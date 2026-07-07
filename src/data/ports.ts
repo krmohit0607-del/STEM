@@ -1,21 +1,15 @@
 /**
  * World ports lookup.
  *
- * Fetches the NGA World Port Index (~3k genuine sea ports) once and
- * caches it for the session. Used to populate port dropdowns. When a real
- * port-master endpoint is exposed, swap the fetch URL / mapping here —
- * callers use `useWorldPorts` / `resolveWorldPort` unchanged.
+ * Reads the bundled World Port Index (`public/world-port-index.json`,
+ * ~3.7k genuine sea ports) once and caches it for the session. Used to
+ * populate port dropdowns (autocomplete). No external API is called.
  */
 
 import { useEffect, useState } from 'react';
 
-const PORTS_URL =
-  '/wpi/api/publications/world-port-index?output=json';
-const PORTS_URL_DIRECT =
-  'https://msi.nga.mil/api/publications/world-port-index?output=json';
-
 export interface WorldPort {
-  /** UN/LOCODE, e.g. "AE AUH". */
+  /** UN/LOCODE, e.g. "SGSIN". */
   code: string;
   name: string;
   country: string;
@@ -25,49 +19,42 @@ export interface WorldPort {
   label: string;
 }
 
-interface RawPort {
-  portName?: string;
-  countryName?: string;
-  unloCode?: string;
-  ycoord?: number; // latitude
-  xcoord?: number; // longitude
+interface PortIndexJson {
+  fields: string[];
+  rows: string[][];
 }
 
 let cache: WorldPort[] | null = null;
 let inflight: Promise<WorldPort[]> | null = null;
 
-/** Fetch + cache the world ports list (sorted by name). */
+/** Load + cache the world ports list (sorted by name). */
 export async function loadWorldPorts(): Promise<WorldPort[]> {
   if (cache) return cache;
   if (inflight) return inflight;
   inflight = (async () => {
-    let data: { ports?: RawPort[] };
-    try {
-      const res = await fetch(PORTS_URL);
-      if (!res.ok) throw new Error(`Failed to load ports (${res.status})`);
-      data = (await res.json()) as { ports?: RawPort[] };
-    } catch {
-      // Same-origin proxy unavailable — try the source directly.
-      const res = await fetch(PORTS_URL_DIRECT);
-      if (!res.ok) throw new Error(`Failed to load ports (${res.status})`);
-      data = (await res.json()) as { ports?: RawPort[] };
-    }
+    const res = await fetch(`${import.meta.env.BASE_URL}world-port-index.json`);
+    if (!res.ok) throw new Error(`Failed to load ports (${res.status})`);
+    const data = (await res.json()) as PortIndexJson;
+    const iName = data.fields.indexOf('name');
+    const iCountry = data.fields.indexOf('country');
+    const iCode = data.fields.indexOf('unlocode');
+    const iLat = data.fields.indexOf('lat');
+    const iLon = data.fields.indexOf('lon');
     const ports: WorldPort[] = [];
-    for (const p of data.ports ?? []) {
-      const lat = p.ycoord;
-      const lon = p.xcoord;
-      if (!p.portName || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const country = p.countryName ?? '';
-      const code = (p.unloCode ?? '').trim();
+    for (const row of data.rows ?? []) {
+      const name = row[iName];
+      const lat = Number(row[iLat]);
+      const lon = Number(row[iLon]);
+      if (!name || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const country = row[iCountry] ?? '';
+      const code = (row[iCode] ?? '').trim();
       ports.push({
         code,
-        name: p.portName,
+        name,
         country,
-        lat: lat as number,
-        lon: lon as number,
-        label: code
-          ? `${p.portName}, ${country} (${code})`
-          : `${p.portName}, ${country}`,
+        lat,
+        lon,
+        label: code ? `${name}, ${country} (${code})` : `${name}, ${country}`,
       });
     }
     ports.sort((a, b) => a.name.localeCompare(b.name));

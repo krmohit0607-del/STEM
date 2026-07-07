@@ -4,6 +4,7 @@ import { useLocation } from 'react-router-dom';
 import { useL } from '../i18n/LocalizationProvider';
 import { TracksheetGrid } from './TracksheetGrid';
 import { RouteSimulatorPanel } from './RouteSimulatorPanel';
+import { clearPanelViewRequest, useRequestedPanelView } from '../data/optimizationStore';
 
 /**
  * Bottom panel — collapsible drawer at the bottom of the page that hosts
@@ -108,6 +109,17 @@ export function BottomPanel() {
     }
     setCollapsed((prev) => !prev);
   };
+
+  // The route editor's Optimize run (or "Follow route") can ask the drawer to
+  // open a specific tab. The optimized routes now live in the Route Simulator,
+  // so any 'optimization' request opens the simulator.
+  const requestedView = useRequestedPanelView();
+  useEffect(() => {
+    if (!requestedView) return;
+    setView(requestedView === 'optimization' ? 'simulator' : requestedView);
+    setCollapsed(false);
+    clearPanelViewRequest();
+  }, [requestedView]);
 
   // The bottom (tracksheet) panel only appears on the route editor and the
   // interim dashboard; it is hidden on every other page.

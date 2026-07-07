@@ -11,30 +11,6 @@ import { api } from './client';
 const BASE = import.meta.env.VITE_FLEETVIEW_API_URL ?? 'http://localhost:5063';
 const u = (path: string) => `${BASE}${path}`;
 
-// --- Ports -----------------------------------------------------------------
-
-export interface PortDto {
-  id: number;
-  name: string;
-  lat: number;
-  lon: number;
-}
-
-/** Create/update payload for a port. */
-export interface PortRequest {
-  name: string;
-  lat: number;
-  lon: number;
-}
-
-export const ports = {
-  list: () => api.get<PortDto[]>(u('/api/ports')),
-  get: (id: number) => api.get<PortDto>(u(`/api/ports/${id}`)),
-  create: (body: PortRequest) => api.post<PortDto>(u('/api/ports'), body),
-  update: (id: number, body: PortRequest) => api.put<PortDto>(u(`/api/ports/${id}`), body),
-  remove: (id: number) => api.delete<void>(u(`/api/ports/${id}`)),
-};
-
 // --- Clients ---------------------------------------------------------------
 
 export interface ClientDto {
@@ -103,4 +79,4 @@ export const data = {
   get: <T>(key: DatasetKey | string) => api.get<T>(u(`/api/data/${key}`)),
 };
 
-export const fleetDataApi = { ports, clients, areaConstraints, data };
+export const fleetDataApi = { clients, areaConstraints, data };

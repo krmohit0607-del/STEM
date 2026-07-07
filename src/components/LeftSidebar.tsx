@@ -105,13 +105,15 @@ const TABS: TabDef[] = [
     id: 'reports',
     icon: 'fa-file-invoice',
     labelKey: 'reportsCalculations',
-    labelFallback: 'Reports & Calculations',
+    labelFallback: 'Reports',
+    route: '/reports/order-confirmation',
     planned: [
-      'Reports',
-      'Bunker calculation',
-      'ETA calculation',
-      'Deviation calculation',
-      'Emission calculation',
+      { label: 'Order Confirmation', route: '/reports/order-confirmation' },
+      { label: 'Reporting Instructions', route: '/reports/instructions' },
+      { label: 'Route Recommendation', route: '/reports/route-recommendation' },
+      { label: 'Voyage Plan', route: '/reports/voyage-plan' },
+      { label: 'Forecast', route: '/reports/forecast' },
+      { label: 'Performance Report', route: '/reports/performance' },
     ],
   },
   {
@@ -219,15 +221,6 @@ export function LeftSidebar(_props: { iconOnly?: boolean } = {}) {
             className={`fas ${theme === 'dark' ? 'fa-moon' : 'fa-sun'}`}
             aria-hidden="true"
           />
-        </button>
-
-        <button
-          type="button"
-          className="fv-left-sidebar__foot-btn"
-          title={t('areaConstraints', 'Area Constraints')}
-          onClick={() => navigate('/area-constraints')}
-        >
-          <i className="fas fa-draw-polygon" aria-hidden="true" />
         </button>
 
         <div className="fv-left-sidebar__profile" onMouseDown={(e) => e.stopPropagation()}>

@@ -9,7 +9,7 @@ import {
 } from 'react-leaflet';
 import L, { type ControlPosition } from 'leaflet';
 
-import { useWorldPorts } from '../data/ports';
+import { useSavedPorts } from '../data/savedPorts';
 
 /** Renders React children into a real Leaflet control container. */
 function ControlPortal({
@@ -86,9 +86,8 @@ function portIcon(): L.DivIcon {
 }
 
 /**
- * Ports control — a toggle button that overlays every world port that
- * currently falls within the map viewport. Only visible ports are drawn
- * (and capped) so the ~3k-port list never bogs the map down.
+ * Ports control — a toggle button that overlays the ports saved in our
+ * system (Settings → Port Details) that fall within the map viewport.
  */
 export function PortsControl({
   position = 'topright',
@@ -96,7 +95,7 @@ export function PortsControl({
   position?: ControlPosition;
 } = {}) {
   const [active, setActive] = useState(false);
-  const ports = useWorldPorts();
+  const ports = useSavedPorts();
   const map = useMap();
   const [bounds, setBounds] = useState(() => map.getBounds());
 
@@ -130,7 +129,7 @@ export function PortsControl({
 
       {visible.map((p) => (
         <Marker
-          key={p.code}
+          key={p.id}
           position={[p.lat, p.lon]}
           icon={portIcon()}
         >
@@ -142,7 +141,7 @@ export function PortsControl({
                 <i className="fas fa-location-crosshairs" aria-hidden="true" />{' '}
                 {formatCoord(p.lat, true)}, {formatCoord(p.lon, false)}
               </span>
-              <span>{p.code}</span>
+              {p.unlocode && <span>{p.unlocode}</span>}
             </div>
           </Tooltip>
         </Marker>
