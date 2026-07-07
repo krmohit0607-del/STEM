@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
+import { data as fleetData } from '../api/fleetData';
+import { type Priority, type TaskRow } from '../data/fleetTasks';
 import { useTheme } from '../theme';
 import { FleetMapView, type MapVessel } from './FleetMapView';
 import { SettingsModal } from './SettingsModal';
@@ -31,379 +33,8 @@ import { ModuleSelector } from './ModuleSelector';
  * `/api/voyage/list` payload when the endpoint is exposed.
  */
 
-type Priority = 'HIGH' | 'MEDIUM' | 'LOW';
-
-type ClientType = 'Charter' | 'Owner';
-
-interface TaskRow {
-  priority: Priority;
-  dueLt: number;
-  dueUtc: number;
-  remaining: string;
-  orderId: string;
-  vessel: string;
-  createdDate: string;
-  pic: string;
-  client: string;
-  clientType: ClientType;
-  voyageType: string;
-  service: string;
-  status: string;
-  /** Leg-type code (e.g. `D+B+L+RD`); count is derived from the segments. */
-  legDesc: string;
-  portFrom: string;
-  portVia: string;
-  portTo: string;
-  etd: string;
-  eta: string;
-  /** Hours since the last noon report was received. */
-  lastNoon: number;
-  /** Minutes since the last AIS position was fetched. */
-  lastAis: number;
-  wx: string;
-  int: string;
-  eov: string;
-  opt: string;
-  openTasks: number;
-  tags: string;
-  aiAlert: string;
-  health: number;
-  handoverNote: string;
-  open: string;
-}
-
-const TASK_ROWS: TaskRow[] = [
-  {
-    priority: 'HIGH',
-    dueLt: 900,
-    dueUtc: 300,
-    remaining: '01:20',
-    orderId: 'OPT001',
-    vessel: 'MV ABC',
-    createdDate: '12-Jun-2026 09:15',
-    pic: 'Amit',
-    client: 'Cargill',
-    clientType: 'Charter',
-    voyageType: 'LT',
-    service: 'PMO',
-    status: 'At Sea',
-    legDesc: 'D+B+L+RD',
-    portFrom: 'Singapore',
-    portVia: 'Cape Town',
-    portTo: 'Santos',
-    etd: '14-Jun 0800',
-    eta: '18-Jun 1200',
-    lastNoon: 5,
-    lastAis: 125,
-    wx: 'Y',
-    int: 'Y',
-    eov: 'N',
-    opt: 'Y',
-    openTasks: 3,
-    tags: 'Typhoon, ETA',
-    aiAlert: 'ETA Risk',
-    health: 65,
-    handoverNote: 'Monitor weather near Japan',
-    open: 'OPEN',
-  },
-  {
-    priority: 'MEDIUM',
-    dueLt: 1000,
-    dueUtc: 400,
-    remaining: '02:35',
-    orderId: 'OPT002',
-    vessel: 'MV XYZ',
-    createdDate: '14-Jun-2026 11:40',
-    pic: 'Rahul',
-    client: 'Bunge',
-    clientType: 'Owner',
-    voyageType: 'TCIN-TCOUT',
-    service: 'RPM',
-    status: 'At Sea',
-    legDesc: 'B+L',
-    portFrom: 'Fujairah',
-    portVia: 'Suez',
-    portTo: 'Rotterdam',
-    etd: '16-Jun 1000',
-    eta: '22-Jun 0800',
-    lastNoon: 8,
-    lastAis: 190,
-    wx: 'Y',
-    int: 'N',
-    eov: 'N',
-    opt: 'N',
-    openTasks: 2,
-    tags: 'FuelIssue',
-    aiAlert: 'Fuel Increase',
-    health: 78,
-    handoverNote: 'Awaiting owner reply',
-    open: 'OPEN',
-  },
-  {
-    priority: 'LOW',
-    dueLt: 1300,
-    dueUtc: 700,
-    remaining: '05:10',
-    orderId: 'OPT003',
-    vessel: 'MV John',
-    createdDate: '10-Jun-2026 08:05',
-    pic: 'John',
-    client: 'WX',
-    clientType: 'Charter',
-    voyageType: 'TCIN-VOUT',
-    service: 'Monitoring',
-    status: 'At Port',
-    legDesc: 'D',
-    portFrom: 'Santos',
-    portVia: 'N/A',
-    portTo: 'Santos',
-    etd: '10-Jun 0600',
-    eta: 'N/A',
-    lastNoon: 30,
-    lastAis: 745,
-    wx: 'Y',
-    int: 'N/A',
-    eov: 'N/A',
-    opt: 'N/A',
-    openTasks: 0,
-    tags: 'PortStay',
-    aiAlert: 'None',
-    health: 98,
-    handoverNote: 'Cargo ops ongoing',
-    open: 'OPEN',
-  },
-  {
-    priority: 'HIGH',
-    dueLt: 800,
-    dueUtc: 200,
-    remaining: '00:45',
-    orderId: 'OPT004',
-    vessel: 'MV Pacific',
-    createdDate: '11-Jun-2026 14:30',
-    pic: 'Sara',
-    client: 'Trafigura',
-    clientType: 'Owner',
-    voyageType: 'TCTIN-TCTOUT',
-    service: 'PMO',
-    status: 'At Sea',
-    legDesc: 'D+B+L',
-    portFrom: 'Houston',
-    portVia: 'Gibraltar',
-    portTo: 'Rotterdam',
-    etd: '15-Jun 0900',
-    eta: '20-Jun 1500',
-    lastNoon: 3,
-    lastAis: 35,
-    wx: 'Y',
-    int: 'Y',
-    eov: 'N',
-    opt: 'Y',
-    openTasks: 5,
-    tags: 'Storm, Deviation',
-    aiAlert: 'Weather Risk',
-    health: 58,
-    handoverNote: 'Route deviation under review',
-    open: 'OPEN',
-  },
-  {
-    priority: 'MEDIUM',
-    dueLt: 1100,
-    dueUtc: 500,
-    remaining: '03:15',
-    orderId: 'OPT005',
-    vessel: 'MV Atlantic',
-    createdDate: '15-Jun-2026 16:50',
-    pic: 'Amit',
-    client: 'Cargill',
-    clientType: 'Charter',
-    voyageType: 'VIN-VOUT',
-    service: 'RPM',
-    status: 'At Sea',
-    legDesc: 'B+L+RD',
-    portFrom: 'Santos',
-    portVia: 'Cape Town',
-    portTo: 'Qingdao',
-    etd: '18-Jun 1100',
-    eta: '28-Jun 0200',
-    lastNoon: 10,
-    lastAis: 250,
-    wx: 'Y',
-    int: 'Y',
-    eov: 'N',
-    opt: 'Y',
-    openTasks: 1,
-    tags: 'ETA',
-    aiAlert: 'On Track',
-    health: 82,
-    handoverNote: 'Steady progress, no issues',
-    open: 'OPEN',
-  },
-  {
-    priority: 'LOW',
-    dueLt: 1400,
-    dueUtc: 800,
-    remaining: '06:40',
-    orderId: 'OPT006',
-    vessel: 'MV Orient',
-    createdDate: '09-Jun-2026 07:20',
-    pic: 'Rahul',
-    client: 'Bunge',
-    clientType: 'Owner',
-    voyageType: 'OWN-TCOUT',
-    service: 'Optinav',
-    status: 'At Port',
-    legDesc: 'D',
-    portFrom: 'Qingdao',
-    portVia: 'N/A',
-    portTo: 'Qingdao',
-    etd: '09-Jun 0700',
-    eta: 'N/A',
-    lastNoon: 28,
-    lastAis: 1095,
-    wx: 'N',
-    int: 'N/A',
-    eov: 'N/A',
-    opt: 'N/A',
-    openTasks: 0,
-    tags: 'Bunkering',
-    aiAlert: 'None',
-    health: 95,
-    handoverNote: 'Bunkering scheduled tomorrow',
-    open: 'OPEN',
-  },
-  {
-    priority: 'HIGH',
-    dueLt: 950,
-    dueUtc: 350,
-    remaining: '01:05',
-    orderId: 'OPT007',
-    vessel: 'MV Northern Star',
-    createdDate: '13-Jun-2026 10:55',
-    pic: 'John',
-    client: 'Vitol',
-    clientType: 'Charter',
-    voyageType: 'TCIN-TCTOUT',
-    service: 'PMO',
-    status: 'At Sea',
-    legDesc: 'D+B',
-    portFrom: 'Rotterdam',
-    portVia: 'Azores',
-    portTo: 'New York',
-    etd: '17-Jun 1300',
-    eta: '24-Jun 1800',
-    lastNoon: 6,
-    lastAis: 130,
-    wx: 'Y',
-    int: 'N',
-    eov: 'N',
-    opt: 'Y',
-    openTasks: 4,
-    tags: 'Typhoon, FuelIssue',
-    aiAlert: 'Fuel Increase',
-    health: 61,
-    handoverNote: 'High consumption flagged by AI',
-    open: 'OPEN',
-  },
-  {
-    priority: 'MEDIUM',
-    dueLt: 1050,
-    dueUtc: 450,
-    remaining: '02:50',
-    orderId: 'OPT008',
-    vessel: 'MV Southern Cross',
-    createdDate: '14-Jun-2026 13:10',
-    pic: 'Sara',
-    client: 'Glencore',
-    clientType: 'Owner',
-    voyageType: 'VIN-TCOUT',
-    service: 'Weather Only',
-    status: 'At Sea',
-    legDesc: 'L',
-    portFrom: 'Singapore',
-    portVia: 'Colombo',
-    portTo: 'Fujairah',
-    etd: '16-Jun 0800',
-    eta: '21-Jun 0900',
-    lastNoon: 9,
-    lastAis: 320,
-    wx: 'Y',
-    int: 'N',
-    eov: 'N',
-    opt: 'N',
-    openTasks: 2,
-    tags: 'ETA',
-    aiAlert: 'ETA Risk',
-    health: 74,
-    handoverNote: 'Monitoring monsoon swell',
-    open: 'OPEN',
-  },
-  {
-    priority: 'LOW',
-    dueLt: 1500,
-    dueUtc: 900,
-    remaining: '07:20',
-    orderId: 'OPT009',
-    vessel: 'MV Endeavour',
-    createdDate: '08-Jun-2026 06:45',
-    pic: 'Amit',
-    client: 'Trafigura',
-    clientType: 'Charter',
-    voyageType: 'OWN-VOUT',
-    service: 'Shadow Monitoring',
-    status: 'Completed',
-    legDesc: 'D+B+L+RD',
-    portFrom: 'New York',
-    portVia: 'Miami',
-    portTo: 'Houston',
-    etd: '08-Jun 0500',
-    eta: '15-Jun 1000',
-    lastNoon: 26,
-    lastAis: 555,
-    wx: 'N',
-    int: 'N/A',
-    eov: 'Y',
-    opt: 'N/A',
-    openTasks: 0,
-    tags: 'None',
-    aiAlert: 'None',
-    health: 99,
-    handoverNote: 'Voyage closed, EOV sent',
-    open: 'CLOSED',
-  },
-  {
-    priority: 'HIGH',
-    dueLt: 870,
-    dueUtc: 270,
-    remaining: '00:30',
-    orderId: 'OPT010',
-    vessel: 'MV Voyager',
-    createdDate: '16-Jun-2026 18:25',
-    pic: 'Rahul',
-    client: 'Cargill',
-    clientType: 'Owner',
-    voyageType: 'TCTIN-TCOUT',
-    service: 'RPM',
-    status: 'At Sea',
-    legDesc: 'B+RD',
-    portFrom: 'Fujairah',
-    portVia: 'Colombo',
-    portTo: 'Singapore',
-    etd: '13-Jun 1200',
-    eta: '19-Jun 0600',
-    lastNoon: 4,
-    lastAis: 20,
-    wx: 'Y',
-    int: 'Y',
-    eov: 'N',
-    opt: 'Y',
-    openTasks: 6,
-    tags: 'Storm, ETA, Deviation',
-    aiAlert: 'Weather Risk',
-    health: 54,
-    handoverNote: 'Awaiting revised routing from ops',
-    open: 'OPEN',
-  },
-];
+// Grid row types come from ../data/fleetTasks; the rows themselves are loaded
+// from the backend (`GET /api/data/fleetTasks`) at runtime — see FleetListPage.
 
 /** Service-type buckets used by the KPI strip. */
 const SERVICE_KPIS: { label: string; match: (s: string) => boolean }[] = [
@@ -507,8 +138,8 @@ const FILTER_FIELDS: { key: keyof TaskRow; label: string }[] = COLUMNS.filter(
     col.key !== 'actions',
 ).map((col) => ({ key: col.key, label: col.label }));
 
-function uniqueValues(key: keyof TaskRow): string[] {
-  return Array.from(new Set(TASK_ROWS.map((r) => String(r[key])))).sort();
+function uniqueValues(rows: TaskRow[], key: keyof TaskRow): string[] {
+  return Array.from(new Set(rows.map((r) => String(r[key])))).sort();
 }
 
 /** Single leg-type code → human-readable label. */
@@ -661,6 +292,11 @@ export function FleetListPage() {
   const [to, setTo] = useState('');
   const [pic, setPic] = useState('');
   const [view, setView] = useState<'list' | 'map'>('list');
+  // Grid rows are loaded exclusively from the backend
+  // (`GET /api/data/fleetTasks`). No local fallback.
+  const [rows, setRows] = useState<TaskRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filters, setFilters] = useState<Record<string, string[]>>({});
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [filterSearch, setFilterSearch] = useState('');
@@ -712,8 +348,35 @@ export function FleetListPage() {
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [profileOpen]);
 
+  // Load the fleet grid rows from the backend. Backend is the only source —
+  // on failure the grid stays empty and an error banner is shown.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    fleetData
+      .get<TaskRow[]>('fleetTasks')
+      .then((data) => {
+        if (cancelled) return;
+        setRows(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoadError(
+          'Could not load fleet data from the server. Make sure the backend is running.',
+        );
+        setRows([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const visibleRows = useMemo(() => {
-    return TASK_ROWS.filter((row) => {
+    return rows.filter((row) => {
       if (pic && row.pic.toLowerCase() !== pic.toLowerCase()) return false;
 
       for (const field of FILTER_FIELDS) {
@@ -728,7 +391,7 @@ export function FleetListPage() {
       }
       return true;
     });
-  }, [pic, filters]);
+  }, [rows, pic, filters]);
 
   // In Shift View the first four columns (Priority, Due LT, Due UTC,
   // Remaining) are hidden and surfaced through the filter strip instead.
@@ -805,7 +468,7 @@ export function FleetListPage() {
               <span>{t('pic', 'PIC')}</span>
               <select value={pic} onChange={(e) => setPic(e.target.value)}>
                 <option value="">{t('all', 'All')}</option>
-                {uniqueValues('pic').map((p) => (
+                {uniqueValues(rows, 'pic').map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>
@@ -988,7 +651,7 @@ export function FleetListPage() {
       {/* FILTER STRIP ----------------------------------------------- */}
       <section className="fv-fleet-filters" aria-label="Filters">
         <span className="fv-fleet-filters__count">
-          {visibleRows.length} / {TASK_ROWS.length}
+          {visibleRows.length} / {rows.length}
         </span>
       </section>
 
@@ -1053,7 +716,7 @@ export function FleetListPage() {
                             onChange={(e) => setFilterSearch(e.target.value)}
                           />
                           {(() => {
-                            const options = uniqueValues(col.key).filter((v) => {
+                            const options = uniqueValues(rows, col.key).filter((v) => {
                               const display =
                                 col.key === 'lastNoon'
                                   ? formatLastNoon(Number(v))
@@ -1099,7 +762,13 @@ export function FleetListPage() {
               {visibleRows.length === 0 && (
                 <tr>
                   <td colSpan={visibleColumns.length} className="fv-fleet-grid__empty">
-                    {t('noVesselsMatch', 'No voyages match the current filters.')}
+                    {loading
+                      ? t('loadingFleet', 'Loading fleet data…')
+                      : loadError
+                      ? loadError
+                      : rows.length === 0
+                      ? t('noVoyages', 'No voyages available.')
+                      : t('noVesselsMatch', 'No voyages match the current filters.')}
                   </td>
                 </tr>
               )}

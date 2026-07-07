@@ -3161,6 +3161,47 @@ a {
   accent-color: #1f6feb;
   cursor: pointer;
 }
+.fv-ports-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: #e6edf3;
+}
+.fv-ports-table thead th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #7c8aa0;
+  border-bottom: 1px solid #2a3447;
+}
+.fv-ports-table tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #1c2536;
+}
+.fv-ports-table tbody tr:hover td {
+  background: #0e1626;
+}
+.fv-ports-table__actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.fv-light .fv-ports-table {
+  color: #14212e;
+}
+.fv-light .fv-ports-table thead th {
+  color: #6b7a8d;
+  border-bottom-color: #dbe3ec;
+}
+.fv-light .fv-ports-table tbody td {
+  border-bottom-color: #eef2f6;
+}
+.fv-light .fv-ports-table tbody tr:hover td {
+  background: #f0f4f8;
+}
 .fv-light .fv-client-card {
   background: #f7fafc;
   border-color: #dbe3ec;

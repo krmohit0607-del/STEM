@@ -17,6 +17,8 @@ import {
   saveClients,
   type Client,
 } from '../data/clients';
+import { ports as portsApi, type PortDto } from '../api/fleetData';
+import { ApiError } from '../api/client';
 import { AreaConstraintsPage } from './AreaConstraintsPage';
 
 /**
@@ -121,6 +123,7 @@ export function SettingsModal({
             </h4>
             {active.id === 'email-templates' && <EmailTemplatesPanel />}
             {active.id === 'client-details' && <ClientsPanel />}
+            {active.id === 'port-details' && <PortsPanel />}
             {active.id === 'area-constraints' && (
               <div className="fv-settings-area">
                 <AreaConstraintsPage mode="admin" />
@@ -809,6 +812,292 @@ function ClientEditor({
           disabled={!canSave}
         >
           <i className="fas fa-check" aria-hidden="true" /> {t('save', 'Save')}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// --- Ports -----------------------------------------------------------------
+
+/** A port being edited (`id === 0` means a new, unsaved port). */
+interface PortDraft {
+  id: number;
+  name: string;
+  lat: string;
+  lon: string;
+}
+
+function toDraft(p: PortDto): PortDraft {
+  return { id: p.id, name: p.name, lat: String(p.lat), lon: String(p.lon) };
+}
+
+function PortsPanel() {
+  const l = useL();
+  const t = (key: string, fallback: string) => {
+    const v = l(key);
+    return v === key ? fallback : v;
+  };
+
+  const [ports, setPorts] = useState<PortDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState<PortDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Load ports from the backend on mount.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    portsApi
+      .list()
+      .then((rows) => {
+        if (!cancelled) {
+          setPorts([...rows].sort((a, b) => a.name.localeCompare(b.name)));
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled)
+          setError(t('portsLoadFailed', 'Could not load ports from the server.'));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q ? ports.filter((p) => p.name.toLowerCase().includes(q)) : ports;
+
+  const startNew = () => setEditing({ id: 0, name: '', lat: '', lon: '' });
+  const startEdit = (p: PortDto) => setEditing(toDraft(p));
+
+  const upsertLocal = (port: PortDto) =>
+    setPorts((prev) => {
+      const next = prev.some((p) => p.id === port.id)
+        ? prev.map((p) => (p.id === port.id ? port : p))
+        : [...prev, port];
+      return next.sort((a, b) => a.name.localeCompare(b.name));
+    });
+
+  const saveEditing = async () => {
+    if (!editing) return;
+    const name = editing.name.trim();
+    const lat = Number(editing.lat);
+    const lon = Number(editing.lon);
+    if (!name || Number.isNaN(lat) || Number.isNaN(lon)) return;
+
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = editing.id
+        ? await portsApi.update(editing.id, { name, lat, lon })
+        : await portsApi.create({ name, lat, lon });
+      upsertLocal(saved);
+      setEditing(null);
+    } catch (err) {
+      const msg =
+        err instanceof ApiError && err.status === 409
+          ? err.message
+          : t('portSaveFailed', 'Could not save the port. Is the server running?');
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deletePort = async (p: PortDto) => {
+    if (!window.confirm(t('confirmDeletePort', `Delete the port “${p.name}”?`))) return;
+    setError(null);
+    try {
+      await portsApi.remove(p.id);
+      setPorts((prev) => prev.filter((x) => x.id !== p.id));
+      setEditing((e) => (e && e.id === p.id ? null : e));
+    } catch {
+      setError(t('portDeleteFailed', 'Could not delete the port. Is the server running?'));
+    }
+  };
+
+  return (
+    <div className="fv-email-templates">
+      <div className="fv-email-templates__bar">
+        <div className="fv-email-templates__search">
+          <i className="fas fa-magnifying-glass" aria-hidden="true" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('searchPorts', 'Search ports…')}
+            aria-label={t('searchPorts', 'Search ports…')}
+          />
+        </div>
+        <button type="button" className="fv-email-templates__new" onClick={startNew}>
+          <i className="fas fa-plus" aria-hidden="true" /> {t('newPort', 'New port')}
+        </button>
+      </div>
+
+      {error && (
+        <p className="fv-email-templates__empty" role="alert">
+          <i className="fas fa-triangle-exclamation" aria-hidden="true" /> {error}
+        </p>
+      )}
+
+      {editing && editing.id === 0 && (
+        <PortEditor
+          t={t}
+          value={editing}
+          saving={saving}
+          onChange={setEditing}
+          onSave={saveEditing}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+
+      {loading ? (
+        <p className="fv-email-templates__empty">{t('loadingPorts', 'Loading ports…')}</p>
+      ) : filtered.length === 0 ? (
+        <p className="fv-email-templates__empty">
+          {q
+            ? t('noPortsMatch', 'No ports match your search.')
+            : t('noPorts', 'No ports yet. Add one to get started.')}
+        </p>
+      ) : (
+        <table className="fv-ports-table">
+          <thead>
+            <tr>
+              <th>{t('portName', 'Port')}</th>
+              <th>{t('portLat', 'Latitude')}</th>
+              <th>{t('portLon', 'Longitude')}</th>
+              <th aria-label={t('actions', 'Actions')} />
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((p) =>
+              editing && editing.id === p.id ? (
+                <tr key={p.id}>
+                  <td colSpan={4}>
+                    <PortEditor
+                      t={t}
+                      value={editing}
+                      saving={saving}
+                      onChange={setEditing}
+                      onSave={saveEditing}
+                      onCancel={() => setEditing(null)}
+                    />
+                  </td>
+                </tr>
+              ) : (
+                <tr key={p.id}>
+                  <td>{p.name}</td>
+                  <td>{p.lat.toFixed(2)}</td>
+                  <td>{p.lon.toFixed(2)}</td>
+                  <td className="fv-ports-table__actions">
+                    <button
+                      type="button"
+                      className="fv-email-template__btn"
+                      onClick={() => startEdit(p)}
+                      aria-label={t('edit', 'Edit')}
+                      title={t('edit', 'Edit')}
+                    >
+                      <i className="fas fa-pen" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="fv-email-template__btn fv-email-template__btn--danger"
+                      onClick={() => deletePort(p)}
+                      aria-label={t('delete', 'Delete')}
+                      title={t('delete', 'Delete')}
+                    >
+                      <i className="fas fa-trash" aria-hidden="true" />
+                    </button>
+                  </td>
+                </tr>
+              ),
+            )}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function PortEditor({
+  t,
+  value,
+  saving,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  t: (key: string, fallback: string) => string;
+  value: PortDraft;
+  saving: boolean;
+  onChange: (port: PortDraft) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const canSave =
+    value.name.trim().length > 0 &&
+    value.lat.trim() !== '' &&
+    !Number.isNaN(Number(value.lat)) &&
+    value.lon.trim() !== '' &&
+    !Number.isNaN(Number(value.lon));
+  return (
+    <form
+      className="fv-email-template fv-email-template--edit"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave();
+      }}
+    >
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field">
+          <span>{t('portName', 'Port')}</span>
+          <input
+            type="text"
+            value={value.name}
+            autoFocus
+            onChange={(e) => onChange({ ...value, name: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('portLat', 'Latitude')}</span>
+          <input
+            type="number"
+            step="any"
+            min={-90}
+            max={90}
+            value={value.lat}
+            onChange={(e) => onChange({ ...value, lat: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('portLon', 'Longitude')}</span>
+          <input
+            type="number"
+            step="any"
+            min={-180}
+            max={180}
+            value={value.lon}
+            onChange={(e) => onChange({ ...value, lon: e.target.value })}
+          />
+        </label>
+      </div>
+      <div className="fv-email-template__edit-actions">
+        <button type="button" className="fv-email-template__btn" onClick={onCancel}>
+          {t('cancel', 'Cancel')}
+        </button>
+        <button
+          type="submit"
+          className="fv-email-template__btn fv-email-template__btn--primary"
+          disabled={!canSave || saving}
+        >
+          <i className="fas fa-check" aria-hidden="true" />{' '}
+          {saving ? t('saving', 'Saving…') : t('save', 'Save')}
         </button>
       </div>
     </form>
