@@ -94,7 +94,7 @@ function Field({
   );
 }
 
-const WF_STEPS = [3, 4, 5, 6, 7, 8, 9, 10, 11];
+const WF_STEPS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 function EtaCalculationCard() {
   const [from, setFrom] = useState('2026-02-24T23:00');
@@ -102,6 +102,7 @@ function EtaCalculationCard() {
   const [destTz, setDestTz] = useState('1');
   const [cpSpeed, setCpSpeed] = useState('14.7');
   const [distance, setDistance] = useState('1030');
+  const [wfList, setWfList] = useState<string[]>(WF_STEPS.map(String));
 
   const fromMs = parseDT(from);
   const utcStartMs = fromMs != null ? fromMs - num(curTz) * HOUR : null;
@@ -110,15 +111,19 @@ function EtaCalculationCard() {
 
   const rows = useMemo(
     () =>
-      WF_STEPS.map((wf) => {
+      wfList.map((wfStr) => {
+        const wf = num(wfStr);
         const avg = cp * (1 - wf / 100);
         const hrs = avg > 0 ? dist / avg : Infinity;
         const arrUtc = utcStartMs != null ? utcStartMs + hrs * HOUR : NaN;
         const arrLt = Number.isFinite(arrUtc) ? arrUtc + num(destTz) * HOUR : NaN;
-        return { wf, avg, hrs, arrUtc, arrLt };
+        return { wfStr, avg, hrs, arrUtc, arrLt };
       }),
-    [cp, dist, utcStartMs, destTz],
+    [cp, dist, utcStartMs, destTz, wfList],
   );
+
+  const setWf = (idx: number, value: string) =>
+    setWfList((prev) => prev.map((w, i) => (i === idx ? value : w)));
 
   return (
     <div className="fv-calc__card">
@@ -137,24 +142,33 @@ function EtaCalculationCard() {
         <Field label="Distance To Go" value={distance} onChange={setDistance} suffix="NM" step="1" />
       </div>
 
-      <div className="fv-calc__table-wrap">
+      <div className="fv-calc__table-wrap fv-calc__table-wrap--scroll">
         <table className="fv-calc__table">
           <thead>
             <tr>
               <th>WF %</th>
               <th>Avg Speed</th>
               <th>Arrival Time in UTC</th>
-              <th>Time To Go (DD:HH:MM)</th>
+              <th className="fv-calc__center">Time To Go (DD:HH:MM)</th>
               <th>Arrival Time in LT</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.wf}>
-                <td className="fv-calc__wf">{r.wf.toFixed(2)}%</td>
+            {rows.map((r, idx) => (
+              <tr key={idx}>
+                <td className="fv-calc__wf">
+                  <input
+                    className="fv-calc__wf-input"
+                    type="number"
+                    step="0.1"
+                    value={r.wfStr}
+                    onChange={(e) => setWf(idx, e.target.value)}
+                  />
+                  <span className="fv-calc__wf-unit">%</span>
+                </td>
                 <td className="fv-calc__num">{fmt(r.avg)}</td>
                 <td>{fmtDT(r.arrUtc)}</td>
-                <td className="fv-calc__num">{fmtDur(r.hrs)}</td>
+                <td className="fv-calc__center">{fmtDur(r.hrs)}</td>
                 <td>{fmtDT(r.arrLt)}</td>
               </tr>
             ))}
@@ -220,7 +234,7 @@ function RequiredSpeedCard() {
           </span>
         </div>
         <div className="fv-calc__result">
-          <span className="fv-calc__result-label">Required Weather Factor</span>
+          <span className="fv-calc__result-label">Weather Factor</span>
           <span className="fv-calc__result-value">{Number.isFinite(wf) ? `${fmt(wf)}%` : '—'}</span>
         </div>
         <div className="fv-calc__result">
@@ -302,6 +316,12 @@ function RobCalculationSection() {
     let totalFoUsed = 0;
     let totalGoUsed = 0;
 
+    // Consumption rates come from the top fields (per zone), not per-leg.
+    const foNon = num(foConsNonEca);
+    const foEca = num(foConsEca);
+    const goNon = num(goConsNonEca);
+    const goEca = num(goConsEca);
+
     const rows = legs.map((leg) => {
       const distN = num(leg.distN);
       const distE = num(leg.distE);
@@ -314,8 +334,12 @@ function RobCalculationSection() {
       const arrMs = legDepMs != null && hrs > 0 ? legDepMs + hrs * HOUR : legDepMs;
       const arrLtMs = arrMs != null ? arrMs + num(leg.tz) * HOUR : null;
 
-      const foUsed = num(leg.foCons) * days;
-      const goUsed = num(leg.goCons) * days;
+      // Split steaming days by zone (Non-ECA = distN, ECA = distE) and apply
+      // the matching consumption rate from the top fields.
+      const nonEcaDays = crr > 0 ? distN / crr / 24 : 0;
+      const ecaDays = crr > 0 ? distE / crr / 24 : 0;
+      const foUsed = foNon * nonEcaDays + foEca * ecaDays;
+      const goUsed = goNon * nonEcaDays + goEca * ecaDays;
       const foSup = leg.foSup.trim() === '' ? 0 : num(leg.foSup);
       const goSup = leg.goSup.trim() === '' ? 0 : num(leg.goSup);
 
@@ -340,7 +364,7 @@ function RobCalculationSection() {
     });
 
     return { rows, totalFoUsed, totalGoUsed };
-  }, [legs, startUtcMs, bunkerFo, bunkerGo]);
+  }, [legs, startUtcMs, bunkerFo, bunkerGo, foConsNonEca, foConsEca, goConsNonEca, goConsEca]);
 
   return (
     <div className="fv-calc__card fv-calc__card--wide">
@@ -363,12 +387,6 @@ function RobCalculationSection() {
         <Field label="GO Cons ECA" value={goConsEca} onChange={setGoConsEca} suffix="mt/day" step="0.1" />
       </div>
 
-      <div className="fv-calc__rob-delivery">
-        ROB ON DELIVERY / DEPARTURE:
-        <strong className="fv-calc__rob-delivery-fo">{fmt(num(bunkerFo))}</strong>
-        <strong className="fv-calc__rob-delivery-go">{fmt(num(bunkerGo))}</strong>
-      </div>
-
       <div className="fv-calc__table-wrap fv-calc__table-wrap--scroll">
         <table className="fv-calc__table fv-calc__table--rob">
           <thead>
@@ -384,8 +402,6 @@ function RobCalculationSection() {
               <th rowSpan={2}>Arrival UTC</th>
               <th rowSpan={2}>TZ</th>
               <th rowSpan={2}>Arrival LT</th>
-              <th rowSpan={2}>FO Cons</th>
-              <th rowSpan={2}>GO Cons</th>
               <th rowSpan={2}>FO Used</th>
               <th rowSpan={2}>GO Used</th>
               <th rowSpan={2}>FO Sup</th>
@@ -416,8 +432,6 @@ function RobCalculationSection() {
                   <td className="fv-calc__out">{r.arrMs != null ? fmtDT(r.arrMs) : '—'}</td>
                   <td><input className="fv-calc__cell fv-calc__cell--num" value={leg.tz} onChange={(e) => setLeg(i, 'tz', e.target.value)} /></td>
                   <td className="fv-calc__out">{r.arrLtMs != null ? fmtDT(r.arrLtMs) : '—'}</td>
-                  <td><input className="fv-calc__cell fv-calc__cell--num" value={leg.foCons} onChange={(e) => setLeg(i, 'foCons', e.target.value)} /></td>
-                  <td><input className="fv-calc__cell fv-calc__cell--num" value={leg.goCons} onChange={(e) => setLeg(i, 'goCons', e.target.value)} /></td>
                   <td className="fv-calc__num fv-calc__out">{fmt(r.foUsed)}</td>
                   <td className="fv-calc__num fv-calc__out">{fmt(r.goUsed)}</td>
                   <td><input className="fv-calc__cell fv-calc__cell--num" value={leg.foSup} onChange={(e) => setLeg(i, 'foSup', e.target.value)} /></td>
@@ -442,7 +456,7 @@ function RobCalculationSection() {
           </tbody>
           <tfoot>
             <tr>
-              <td colSpan={14} className="fv-calc__foot-label">Total Used</td>
+              <td colSpan={12} className="fv-calc__foot-label">Total Used</td>
               <td className="fv-calc__num fv-calc__total">{fmt(computed.totalFoUsed)}</td>
               <td className="fv-calc__num fv-calc__total">{fmt(computed.totalGoUsed)}</td>
               <td colSpan={5} />

@@ -32,7 +32,7 @@ import {
   toTimeInput,
 } from '../data/dateFields';
 
-interface TrackRow {
+export interface TrackRow {
   /** Stable row id (for selection / delete). */
   id: string;
   /** Next port for this leg / report. */
@@ -81,7 +81,7 @@ interface TrackRow {
   avgF: string;
 }
 
-const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
+export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'E', date: '25Jun2026', time: '1200', hrs: null, lat: '0545N', lng: '15347E',
     vlsfoRob: null, vlsfoBunkered: null, vlsfoCorrected: null,
@@ -135,6 +135,96 @@ const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
     distR: 236.0, distO: 577.3, dtgO: 1267.9, avgSpeedO: 24.1,
     rpm: 83.02, enginePower: 2566.0, slip: 12.29, course: 278, amount: 0,
     windO: 'VAR0', wavesO: 'VAR0.0', windF: 0, waveF: 0, currF: 0, avgF: '0 / 0 / 0',
+  },
+  {
+    rt: 'N', date: '29Jun2026', time: '0300', hrs: 24.0, lat: '0740N', lng: '14000E',
+    vlsfoRob: 423.40, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.9, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 232.0, distO: 231.5, dtgO: 1150.0, avgSpeedO: 9.7,
+    rpm: 83.00, enginePower: 2564.0, slip: 15.10, course: 279, amount: 0,
+    windO: 'NW3', wavesO: 'NNE1.3', windF: 0, waveF: 0, currF: -0.20, avgF: '-0.06 / -0.03 / -0.28',
+  },
+  {
+    rt: 'N', date: '30Jun2026', time: '0300', hrs: 24.0, lat: '0808N', lng: '13606E',
+    vlsfoRob: 411.05, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.8, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 235.0, distO: 234.6, dtgO: 1030.0, avgSpeedO: 9.8,
+    rpm: 83.05, enginePower: 2568.0, slip: 13.80, course: 280, amount: 0,
+    windO: 'W3', wavesO: 'W1.4', windF: 0, waveF: 0, currF: -0.15, avgF: '-0.05 / -0.02 / -0.22',
+  },
+  {
+    rt: 'N', date: '01Jul2026', time: '0300', hrs: 24.0, lat: '0835N', lng: '13212E',
+    vlsfoRob: 398.90, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.7, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 228.0, distO: 227.4, dtgO: 912.0, avgSpeedO: 9.5,
+    rpm: 82.95, enginePower: 2560.0, slip: 16.40, course: 278, amount: 0,
+    windO: 'WNW4', wavesO: 'WNW1.8', windF: 0, waveF: 0, currF: -0.30, avgF: '-0.10 / -0.05 / -0.35',
+  },
+  {
+    rt: 'N', date: '02Jul2026', time: '0300', hrs: 24.0, lat: '0902N', lng: '12818E',
+    vlsfoRob: 386.55, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.6, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 240.0, distO: 239.2, dtgO: 795.0, avgSpeedO: 10.0,
+    rpm: 83.10, enginePower: 2571.0, slip: 12.90, course: 281, amount: 0,
+    windO: 'SW2', wavesO: 'SW1.0', windF: 0, waveF: 0, currF: 0.10, avgF: '0.03 / 0.01 / 0.05',
+  },
+  {
+    rt: 'N', date: '03Jul2026', time: '0300', hrs: 24.0, lat: '0929N', lng: '12424E',
+    vlsfoRob: 374.30, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.5, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 233.0, distO: 232.1, dtgO: 679.0, avgSpeedO: 9.7,
+    rpm: 83.02, enginePower: 2566.0, slip: 14.20, course: 279, amount: 0,
+    windO: 'NE3', wavesO: 'NE1.5', windF: 0, waveF: 0, currF: -0.18, avgF: '-0.06 / -0.03 / -0.24',
+  },
+  {
+    rt: 'N', date: '04Jul2026', time: '0300', hrs: 24.0, lat: '0956N', lng: '12030E',
+    vlsfoRob: 362.10, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.4, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 236.0, distO: 235.5, dtgO: 564.0, avgSpeedO: 9.8,
+    rpm: 83.06, enginePower: 2569.0, slip: 13.10, course: 280, amount: 0,
+    windO: 'N4', wavesO: 'N2.0', windF: 0, waveF: 0, currF: -0.25, avgF: '-0.08 / -0.04 / -0.30',
+  },
+  {
+    rt: 'N', date: '05Jul2026', time: '0300', hrs: 24.0, lat: '1023N', lng: '11636E',
+    vlsfoRob: 349.95, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.3, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 229.0, distO: 228.3, dtgO: 450.0, avgSpeedO: 9.5,
+    rpm: 82.98, enginePower: 2562.0, slip: 15.80, course: 278, amount: 0,
+    windO: 'VAR1', wavesO: 'VAR0.6', windF: 0, waveF: 0, currF: 0, avgF: '0 / 0 / 0',
+  },
+  {
+    rt: 'N', date: '06Jul2026', time: '0300', hrs: 24.0, lat: '1050N', lng: '11242E',
+    vlsfoRob: 337.70, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.2, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 238.0, distO: 237.4, dtgO: 337.0, avgSpeedO: 9.9,
+    rpm: 83.08, enginePower: 2570.0, slip: 12.60, course: 281, amount: 0,
+    windO: 'ESE3', wavesO: 'ESE1.3', windF: 0, waveF: 0, currF: -0.12, avgF: '-0.04 / -0.02 / -0.18',
+  },
+  {
+    rt: 'N', date: '07Jul2026', time: '0300', hrs: 24.0, lat: '1117N', lng: '10848E',
+    vlsfoRob: 325.50, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.1, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 231.0, distO: 230.2, dtgO: 225.0, avgSpeedO: 9.6,
+    rpm: 83.00, enginePower: 2565.0, slip: 14.90, course: 279, amount: 0,
+    windO: 'SE2', wavesO: 'SE0.9', windF: 0, waveF: 0, currF: 0.08, avgF: '0.02 / 0.01 / 0.04',
+  },
+  {
+    rt: 'N', date: '08Jul2026', time: '0300', hrs: 24.0, lat: '1144N', lng: '10454E',
+    vlsfoRob: 313.40, vlsfoBunkered: 0, vlsfoCorrected: 0,
+    lsmgoRob: 76.0, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    noneRob: 0, noneBunkered: 0, noneCorrected: 0,
+    distR: 234.0, distO: 233.1, dtgO: 114.0, avgSpeedO: 9.75,
+    rpm: 83.03, enginePower: 2567.0, slip: 13.40, course: 280, amount: 0,
+    windO: 'NW3', wavesO: 'NNW1.2', windF: 0, waveF: 0, currF: -0.16, avgF: '-0.05 / -0.03 / -0.22',
   },
 ];
 

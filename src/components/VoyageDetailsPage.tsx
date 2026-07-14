@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { loadVoyageShared, mergeVoyageShared } from '../data/voyageOverrides';
 import { buildEmptyView, buildView, nowStamp } from './voyage/buildView';
 import { LegsSection } from './voyage/LegsSection';
 import { NotesSection } from './voyage/NotesSection';
@@ -45,6 +46,30 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Overlay the shared per-voyage overrides (Market Factors + Weather Safety
+ * Limits) onto a freshly-built view, so edits made on the Limits & Constraints
+ * page are reflected here.
+ */
+function applyShared(view: VoyageView, voyageId: string | undefined): VoyageView {
+  const shared = loadVoyageShared(voyageId);
+  if (!shared) return view;
+  return {
+    ...view,
+    serviceType: shared.serviceType ?? view.serviceType,
+    hireRate: shared.hireRate ?? view.hireRate,
+    foPrice: shared.foPrice ?? view.foPrice,
+    goPrice: shared.goPrice ?? view.goPrice,
+    euaPrice: shared.euaPrice ?? view.euaPrice,
+    wslMaxSwhBallast: shared.wslMaxSwhBallast ?? view.wslMaxSwhBallast,
+    wslMaxSwhLaden: shared.wslMaxSwhLaden ?? view.wslMaxSwhLaden,
+    wslMaxWindsBallast: shared.wslMaxWindsBallast ?? view.wslMaxWindsBallast,
+    wslMaxWindsLaden: shared.wslMaxWindsLaden ?? view.wslMaxWindsLaden,
+    wslMaxSeaStateBallast: shared.wslMaxSeaStateBallast ?? view.wslMaxSeaStateBallast,
+    wslMaxSeaStateLaden: shared.wslMaxSeaStateLaden ?? view.wslMaxSeaStateLaden,
+  };
+}
+
 export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}) {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -59,7 +84,10 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
   const selectedId = selectedVoyage?.id;
 
   const initialView = useMemo(
-    () => (isCreate || !selectedVoyage ? buildEmptyView() : buildView(selectedVoyage)),
+    () =>
+      isCreate || !selectedVoyage
+        ? buildEmptyView()
+        : applyShared(buildView(selectedVoyage), selectedVoyage.id),
     [isCreate, selectedVoyage],
   );
 
@@ -79,7 +107,10 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
 
   // Re-seed the form whenever the selected voyage (or mode) changes.
   useEffect(() => {
-    const seeded = isCreate || !selectedVoyage ? buildEmptyView() : buildView(selectedVoyage);
+    const seeded =
+      isCreate || !selectedVoyage
+        ? buildEmptyView()
+        : applyShared(buildView(selectedVoyage), selectedVoyage.id);
     setView(seeded);
     setEditing(Object.fromEntries(CARD_IDS.map((id) => [id, isCreate || startEdit])));
     setSkipSummary(isCreate || startEdit);
@@ -121,6 +152,23 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
       if (records.length) {
         setView((prev) => ({ ...prev, changeHistory: [...prev.changeHistory, ...records] }));
       }
+    }
+    // Mirror the shared Market Factors + Weather Safety Limits so the Limits &
+    // Constraints page reflects these edits.
+    if (selectedId) {
+      mergeVoyageShared(selectedId, {
+        serviceType: view.serviceType,
+        hireRate: view.hireRate,
+        foPrice: view.foPrice,
+        goPrice: view.goPrice,
+        euaPrice: view.euaPrice,
+        wslMaxSwhBallast: view.wslMaxSwhBallast,
+        wslMaxSwhLaden: view.wslMaxSwhLaden,
+        wslMaxWindsBallast: view.wslMaxWindsBallast,
+        wslMaxWindsLaden: view.wslMaxWindsLaden,
+        wslMaxSeaStateBallast: view.wslMaxSeaStateBallast,
+        wslMaxSeaStateLaden: view.wslMaxSeaStateLaden,
+      });
     }
     editSnapshotRef.current = null;
     setAllEditing(false);

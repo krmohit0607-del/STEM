@@ -1,4 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+
+import { useSelectedVoyage } from '../data/selectedVoyage';
+import { buildView } from './voyage/buildView';
+import type { Voyage } from '../data/voyages';
 
 /**
  * Voyage Estimation — a side-by-side voyage cost comparison modelled on the
@@ -60,6 +64,8 @@ function fmtDateDay(ms: number | null): string {
 
 interface Estimate {
   id: string;
+  /** Optional column label (e.g. "ECO", "Full") shown in the header. */
+  label?: string;
   vesselName: string;
   hirePerDay: string;
   foPrice: string;
@@ -107,6 +113,64 @@ function makeEstimate(base?: Partial<Estimate>): Estimate {
     ...base,
     id: `est-${estSeq}`,
   };
+}
+
+/**
+ * Seed an estimate from the currently selected voyage — vessel name, market
+ * factors (hire / FO / GO / EUA), fuel consumption, ports, distance and CP
+ * speed are pulled from the voyage so the operator starts from real data.
+ * Only fields that resolve to a value override the defaults.
+ */
+function estimateFromVoyage(voyage: Voyage | undefined): Partial<Estimate> {
+  if (!voyage) return {};
+  const view = buildView(voyage);
+  const totalDist = view.legs.reduce((sum, leg) => sum + num(leg.distanceNm), 0);
+  const base: Partial<Estimate> = {};
+  if (voyage.vessel) base.vesselName = voyage.vessel;
+  if (view.hireRate) base.hirePerDay = view.hireRate;
+  if (view.foPrice) base.foPrice = view.foPrice;
+  if (view.goPrice) base.goPrice = view.goPrice;
+  if (view.euaPrice) base.euaPrice = view.euaPrice;
+  if (voyage.portFrom) base.portFrom = voyage.portFrom;
+  if (voyage.portTo) base.portTo = voyage.portTo;
+  if (totalDist > 0) {
+    base.distNonEca = String(Math.round(totalDist));
+    base.distEca = '0';
+  }
+  if (voyage.etdIso) base.departure = voyage.etdIso;
+  return base;
+}
+
+/**
+ * Default two-column comparison for the selected voyage: an ECO estimate and a
+ * Full estimate, each seeded from the voyage's CP speed & cons profile. Common
+ * fields (vessel, market factors, ports, distance) are shared; only speed and
+ * fuel consumption differ between the columns.
+ */
+function estimatesFromVoyage(voyage: Voyage | undefined): Estimate[] {
+  if (!voyage) return [makeEstimate({ label: 'ECO' }), makeEstimate({ label: 'FULL' })];
+  const view = buildView(voyage);
+  const common = estimateFromVoyage(voyage);
+  const speedCons = view.legs[0]?.speedCons ?? [];
+  const pick = (desc: string) => speedCons.find((r) => r.description === desc);
+  const eco = pick('ECO');
+  const full = pick('FULL');
+  return [
+    makeEstimate({
+      ...common,
+      label: 'ECO',
+      speed: eco?.speed || String(voyage.cpSpeed || 12),
+      consFO: eco?.dailyCons1 || String(voyage.cpCons || 24),
+      consMGO: eco?.dailyCons2 || '0',
+    }),
+    makeEstimate({
+      ...common,
+      label: 'FULL',
+      speed: full?.speed || String(voyage.instSpeed || voyage.cpSpeed || 14),
+      consFO: full?.dailyCons1 || String(voyage.instCons || voyage.cpCons || 30),
+      consMGO: full?.dailyCons2 || '0',
+    }),
+  ];
 }
 
 interface Result {
@@ -160,7 +224,16 @@ function compute(e: Estimate): Result {
 }
 
 export function VoyageEstimation() {
-  const [estimates, setEstimates] = useState<Estimate[]>(() => [makeEstimate()]);
+  const voyage = useSelectedVoyage();
+  const [estimates, setEstimates] = useState<Estimate[]>(() => estimatesFromVoyage(voyage));
+
+  // Re-seed the ECO / Full comparison whenever the selected voyage changes.
+  const voyageId = voyage?.id;
+  useEffect(() => {
+    setEstimates(estimatesFromVoyage(voyage));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voyageId]);
+
   const results = useMemo(() => estimates.map(compute), [estimates]);
 
   const setField = (id: string, field: keyof Estimate, value: string) =>
@@ -169,7 +242,7 @@ export function VoyageEstimation() {
     );
 
   const addComparison = () =>
-    setEstimates((prev) => [...prev, makeEstimate(prev[prev.length - 1])]);
+    setEstimates((prev) => [...prev, makeEstimate({ ...prev[prev.length - 1], label: undefined })]);
 
   const removeComparison = (id: string) =>
     setEstimates((prev) => (prev.length > 1 ? prev.filter((e) => e.id !== id) : prev));
@@ -246,7 +319,7 @@ export function VoyageEstimation() {
               <th className="fv-est__corner" />
               {estimates.map((e, i) => (
                 <th key={e.id} colSpan={2} className="fv-est__est-head">
-                  <span>Estimate {i + 1}</span>
+                  <span>{e.label ? `${e.label} — Estimate ${i + 1}` : `Estimate ${i + 1}`}</span>
                   {estimates.length > 1 && (
                     <button
                       type="button"

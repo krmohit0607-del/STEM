@@ -506,32 +506,32 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                     {tz}
                   </span>
                 </div>
-                <Field label="Draft" value={leg.draft} editing={editing} onChange={(x) => setLeg(i, 'draft', x)} />
-                <Field label="Displacement" value={leg.displacement} editing={editing} onChange={(x) => setLeg(i, 'displacement', x)} />
-                <Field label="GM" value={leg.gm} editing={editing} onChange={(x) => setLeg(i, 'gm', x)} />
-                <Field label="Roll Period" value={leg.rollPeriod} editing={editing} onChange={(x) => setLeg(i, 'rollPeriod', x)} />
+                <Field label="Draft (m)" value={leg.draft} editing={editing} onChange={(x) => setLeg(i, 'draft', x)} type="number" />
+                <Field label="Displacement (MT)" value={leg.displacement} editing={editing} onChange={(x) => setLeg(i, 'displacement', x)} type="number" />
+                <Field label="GM (m)" value={leg.gm} editing={editing} onChange={(x) => setLeg(i, 'gm', x)} type="number" />
+                <Field label="Roll Period (s)" value={leg.rollPeriod} editing={editing} onChange={(x) => setLeg(i, 'rollPeriod', x)} type="number" />
                 <BoolField label="Auto Route" value={leg.autoRoute} editing={editing} onChange={(b) => setLeg(i, 'autoRoute', b)} />
               </div>
 
               <h5 className="fv-voyage__subhead">Weather Safety Limits</h5>
               <div className="fv-voyage__cols fv-voyage__cols--3">
-                <Field label="Max Sign Wave Height (m)" value={leg.maxSwh} editing={editing} onChange={(x) => setLeg(i, 'maxSwh', x)} />
-                <Field label="Max Wind Speeds (BF)" value={leg.maxWind} editing={editing} onChange={(x) => setLeg(i, 'maxWind', x)} />
-                <Field label="Max Sea State (DSS)" value={leg.maxSeaState} editing={editing} onChange={(x) => setLeg(i, 'maxSeaState', x)} />
+                <Field label="Max Sign Wave Height (m)" value={leg.maxSwh} editing={editing} onChange={(x) => setLeg(i, 'maxSwh', x)} type="number" />
+                <Field label="Max Wind Speeds (BF)" value={leg.maxWind} editing={editing} onChange={(x) => setLeg(i, 'maxWind', x)} type="number" />
+                <Field label="Max Sea State (DSS)" value={leg.maxSeaState} editing={editing} onChange={(x) => setLeg(i, 'maxSeaState', x)} type="number" />
               </div>
 
               <h5 className="fv-voyage__subhead">CP Details — Good Weather Details</h5>
               <div className="fv-voyage__cols fv-voyage__cols--5">
-                <Field label="Winds" value={leg.cpWinds} editing={editing} onChange={(x) => setLeg(i, 'cpWinds', x)} />
-                <Field label="DSS" value={leg.cpDss} editing={editing} onChange={(x) => setLeg(i, 'cpDss', x)} />
-                <Field label="SWH" value={leg.cpSwh} editing={editing} onChange={(x) => setLeg(i, 'cpSwh', x)} />
-                <Field label="Min Hours" value={leg.cpMinHours} editing={editing} onChange={(x) => setLeg(i, 'cpMinHours', x)} />
+                <Field label="Winds (BF)" value={leg.cpWinds} editing={editing} onChange={(x) => setLeg(i, 'cpWinds', x)} />
+                <Field label="DSS" value={leg.cpDss} editing={editing} onChange={(x) => setLeg(i, 'cpDss', x)} type="number" />
+                <Field label="SWH (m)" value={leg.cpSwh} editing={editing} onChange={(x) => setLeg(i, 'cpSwh', x)} type="number" />
+                <Field label="Min Hours (h)" value={leg.cpMinHours} editing={editing} onChange={(x) => setLeg(i, 'cpMinHours', x)} type="number" />
                 <Field label="Currents" value={leg.cpCurrents} editing={editing} onChange={(x) => setLeg(i, 'cpCurrents', x)} options={CP_CURRENTS_OPTIONS} />
                 <Field label="Allowable Fuel Method" value={leg.cpAllowableFuelMethod} editing={editing} onChange={(x) => setLeg(i, 'cpAllowableFuelMethod', x)} options={CP_ALLOWABLE_FUEL_METHOD_OPTIONS} />
                 <Field label="Good Weather Selection" value={leg.cpGoodWeatherSelection} editing={editing} onChange={(x) => setLeg(i, 'cpGoodWeatherSelection', x)} options={CP_GOOD_WEATHER_OPTIONS} />
-                <Field label="About Speed" value={leg.cpAboutSpeed} editing={editing} onChange={(x) => setLeg(i, 'cpAboutSpeed', x)} />
-                <Field label="Time Gain" value={leg.cpTimeGain} editing={editing} onChange={(x) => setLeg(i, 'cpTimeGain', x)} />
-                <Field label="Time Loss" value={leg.cpTimeLoss} editing={editing} onChange={(x) => setLeg(i, 'cpTimeLoss', x)} />
+                <Field label="About Speed (kt)" value={leg.cpAboutSpeed} editing={editing} onChange={(x) => setLeg(i, 'cpAboutSpeed', x)} type="number" />
+                <Field label="Time Gain (h)" value={leg.cpTimeGain} editing={editing} onChange={(x) => setLeg(i, 'cpTimeGain', x)} type="number" />
+                <Field label="Time Loss (h)" value={leg.cpTimeLoss} editing={editing} onChange={(x) => setLeg(i, 'cpTimeLoss', x)} type="number" />
               </div>
 
               <h5 className="fv-voyage__subhead">Speed &amp; Cons</h5>
@@ -540,26 +540,26 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                   <thead>
                     <tr>
                       <th>Description</th>
-                      <th>Speed</th>
+                      <th>Speed (kt)</th>
                       <th>Fuel Type</th>
-                      <th>Daily Cons</th>
+                      <th>Daily Cons (mt/day)</th>
                       <th>Fuel Type (ECA)</th>
-                      <th>Daily Cons</th>
+                      <th>Daily Cons (mt/day)</th>
                       <th>Fuel Type (Alt)</th>
-                      <th>Daily Cons</th>
+                      <th>Daily Cons (mt/day)</th>
                     </tr>
                   </thead>
                   <tbody>
                     {leg.speedCons.map((row, ri) => (
                       <tr key={ri}>
                         <td><Cell editing={editing} value={row.description} onChange={(x) => setLegSpeed(i, ri, 'description', x)} /></td>
-                        <td><Cell editing={editing} value={row.speed} onChange={(x) => setLegSpeed(i, ri, 'speed', x)} /></td>
+                        <td><Cell editing={editing} value={row.speed} onChange={(x) => setLegSpeed(i, ri, 'speed', x)} type="number" /></td>
                         <td><Cell editing={editing} value={row.fuelType1} onChange={(x) => setLegSpeed(i, ri, 'fuelType1', x)} options={FUEL_TYPE_OPTIONS} /></td>
-                        <td><Cell editing={editing} value={row.dailyCons1} onChange={(x) => setLegSpeed(i, ri, 'dailyCons1', x)} /></td>
+                        <td><Cell editing={editing} value={row.dailyCons1} onChange={(x) => setLegSpeed(i, ri, 'dailyCons1', x)} type="number" /></td>
                         <td><Cell editing={editing} value={row.fuelType2} onChange={(x) => setLegSpeed(i, ri, 'fuelType2', x)} options={FUEL_TYPE_OPTIONS} /></td>
-                        <td><Cell editing={editing} value={row.dailyCons2} onChange={(x) => setLegSpeed(i, ri, 'dailyCons2', x)} /></td>
+                        <td><Cell editing={editing} value={row.dailyCons2} onChange={(x) => setLegSpeed(i, ri, 'dailyCons2', x)} type="number" /></td>
                         <td><Cell editing={editing} value={row.fuelType3} onChange={(x) => setLegSpeed(i, ri, 'fuelType3', x)} options={FUEL_TYPE_OPTIONS} /></td>
-                        <td><Cell editing={editing} value={row.dailyCons3} onChange={(x) => setLegSpeed(i, ri, 'dailyCons3', x)} /></td>
+                        <td><Cell editing={editing} value={row.dailyCons3} onChange={(x) => setLegSpeed(i, ri, 'dailyCons3', x)} type="number" /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -642,10 +642,10 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                                       &ldquo;Add Port / Sub-Leg&rdquo; below to split it into sub-legs.
                                     </p>
                                     <div className="fv-voyage__cols fv-voyage__cols--3">
-                                      <Field label="Winds" value={leg.cpWinds} editing={false} onChange={() => {}} />
+                                      <Field label="Winds (BF)" value={leg.cpWinds} editing={false} onChange={() => {}} />
                                       <Field label="DSS" value={leg.cpDss} editing={false} onChange={() => {}} />
-                                      <Field label="SWH" value={leg.cpSwh} editing={false} onChange={() => {}} />
-                                      <Field label="Min Hours" value={leg.cpMinHours} editing={false} onChange={() => {}} />
+                                      <Field label="SWH (m)" value={leg.cpSwh} editing={false} onChange={() => {}} />
+                                      <Field label="Min Hours (h)" value={leg.cpMinHours} editing={false} onChange={() => {}} />
                                       <Field label="Currents" value={leg.cpCurrents} editing={false} onChange={() => {}} />
                                       <Field label="Good Weather Selection" value={leg.cpGoodWeatherSelection} editing={false} onChange={() => {}} />
                                     </div>
@@ -731,10 +731,10 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                                       </p>
                                     )}
                                     <div className="fv-voyage__cols fv-voyage__cols--3">
-                                      <Field label="Winds" value={s.cpWinds} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpWinds', x)} />
-                                      <Field label="DSS" value={s.cpDss} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpDss', x)} />
-                                      <Field label="SWH" value={s.cpSwh} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpSwh', x)} />
-                                      <Field label="Min Hours" value={s.cpMinHours} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpMinHours', x)} />
+                                      <Field label="Winds (BF)" value={s.cpWinds} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpWinds', x)} />
+                                      <Field label="DSS" value={s.cpDss} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpDss', x)} type="number" />
+                                      <Field label="SWH (m)" value={s.cpSwh} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpSwh', x)} type="number" />
+                                      <Field label="Min Hours (h)" value={s.cpMinHours} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpMinHours', x)} type="number" />
                                       <Field label="Currents" value={s.cpCurrents} editing={editing && !s.useDefaultCp} onChange={(x) => setSubLeg(i, si, 'cpCurrents', x)} options={CP_CURRENTS_OPTIONS} />
                                       <Field
                                         label="Good Weather Selection"

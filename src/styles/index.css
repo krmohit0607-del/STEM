@@ -5949,18 +5949,26 @@ a {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 4px 16px;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  justify-content: space-between;
+  width: 100%;
+  gap: 0;
   font-size: 12px;
 }
 
 .fv-interim__cp-list li {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  border-bottom: 1px dotted #2a3447;
-  padding: 2px 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.fv-interim__cp-list li + li {
+  padding-left: 16px;
+  border-left: 1px solid #2a3447;
 }
 
 .fv-interim__cp-list span {
@@ -5991,13 +5999,20 @@ a {
   margin-right: 8px;
 }
 
+.fv-interim__norm-note {
+  margin-left: auto;
+  font-size: 11px;
+  font-style: italic;
+  color: #8b949e;
+}
+
 .fv-interim__chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
   border: 1px solid #2a3447;
-  border-radius: 999px;
+  border-radius: 6px;
   background: #1b2434;
   cursor: pointer;
   font-size: 12px;
@@ -6013,6 +6028,27 @@ a {
 .fv-interim__chip:hover {
   border-color: #58a6ff;
   color: #fff;
+}
+
+.fv-interim__chip--on {
+  background: #21304a;
+  border-color: #345178;
+}
+
+.fv-interim__chip-label {
+  font-weight: 600;
+}
+
+.fv-interim__chip-value {
+  color: #e6edf3;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.fv-interim__chip-range {
+  color: #8b949e;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .fv-interim__chart {
@@ -6338,15 +6374,74 @@ a {
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
-  padding: 12px;
+  padding: 10px 0 8px;
   gap: 10px;
 }
 
 .fv-interim__chart-svg {
   width: 100%;
-  height: auto;
-  max-height: 320px;
   display: block;
+}
+
+/* Series glyphs — used inline in the "Show" chips to convey each series'
+   chart encoding (bar / line / dot / area / dashed / diamond). */
+.fv-interim__key-bar,
+.fv-interim__key-line,
+.fv-interim__key-dot,
+.fv-interim__key-area,
+.fv-interim__key-dash,
+.fv-interim__key-diamond,
+.fv-interim__key-triangle {
+  display: inline-block;
+  flex: none;
+}
+
+.fv-interim__key-bar {
+  width: 10px;
+  height: 12px;
+  border-radius: 1px;
+}
+
+.fv-interim__key-line {
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.fv-interim__key-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(230, 237, 243, 0.7);
+  box-sizing: border-box;
+}
+
+.fv-interim__key-area {
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  opacity: 0.5;
+}
+
+.fv-interim__key-dash {
+  width: 16px;
+  height: 0;
+  border-top: 2px dashed;
+}
+
+.fv-interim__key-diamond {
+  width: 9px;
+  height: 9px;
+  transform: rotate(45deg);
+  border-radius: 1px;
+}
+
+.fv-interim__key-triangle {
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 9px solid #ff7b72;
 }
 
 .fv-interim__chart-legend {
@@ -6679,6 +6774,38 @@ a {
   margin: 6px 0 0;
 }
 
+/* Read-only Voyage Summary — top-level section headings stand out and each
+   leg is grouped inside a subtly bordered block for easy scanning. */
+.fv-voyage__summary-view > .fv-voyage__subhead {
+  font-size: 13px;
+  color: #cdd7e2;
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 1px solid #223049;
+}
+
+.fv-voyage__summary-view > .fv-voyage__subhead:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.fv-voyage__summary-leg {
+  border: 1px solid #1c2434;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 10px;
+  background: #0b1220;
+}
+
+.fv-voyage__summary-leg > .fv-voyage__subhead:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+  color: #cdd7e2;
+  font-size: 12px;
+}
+
 .fv-voyage__cols {
   display: grid;
   gap: 16px 26px;
@@ -6814,6 +6941,14 @@ a {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #8b98ad;
+}
+
+/* Adds clear separation above a subhead when it follows a field group
+   (e.g. Market Factors under Order Details). */
+.fv-voyage__subhead--spaced {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid #1c2434;
 }
 
 .fv-voyage__info {
@@ -10999,6 +11134,9 @@ select.fv-voyage__input {
 .fv-light .fv-interim__vessel-item {
   border-bottom-color: #d6dde7;
 }
+.fv-light .fv-interim__cp-list li + li {
+  border-left-color: #d6dde7;
+}
 .fv-light .fv-interim__chip {
   background: #f3f6fb;
   color: #3f4a5a;
@@ -11008,7 +11146,19 @@ select.fv-voyage__input {
   border-color: #1f6feb;
   color: #0b1320;
 }
-.fv-light .fv-interim__chart-title {
+.fv-light .fv-interim__chip--on {
+  background: #e3edfb;
+  border-color: #9cbdf0;
+}
+.fv-light .fv-interim__chip-value {
+  color: #0b1320;
+}
+.fv-light .fv-interim__chip-range {
+  color: #66717f;
+}
+.fv-light .fv-interim__norm-note {
+  color: #66717f;
+}.fv-light .fv-interim__chart-title {
   color: #3f4a5a;
 }
 .fv-light .fv-interim__chart-hint {
@@ -12730,9 +12880,42 @@ select.fv-voyage__input {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.fv-calc__center {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 .fv-calc__wf {
   font-weight: 700;
   color: #fff;
+  white-space: nowrap;
+}
+.fv-calc__wf-input {
+  width: 40px;
+  background: #0b1220;
+  border: 1px solid #2a3447;
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: inherit;
+  font-weight: 700;
+  text-align: right;
+}
+.fv-calc__wf-input::-webkit-outer-spin-button,
+.fv-calc__wf-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.fv-calc__wf-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.fv-calc__wf-input:focus {
+  outline: none;
+  border-color: #1f6feb;
+}
+.fv-calc__wf-unit {
+  margin-left: 3px;
+  color: #9fb0c3;
 }
 .fv-calc__out {
   background: #0d1830;
@@ -12843,8 +13026,8 @@ select.fv-voyage__input {
   background: #17233a;
 }
 .fv-calc__total {
-  background: #f5e663;
-  color: #1b2434;
+  background: #17233a;
+  color: #ffffff;
   font-weight: 700;
 }
 .fv-calc__add-leg {
@@ -12877,6 +13060,18 @@ select.fv-voyage__input {
   background: #ffffff;
   border-color: #dbe3ec;
   color-scheme: light;
+}
+.fv-light .fv-calc__wf-input {
+  color: #14212e;
+  background: #ffffff;
+  border-color: #dbe3ec;
+  color-scheme: light;
+}
+.fv-light .fv-calc__wf-unit {
+  color: #556072;
+}
+.fv-light .fv-calc__wf {
+  color: #14212e;
 }
 .fv-light .fv-calc__derived-value {
   background: #f2f6fb;
@@ -13441,6 +13636,49 @@ select.fv-voyage__input {
   color: #e6edf3;
   text-align: right;
 }
+.fv-limits__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.fv-limits__card-head .fv-limits__card-title {
+  margin: 0;
+}
+.fv-limits__card-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.fv-limits__card-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid #2a3a55;
+  color: #9fc2ff;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fv-limits__card-edit:hover {
+  border-color: #3b6fd0;
+  color: #cfe3ff;
+}
+.fv-limits__card--editing {
+  grid-column: 1 / -1;
+  border-color: #345178;
+  box-shadow: 0 0 0 1px rgba(31, 111, 235, 0.25);
+}
+.fv-limits__notes {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+}
 .fv-limits__history-btn {
   align-self: flex-start;
   display: inline-flex;
@@ -13801,14 +14039,19 @@ select.fv-voyage__input {
   gap: 8px;
 }
 .fv-limits__log-item {
-  display: grid;
-  grid-template-columns: 160px 160px 1fr;
-  gap: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 10px;
   background: #0e1626;
   border: 1px solid #24314a;
   border-radius: 8px;
   font-size: 12.5px;
+}
+.fv-limits__log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
 }
 .fv-limits__log-when {
   color: #9fd0ff;
@@ -13819,6 +14062,37 @@ select.fv-voyage__input {
 }
 .fv-limits__log-what {
   color: #c9d4e2;
+  font-weight: 600;
+}
+.fv-limits__log-changes {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 2px;
+}
+.fv-limits__log-changes th {
+  text-align: left;
+  color: #8b98ad;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-bottom: 1px solid #24314a;
+}
+.fv-limits__log-changes td {
+  padding: 3px 8px;
+  border-bottom: 1px solid #1a2537;
+  color: #c9d4e2;
+  vertical-align: top;
+}
+.fv-limits__log-field {
+  color: #cde3ff;
+}
+.fv-limits__log-before {
+  color: #f0a1a1;
+  text-decoration: line-through;
+}
+.fv-limits__log-after {
+  color: #7ee0a6;
+  font-weight: 600;
 }
 
 @media (max-width: 1000px) {

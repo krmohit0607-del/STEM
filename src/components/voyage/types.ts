@@ -190,6 +190,14 @@ export interface VoyageView {
   optFuelPriceLsmgo: string;
   optCiiTarget: string;
 
+  // 4a. Market factors — only relevant when Service Type = "Optimization".
+  hireRate: string;
+  foPrice: string;
+  goPrice: string;
+  thirdFuelType: string;
+  thirdFuelPrice: string;
+  euaPrice: string;
+
   // 5. Notes
   operationalNotes: string;
   masterRemarks: string;

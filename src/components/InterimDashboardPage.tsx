@@ -1,9 +1,46 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useSelectedLegNo } from '../data/selectedLeg';
+import { buildView } from './voyage/buildView';
 import { InterimTabs } from './InterimTabs';
+import { STUB_ROWS as TRACKSHEET_ROWS } from './TracksheetGrid';
 import type { Voyage } from '../data/voyages';
+import type { LegRow } from './voyage/types';
+
+/** One noon-to-noon day plotted on the performance graph (sourced from the
+ *  tracksheet). Speed and FO/GO consumption are normalised to 24 hours. */
+interface ChartDay {
+  date: string;
+  time: string;
+  normalized: boolean;
+  speed: number;
+  fo: number;
+  go: number;
+  rpm: number;
+  wind: number;
+  wave: number;
+  current: number;
+}
+
+/** Trailing number from a tracksheet weather cell (e.g. "NW4" → 4, "NE1.2" → 1.2). */
+function parseTrailingNum(s: string): number {
+  const m = (s ?? '').match(/(-?\d+(?:\.\d+)?)\s*$/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+/** Tracksheet date "26Jun2026" → "Jun 26". */
+function fmtTrackDate(d: string): string {
+  const m = (d ?? '').match(/^(\d{1,2})([A-Za-z]{3})\d{2,4}$/);
+  return m ? `${m[2]} ${m[1].padStart(2, '0')}` : d;
+}
+
+/** Tracksheet time "0300" → "03:00". */
+function fmtTrackTime(t: string): string {
+  const s = (t ?? '').padStart(4, '0');
+  return `${s.slice(0, 2)}:${s.slice(2, 4)}`;
+}
 
 /**
  * Interim Dashboard page — `/interim`.
@@ -54,22 +91,18 @@ interface PerformanceStats {
   goodWeather: { label: string; value: string }[];
 }
 
-const LEGS = [
-  { id: 'delivery', label: 'Delivery → 1st port' },
-  { id: 'ballast-1-2', label: 'Ballast 1 → 2' },
-  { id: 'laden-2-3', label: 'Laden 2 → 3' },
-  { id: 'redelivery', label: '3 → Redelivery' },
-];
+/** Human-readable label for a leg, used where the old stub `label` was shown. */
+function legLabel(leg: LegRow): string {
+  return `${leg.no} · ${leg.from || '—'} → ${leg.to || '—'}`;
+}
 
 const DISPLAY_OPTIONS = [
-  { key: 'rpm', label: 'RPM' },
-  { key: 'cons', label: 'Cons' },
-  { key: 'speed', label: 'Speed' },
-  { key: 'wind', label: 'Wind' },
-  { key: 'wave', label: 'Wave' },
-  { key: 'current', label: 'Current' },
-  { key: 'mePower', label: 'M/E Power' },
-  { key: 'sfoc', label: 'SFOC' },
+  { key: 'speed', label: 'Speed', glyph: 'line' },
+  { key: 'cons', label: 'Cons', glyph: 'bar' },
+  { key: 'rpm', label: 'RPM', glyph: 'dot' },
+  { key: 'wind', label: 'Wind', glyph: 'area' },
+  { key: 'wave', label: 'Wave', glyph: 'dash' },
+  { key: 'current', label: 'Current', glyph: 'triangle' },
 ] as const;
 
 type DisplayKey = (typeof DISPLAY_OPTIONS)[number]['key'];
@@ -115,13 +148,13 @@ interface SeriesDef {
 const SERIES_DEFS: Record<DisplayKey, SeriesDef> = {
   rpm: {
     label: 'RPM',
-    color: '#58a6ff',
+    color: '#0b3d91',
     unit: 'rpm',
     format: (n) => n.toFixed(0),
     extract: (r) => r.rpm,
   },
   cons: {
-    label: 'Cons (FO)',
+    label: 'Cons (FO+GO)',
     color: '#f0b429',
     unit: 'MT/day',
     format: (n) => n.toFixed(2),
@@ -154,26 +187,6 @@ const SERIES_DEFS: Record<DisplayKey, SeriesDef> = {
     unit: 'kt',
     format: (n) => n.toFixed(2),
     extract: (r) => parseNum(r.currentFactor),
-  },
-  mePower: {
-    label: 'M/E Power',
-    color: '#d2a8ff',
-    unit: 'kW',
-    format: (n) => n.toLocaleString(undefined, { maximumFractionDigits: 0 }),
-    extract: (r) => parseNum(r.mePower),
-  },
-  sfoc: {
-    label: 'SFOC',
-    color: '#ffa657',
-    unit: 'g/kWh',
-    format: (n) => n.toFixed(1),
-    // SFOC ≈ (FO MT/day * 1e6 g/MT) / (kW * 24 h)
-    extract: (r) => {
-      const fo = parseNum(r.fo);
-      const power = parseNum(r.mePower);
-      if (power <= 0) return 0;
-      return (fo * 1_000_000) / (power * 24);
-    },
   },
 };
 
@@ -439,7 +452,12 @@ export function InterimDashboardPage() {
   const selectedVoyage = useSelectedVoyage();
   const vessel = selectedVoyage ? voyageToVesselInfo(selectedVoyage) : STUB_VESSEL;
 
-  const [legId, setLegId] = useState<string>(LEGS[0].id);
+  // The active leg follows the leg picked in the top header (STEM row) dropdown.
+  const legs = useMemo(
+    () => (selectedVoyage ? buildView(selectedVoyage).legs : []),
+    [selectedVoyage],
+  );
+  const selectedLegNo = useSelectedLegNo();
   const [visibleSeries, setVisibleSeries] = useState<Record<string, boolean>>(() =>
     DISPLAY_OPTIONS.reduce<Record<string, boolean>>((acc, opt) => {
       acc[opt.key] = true;
@@ -449,8 +467,8 @@ export function InterimDashboardPage() {
   const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
 
   const activeLeg = useMemo(
-    () => LEGS.find((leg) => leg.id === legId) ?? LEGS[0],
-    [legId],
+    () => legs.find((leg) => leg.no === selectedLegNo) ?? legs[0],
+    [legs, selectedLegNo],
   );
 
   const toggleSeries = (key: string) => {
@@ -465,7 +483,51 @@ export function InterimDashboardPage() {
     (k) => visibleSeries[k],
   );
 
-  const chartRows = useMemo(() => [...STUB_NOON_REPORTS].reverse(), []);
+  // Performance graph data is sourced from the Tracksheet (noon rows only).
+  // FO/GO consumption is derived from the ROB deltas between noon reports and
+  // normalised, along with speed, to a 24-hour basis.
+  const chartDays = useMemo<ChartDay[]>(() => {
+    const noon = TRACKSHEET_ROWS.filter((r) => r.rt === 'N');
+    return noon.map((r, idx) => {
+      const prev = noon[idx - 1];
+      const hours = r.hrs && r.hrs > 0 ? r.hrs : 24;
+      const factor = 24 / hours;
+      const dist = r.distR ?? r.distO ?? 0;
+      const foRaw = prev
+        ? Math.max(0, (prev.vlsfoRob ?? 0) - (r.vlsfoRob ?? 0) + (r.vlsfoBunkered ?? 0))
+        : 0;
+      const goRaw = prev
+        ? Math.max(0, (prev.lsmgoRob ?? 0) - (r.lsmgoRob ?? 0) + (r.lsmgoBunkered ?? 0))
+        : 0;
+      return {
+        date: fmtTrackDate(r.date),
+        time: fmtTrackTime(r.time),
+        normalized: hours < 24,
+        speed: dist > 0 && hours > 0 ? dist / hours : r.avgSpeedO ?? 0,
+        fo: foRaw * factor,
+        go: goRaw * factor,
+        rpm: r.rpm ?? 0,
+        wind: parseTrailingNum(r.windO),
+        wave: parseTrailingNum(r.wavesO),
+        current: r.currF,
+      };
+    });
+  }, []);
+
+  // Measure the chart container so the SVG can be drawn at the real pixel width
+  // (viewBox = container width). This makes it fill edge-to-edge on any screen
+  // without letterboxing or distorting the axis text.
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const [chartWidth, setChartWidth] = useState(1000);
+  useEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    const update = () => setChartWidth(el.clientWidth || 1000);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const noonSummary = useMemo(() => {
     const reports = STUB_NOON_REPORTS;
@@ -505,26 +567,9 @@ export function InterimDashboardPage() {
       <InterimTabs active="interim" />
 
       <div className="fv-interim__topbar">
-        <div className="fv-interim__leg-picker">
-          <label htmlFor="fv-interim-leg">
-            {t('selectLeg', 'Select Leg')}
-          </label>
-          <select
-            id="fv-interim-leg"
-            value={legId}
-            onChange={(e) => setLegId(e.target.value)}
-          >
-            {LEGS.map((leg) => (
-              <option key={leg.id} value={leg.id}>
-                {leg.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
         <div className="fv-interim__cp">
           <h2 className="fv-interim__cp-title">
-            {t('cpDetails', 'CP Details')} — {activeLeg.label}
+            {t('cpDetails', 'CP Details')} — {activeLeg ? legLabel(activeLeg) : t('noLegs', 'No legs')}
           </h2>
           <ul className="fv-interim__cp-list">
             <li>
@@ -555,54 +600,36 @@ export function InterimDashboardPage() {
         <span className="fv-interim__display-options-label">
           {t('show', 'Show')}
         </span>
-        {DISPLAY_OPTIONS.map((opt) => (
-          <label key={opt.key} className="fv-interim__chip">
-            <input
-              type="checkbox"
-              checked={visibleSeries[opt.key]}
-              onChange={() => toggleSeries(opt.key)}
-            />
-            <span>{opt.label}</span>
-          </label>
-        ))}
+        {DISPLAY_OPTIONS.map((opt) => {
+          const def = SERIES_DEFS[opt.key];
+          return (
+            <label
+              key={opt.key}
+              className={`fv-interim__chip${visibleSeries[opt.key] ? ' fv-interim__chip--on' : ''}`}
+            >
+              <input
+                type="checkbox"
+                checked={visibleSeries[opt.key]}
+                onChange={() => toggleSeries(opt.key)}
+              />
+              {opt.glyph === 'dash' ? (
+                <i className="fv-interim__key-dash" style={{ borderColor: def.color }} aria-hidden="true" />
+              ) : opt.glyph === 'triangle' ? (
+                <i className="fv-interim__key-triangle" style={{ borderBottomColor: def.color }} aria-hidden="true" />
+              ) : (
+                <i className={`fv-interim__key-${opt.glyph}`} style={{ background: def.color }} aria-hidden="true" />
+              )}
+              <span className="fv-interim__chip-label">{def.label}</span>
+            </label>
+          );
+        })}
+        <span className="fv-interim__norm-note">
+          * interval &lt; 24h, normalised to 24h
+        </span>
       </div>
 
-      <div className="fv-interim__vessel-card">
-        <div className="fv-interim__vessel-head">
-          <div>
-            <h3>{vessel.name}</h3>
-            <p className="fv-interim__vessel-sub">
-              {vessel.imo} · {vessel.type} · {vessel.flag}
-            </p>
-          </div>
-          <span className="fv-interim__vessel-tag">{t('demoVessel', 'Demo Vessel')}</span>
-        </div>
-        <dl>
-          <div className="fv-interim__vessel-item">
-            <dt>DWT</dt>
-            <dd>{vessel.dwt}</dd>
-          </div>
-          <div className="fv-interim__vessel-item">
-            <dt>Built</dt>
-            <dd>{vessel.built}</dd>
-          </div>
-          <div className="fv-interim__vessel-item">
-            <dt>LOA</dt>
-            <dd>{vessel.loa}</dd>
-          </div>
-          <div className="fv-interim__vessel-item">
-            <dt>Beam</dt>
-            <dd>{vessel.beam}</dd>
-          </div>
-          <div className="fv-interim__vessel-item">
-            <dt>M/E</dt>
-            <dd>{vessel.enginePower}</dd>
-          </div>
-        </dl>
-      </div>
-
-      <div className="fv-interim__chart" role="img" aria-label="Vessel performance chart">
-        <PerformanceChart rows={chartRows} visibleKeys={visibleSeriesKeys} />
+      <div className="fv-interim__chart" role="img" aria-label="Vessel performance chart" ref={chartWrapRef}>
+        <PerformanceChart days={chartDays} visibleKeys={visibleSeriesKeys} width={chartWidth} />
         {visibleSeriesKeys.length === 0 && (
           <p className="fv-interim__chart-hint">
             {t('noSeries', '— no series selected —')}
@@ -642,7 +669,7 @@ export function InterimDashboardPage() {
               {t('noonReportSummary', 'Noon Report Summary')}
             </h3>
             <span className="fv-interim__noon-vessel">
-              {vessel.name} · {activeLeg.label}
+              {vessel.name}{activeLeg ? ` · ${legLabel(activeLeg)}` : ''}
             </span>
           </div>
           <ul className="fv-interim__noon-kpis">
@@ -772,20 +799,26 @@ export function InterimDashboardPage() {
   );
 }
 
-const CHART_W = 880;
-const CHART_H = 280;
-const CHART_PAD = { top: 16, right: 24, bottom: 56, left: 44 };
+const CHART_H = 300;
+const CHART_PAD = { top: 18, right: 44, bottom: 54, left: 46 };
 
 interface PerformanceChartProps {
-  rows: NoonReportRow[];
+  days: ChartDay[];
   visibleKeys: DisplayKey[];
+  /** Measured pixel width of the container — used as the viewBox width so the
+   *  chart fills its box edge-to-edge without letterboxing or text distortion. */
+  width: number;
 }
 
-function PerformanceChart({ rows, visibleKeys }: PerformanceChartProps) {
-  if (rows.length === 0 || visibleKeys.length === 0) {
+function PerformanceChart({ days, visibleKeys, width }: PerformanceChartProps) {
+  const CHART_W = Math.max(360, width);
+
+  if (days.length === 0 || visibleKeys.length === 0) {
     return (
       <svg
         viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        width="100%"
+        height={CHART_H}
         preserveAspectRatio="none"
         className="fv-interim__chart-svg"
         role="presentation"
@@ -804,115 +837,207 @@ function PerformanceChart({ rows, visibleKeys }: PerformanceChartProps) {
 
   const innerW = CHART_W - CHART_PAD.left - CHART_PAD.right;
   const innerH = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
-  const xScale = (i: number) =>
-    rows.length === 1
+  const baseY = CHART_PAD.top + innerH;
+
+  const FO_COLOR = SERIES_DEFS.cons.color;
+  const GO_COLOR = '#3fb6ad';
+  const SPEED_COLOR = SERIES_DEFS.speed.color;
+  const RPM_COLOR = SERIES_DEFS.rpm.color;
+  const WIND_COLOR = SERIES_DEFS.wind.color;
+  const WAVE_COLOR = SERIES_DEFS.wave.color;
+  const CURRENT_COLOR = SERIES_DEFS.current.color;
+
+  const slotW = days.length > 1 ? innerW / (days.length - 1) : innerW;
+  // Point positioning: the first report sits on the left edge and the last on
+  // the right edge, so the trace always spans end-to-end regardless of how many
+  // days (reports) there are.
+  const cx = (i: number) =>
+    days.length === 1
       ? CHART_PAD.left + innerW / 2
-      : CHART_PAD.left + (i / (rows.length - 1)) * innerW;
+      : CHART_PAD.left + (i / (days.length - 1)) * innerW;
+  const on = (k: DisplayKey) => visibleKeys.includes(k);
 
-  const series = visibleKeys.map((key) => {
-    const def = SERIES_DEFS[key];
-    const values = rows.map(def.extract);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min || 1;
-    const points = values.map((v, i) => ({
-      x: xScale(i),
-      y: CHART_PAD.top + innerH - ((v - min) / range) * innerH,
-      v,
-    }));
-    return { key, def, points, min, max, latest: values[values.length - 1] };
-  });
+  /** Build a value→y mapping plus its inverse (for axis ticks). Bars measure
+   *  from zero; other series auto-fit with a little headroom. */
+  const buildScale = (values: number[], fromZero: boolean) => {
+    const lo0 = fromZero ? Math.min(0, ...values) : Math.min(...values);
+    const hi0 = Math.max(...values);
+    const pad = fromZero ? 0 : (hi0 - lo0 || 1) * 0.1;
+    const lo = lo0 - pad;
+    const hi = hi0 + pad;
+    const span = hi - lo || 1;
+    return {
+      scale: (v: number) => baseY - ((v - lo) / span) * innerH,
+      valueAt: (t: number) => lo + (1 - t) * span,
+    };
+  };
 
+  const consTotals = days.map((d) => d.fo + d.go);
+  const consAxis = buildScale(consTotals, true);
+  const speedAxis = buildScale(days.map((d) => d.speed), false);
+  const rpmScale = buildScale(days.map((d) => d.rpm), false).scale;
+  const windScale = buildScale(days.map((d) => d.wind), false).scale;
+  const waveScale = buildScale(days.map((d) => d.wave), false).scale;
+  const currentScale = buildScale(days.map((d) => d.current), false).scale;
+
+  const barW = Math.max(8, Math.min(26, slotW * 0.4));
   const gridLines = [0, 0.25, 0.5, 0.75, 1];
 
   return (
-    <>
-      <svg
-        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-        preserveAspectRatio="none"
-        className="fv-interim__chart-svg"
-      >
-        {gridLines.map((t) => (
-          <line
-            key={t}
-            x1={CHART_PAD.left}
-            x2={CHART_W - CHART_PAD.right}
-            y1={CHART_PAD.top + innerH * t}
-            y2={CHART_PAD.top + innerH * t}
-            stroke="#2a3447"
-            strokeDasharray={t === 0 || t === 1 ? undefined : '3,3'}
-          />
+    <svg
+      viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+      width="100%"
+      height={CHART_H}
+      preserveAspectRatio="none"
+      className="fv-interim__chart-svg"
+    >
+      {gridLines.map((t) => (
+        <line
+          key={t}
+          x1={CHART_PAD.left}
+          x2={CHART_W - CHART_PAD.right}
+          y1={CHART_PAD.top + innerH * t}
+          y2={CHART_PAD.top + innerH * t}
+          stroke="#2a3447"
+          strokeDasharray={t === 0 || t === 1 ? undefined : '3,3'}
+        />
+      ))}
+
+      {/* Left axis — Cons (MT/day) */}
+      <text x={CHART_PAD.left - 8} y={CHART_PAD.top - 6} fill="#6e7681" fontSize="9" textAnchor="end">
+        MT/day
+      </text>
+      {gridLines.map((t) => (
+        <text
+          key={`ly-${t}`}
+          x={CHART_PAD.left - 8}
+          y={CHART_PAD.top + innerH * t + 3}
+          fill="#8b949e"
+          fontSize="9"
+          textAnchor="end"
+        >
+          {Math.round(consAxis.valueAt(t))}
+        </text>
+      ))}
+
+      {/* Right axis — Speed (kt) */}
+      <text x={CHART_W - CHART_PAD.right + 8} y={CHART_PAD.top - 6} fill="#6e7681" fontSize="9" textAnchor="start">
+        kt
+      </text>
+      {gridLines.map((t) => (
+        <text
+          key={`ry-${t}`}
+          x={CHART_W - CHART_PAD.right + 8}
+          y={CHART_PAD.top + innerH * t + 3}
+          fill="#8b949e"
+          fontSize="9"
+          textAnchor="start"
+        >
+          {speedAxis.valueAt(t).toFixed(1)}
+        </text>
+      ))}
+
+      {/* Wind — translucent background band */}
+      {on('wind') && (
+        <polygon
+          fill="rgba(163,113,247,0.14)"
+          stroke={WIND_COLOR}
+          strokeWidth={1}
+          points={
+            `${cx(0)},${baseY} ` +
+            days.map((d, i) => `${cx(i)},${windScale(d.wind)}`).join(' ') +
+            ` ${cx(days.length - 1)},${baseY}`
+          }
+        />
+      )}
+
+      {/* Cons — stacked fuel-type bars (FO + GO), 24h-normalised */}
+      {on('cons') &&
+        days.map((d, i) => {
+          const foTop = consAxis.scale(d.fo);
+          const stackTop = consAxis.scale(d.fo + d.go);
+          const bx = Math.max(
+            CHART_PAD.left,
+            Math.min(cx(i) - barW / 2, CHART_W - CHART_PAD.right - barW),
+          );
+          return (
+            <g key={`cons-${i}`}>
+              <rect x={bx} y={foTop} width={barW} height={Math.max(0, baseY - foTop)} fill={FO_COLOR} rx={1}>
+                <title>{`FO: ${d.fo.toFixed(2)} MT/day${d.normalized ? ' (24h norm.)' : ''}`}</title>
+              </rect>
+              {d.go > 0 && (
+                <rect x={bx} y={stackTop} width={barW} height={Math.max(0, foTop - stackTop)} fill={GO_COLOR} rx={1}>
+                  <title>{`GO: ${d.go.toFixed(2)} MT/day${d.normalized ? ' (24h norm.)' : ''}`}</title>
+                </rect>
+              )}
+            </g>
+          );
+        })}
+
+      {/* Wave — dashed line */}
+      {on('wave') && (
+        <polyline
+          fill="none"
+          stroke={WAVE_COLOR}
+          strokeWidth={2}
+          strokeDasharray="6,4"
+          points={days.map((d, i) => `${cx(i)},${waveScale(d.wave)}`).join(' ')}
+        />
+      )}
+
+      {/* Speed — solid line (24h avg) */}
+      {on('speed') && (
+        <polyline
+          fill="none"
+          stroke={SPEED_COLOR}
+          strokeWidth={2.5}
+          points={days.map((d, i) => `${cx(i)},${speedAxis.scale(d.speed)}`).join(' ')}
+        />
+      )}
+
+      {/* Current — upward-triangle markers (distinct from RPM dots) */}
+      {on('current') &&
+        days.map((d, i) => {
+          const x = cx(i);
+          const y = currentScale(d.current);
+          const s = 5;
+          return (
+            <path
+              key={`cur-${i}`}
+              d={`M ${x} ${y - s} L ${x + s} ${y + s} L ${x - s} ${y + s} Z`}
+              fill={CURRENT_COLOR}
+              stroke="#0d1117"
+              strokeWidth={0.8}
+            >
+              <title>{`Current: ${d.current.toFixed(2)} kt`}</title>
+            </path>
+          );
+        })}
+
+      {/* RPM — dark dots with a light ring for visibility over the bars */}
+      {on('rpm') &&
+        days.map((d, i) => (
+          <circle key={`rpm-${i}`} cx={cx(i)} cy={rpmScale(d.rpm)} r={4.5} fill={RPM_COLOR} stroke="#e6edf3" strokeWidth={1.4}>
+            <title>{`RPM: ${d.rpm}`}</title>
+          </circle>
         ))}
 
-        {rows.map((row, i) => (
+      {/* X axis — one noon-to-noon slot per report */}
+      {days.map((d, i) => {
+        const anchor = i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle';
+        return (
           <g key={`x-${i}`}>
-            <line
-              x1={xScale(i)}
-              x2={xScale(i)}
-              y1={CHART_PAD.top}
-              y2={CHART_PAD.top + innerH}
-              stroke="#1f2a3d"
-            />
-            <text
-              x={xScale(i)}
-              y={CHART_PAD.top + innerH + 14}
-              fill="#8b949e"
-              fontSize="10"
-              textAnchor="middle"
-            >
-              {row.timestamp.split(',')[0]}
+            <line x1={cx(i)} x2={cx(i)} y1={CHART_PAD.top} y2={baseY} stroke="#1f2a3d" />
+            <text x={cx(i)} y={baseY + 14} fill="#8b949e" fontSize="10" textAnchor={anchor}>
+              {d.date}
+              {d.normalized ? '*' : ''}
             </text>
-            <text
-              x={xScale(i)}
-              y={CHART_PAD.top + innerH + 26}
-              fill="#6e7681"
-              fontSize="9"
-              textAnchor="middle"
-            >
-              {(row.timestamp.split(',')[1] ?? '').trim()}
+            <text x={cx(i)} y={baseY + 26} fill="#6e7681" fontSize="9" textAnchor={anchor}>
+              {d.time}
             </text>
           </g>
-        ))}
-
-        {series.map(({ key, def, points }) => (
-          <polyline
-            key={`line-${key}`}
-            fill="none"
-            stroke={def.color}
-            strokeWidth={2}
-            points={points.map((p) => `${p.x},${p.y}`).join(' ')}
-          />
-        ))}
-
-        {series.map(({ key, def, points }) => (
-          <g key={`pts-${key}`}>
-            {points.map((p, i) => (
-              <circle key={i} cx={p.x} cy={p.y} r={3} fill={def.color}>
-                <title>{`${def.label}: ${def.format(p.v)} ${def.unit}`}</title>
-              </circle>
-            ))}
-          </g>
-        ))}
-      </svg>
-
-      <ul className="fv-interim__chart-legend">
-        {series.map(({ key, def, latest, min, max }) => (
-          <li key={`legend-${key}`}>
-            <span
-              className="fv-interim__legend-swatch"
-              style={{ background: def.color }}
-              aria-hidden="true"
-            />
-            <span className="fv-interim__legend-label">{def.label}</span>
-            <strong>
-              {def.format(latest)} {def.unit}
-            </strong>
-            <span className="fv-interim__legend-range">
-              min {def.format(min)} · max {def.format(max)}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </>
+        );
+      })}
+    </svg>
   );
 }

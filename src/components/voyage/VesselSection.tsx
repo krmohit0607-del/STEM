@@ -29,6 +29,10 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
   const set = <K extends keyof VoyageView>(key: K, value: VoyageView[K]) =>
     setView((prev) => ({ ...prev, [key]: value }));
 
+  // Speed & Cons profile and Market Factors are only relevant for the
+  // Optimization service; they're hidden for every other service type.
+  const isOptimization = view.serviceType === 'Optimization';
+
   const setEngine = (i: number, key: keyof EngineSpeedConsRow, value: string) =>
     setView((prev) => ({
       ...prev,
@@ -81,10 +85,10 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
             <Field label="Vessel Name" value={view.vesselName} editing={editing} onChange={(x) => set('vesselName', x)} />
             <Field label="Vessel IMO" value={view.imo} editing={editing} onChange={(x) => set('imo', x)} />
             <Field label="Vessel Type" value={view.vesselType} editing={editing} onChange={(x) => set('vesselType', x)} options={VESSEL_TYPE_OPTIONS} />
-            <Field label="LOA" value={view.loa} editing={editing} onChange={(x) => set('loa', x)} />
-            <Field label="Beam" value={view.beam} editing={editing} onChange={(x) => set('beam', x)} />
-            <Field label="Default Draft (Ballast)" value={view.defaultBallastDraft} editing={editing} onChange={(x) => set('defaultBallastDraft', x)} />
-            <Field label="Default Draft (Laden)" value={view.defaultLadenDraft} editing={editing} onChange={(x) => set('defaultLadenDraft', x)} />
+            <Field label="LOA (m)" value={view.loa} editing={editing} onChange={(x) => set('loa', x)} type="number" />
+            <Field label="Beam (m)" value={view.beam} editing={editing} onChange={(x) => set('beam', x)} type="number" />
+            <Field label="Default Draft — Ballast (m)" value={view.defaultBallastDraft} editing={editing} onChange={(x) => set('defaultBallastDraft', x)} type="number" />
+            <Field label="Default Draft — Laden (m)" value={view.defaultLadenDraft} editing={editing} onChange={(x) => set('defaultLadenDraft', x)} type="number" />
           </div>
           <div className="fv-voyage__col">
             <Field label="Vessel Email" value={view.vesselEmail} editing={editing} onChange={(x) => set('vesselEmail', x)} />
@@ -92,8 +96,8 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
             <Field label="Vessel Flag" value={view.flag} editing={editing} onChange={(x) => set('flag', x)} />
             <Field label="M/E Type" value={view.meType} editing={editing} onChange={(x) => set('meType', x)} options={ME_TYPE_OPTIONS} />
             <Field label="M/E Model" value={view.meModel} editing={editing} onChange={(x) => set('meModel', x)} />
-            <Field label="Summer Draft" value={view.summerDraft} editing={editing} onChange={(x) => set('summerDraft', x)} />
-            <Field label="Summer Displacement" value={view.summerDisplacement} editing={editing} onChange={(x) => set('summerDisplacement', x)} />
+            <Field label="Summer Draft (m)" value={view.summerDraft} editing={editing} onChange={(x) => set('summerDraft', x)} type="number" />
+            <Field label="Summer Displacement (MT)" value={view.summerDisplacement} editing={editing} onChange={(x) => set('summerDisplacement', x)} type="number" />
           </div>
           <div className="fv-voyage__col">
             <div className="fv-voyage__toggle-row">
@@ -130,43 +134,43 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
                 <tbody>
                   <tr>
                     <td>RPM</td>
-                    <td><Cell editing={editing} value={view.minRpm} onChange={(x) => set('minRpm', x)} /></td>
-                    <td><Cell editing={editing} value={view.maxRpm} onChange={(x) => set('maxRpm', x)} /></td>
+                    <td><Cell editing={editing} value={view.minRpm} onChange={(x) => set('minRpm', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.maxRpm} onChange={(x) => set('maxRpm', x)} type="number" /></td>
                   </tr>
                   <tr>
-                    <td>MCR</td>
-                    <td><Cell editing={editing} value={view.minMcr} onChange={(x) => set('minMcr', x)} /></td>
-                    <td><Cell editing={editing} value={view.maxMcr} onChange={(x) => set('maxMcr', x)} /></td>
+                    <td>MCR (kW)</td>
+                    <td><Cell editing={editing} value={view.minMcr} onChange={(x) => set('minMcr', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.maxMcr} onChange={(x) => set('maxMcr', x)} type="number" /></td>
                   </tr>
                   <tr>
-                    <td>Speed</td>
-                    <td><Cell editing={editing} value={view.minSpeed} onChange={(x) => set('minSpeed', x)} /></td>
-                    <td><Cell editing={editing} value={view.maxSpeed} onChange={(x) => set('maxSpeed', x)} /></td>
+                    <td>Speed (kt)</td>
+                    <td><Cell editing={editing} value={view.minSpeed} onChange={(x) => set('minSpeed', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.maxSpeed} onChange={(x) => set('maxSpeed', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Power Fraction</td>
-                    <td><Cell editing={editing} value={view.minPowerFraction} onChange={(x) => set('minPowerFraction', x)} /></td>
-                    <td><Cell editing={editing} value={view.maxPowerFraction} onChange={(x) => set('maxPowerFraction', x)} /></td>
+                    <td><Cell editing={editing} value={view.minPowerFraction} onChange={(x) => set('minPowerFraction', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.maxPowerFraction} onChange={(x) => set('maxPowerFraction', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Nominal Power Fraction</td>
-                    <td><Cell editing={editing} value={view.nominalPowerFraction} onChange={(x) => set('nominalPowerFraction', x)} /></td>
+                    <td><Cell editing={editing} value={view.nominalPowerFraction} onChange={(x) => set('nominalPowerFraction', x)} type="number" /></td>
                     <td>—</td>
                   </tr>
                   <tr>
-                    <td>Blower On/Off Range (Ballast)</td>
-                    <td><Cell editing={editing} value={view.blowerBallastMin} onChange={(x) => set('blowerBallastMin', x)} /></td>
-                    <td><Cell editing={editing} value={view.blowerBallastMax} onChange={(x) => set('blowerBallastMax', x)} /></td>
+                    <td>Blower On/Off — Ballast (RPM)</td>
+                    <td><Cell editing={editing} value={view.blowerBallastMin} onChange={(x) => set('blowerBallastMin', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.blowerBallastMax} onChange={(x) => set('blowerBallastMax', x)} type="number" /></td>
                   </tr>
                   <tr>
-                    <td>Blower On/Off Range (Laden)</td>
-                    <td><Cell editing={editing} value={view.blowerLadenMin} onChange={(x) => set('blowerLadenMin', x)} /></td>
-                    <td><Cell editing={editing} value={view.blowerLadenMax} onChange={(x) => set('blowerLadenMax', x)} /></td>
+                    <td>Blower On/Off — Laden (RPM)</td>
+                    <td><Cell editing={editing} value={view.blowerLadenMin} onChange={(x) => set('blowerLadenMin', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.blowerLadenMax} onChange={(x) => set('blowerLadenMax', x)} type="number" /></td>
                   </tr>
                   <tr>
-                    <td>Critical RPM Range</td>
-                    <td><Cell editing={editing} value={view.criticalRpmMin} onChange={(x) => set('criticalRpmMin', x)} /></td>
-                    <td><Cell editing={editing} value={view.criticalRpmMax} onChange={(x) => set('criticalRpmMax', x)} /></td>
+                    <td>Critical RPM (RPM)</td>
+                    <td><Cell editing={editing} value={view.criticalRpmMin} onChange={(x) => set('criticalRpmMin', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.criticalRpmMax} onChange={(x) => set('criticalRpmMax', x)} type="number" /></td>
                   </tr>
                 </tbody>
               </table>
@@ -187,19 +191,19 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
                 <tbody>
                   <tr>
                     <td>Dead Slow Ahead</td>
-                    <td><Cell editing={editing} value={view.deadSlowRpm} onChange={(x) => set('deadSlowRpm', x)} /></td>
+                    <td><Cell editing={editing} value={view.deadSlowRpm} onChange={(x) => set('deadSlowRpm', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Slow Ahead</td>
-                    <td><Cell editing={editing} value={view.slowAheadRpm} onChange={(x) => set('slowAheadRpm', x)} /></td>
+                    <td><Cell editing={editing} value={view.slowAheadRpm} onChange={(x) => set('slowAheadRpm', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Half Ahead</td>
-                    <td><Cell editing={editing} value={view.halfAheadRpm} onChange={(x) => set('halfAheadRpm', x)} /></td>
+                    <td><Cell editing={editing} value={view.halfAheadRpm} onChange={(x) => set('halfAheadRpm', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Full Ahead</td>
-                    <td><Cell editing={editing} value={view.fullAheadRpm} onChange={(x) => set('fullAheadRpm', x)} /></td>
+                    <td><Cell editing={editing} value={view.fullAheadRpm} onChange={(x) => set('fullAheadRpm', x)} type="number" /></td>
                   </tr>
                 </tbody>
               </table>
@@ -220,19 +224,19 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
                 </thead>
                 <tbody>
                   <tr>
-                    <td>Max SWH</td>
-                    <td><Cell editing={editing} value={view.wslMaxSwhBallast} onChange={(x) => set('wslMaxSwhBallast', x)} /></td>
-                    <td><Cell editing={editing} value={view.wslMaxSwhLaden} onChange={(x) => set('wslMaxSwhLaden', x)} /></td>
+                    <td>Max SWH (m)</td>
+                    <td><Cell editing={editing} value={view.wslMaxSwhBallast} onChange={(x) => set('wslMaxSwhBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.wslMaxSwhLaden} onChange={(x) => set('wslMaxSwhLaden', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Max Winds (BF)</td>
-                    <td><Cell editing={editing} value={view.wslMaxWindsBallast} onChange={(x) => set('wslMaxWindsBallast', x)} /></td>
-                    <td><Cell editing={editing} value={view.wslMaxWindsLaden} onChange={(x) => set('wslMaxWindsLaden', x)} /></td>
+                    <td><Cell editing={editing} value={view.wslMaxWindsBallast} onChange={(x) => set('wslMaxWindsBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.wslMaxWindsLaden} onChange={(x) => set('wslMaxWindsLaden', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Max Sea State (DSS)</td>
-                    <td><Cell editing={editing} value={view.wslMaxSeaStateBallast} onChange={(x) => set('wslMaxSeaStateBallast', x)} /></td>
-                    <td><Cell editing={editing} value={view.wslMaxSeaStateLaden} onChange={(x) => set('wslMaxSeaStateLaden', x)} /></td>
+                    <td><Cell editing={editing} value={view.wslMaxSeaStateBallast} onChange={(x) => set('wslMaxSeaStateBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.wslMaxSeaStateLaden} onChange={(x) => set('wslMaxSeaStateLaden', x)} type="number" /></td>
                   </tr>
                 </tbody>
               </table>
@@ -240,71 +244,75 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
           </div>
         </div>
 
-        {/* Speed & cons profile (per load condition) */}
-        <div className="fv-voyage__profile-head">
-          <h5 className="fv-voyage__subhead">Speed and Cons Profile</h5>
-          <div className="fv-voyage__seg">
-            {(['Ballast', 'Laden'] as const).map((cond) => (
-              <button
-                key={cond}
-                type="button"
-                className={`fv-voyage__seg-btn${profileCondition === cond ? ' fv-voyage__seg-btn--active' : ''}`}
-                onClick={() => setProfileCondition(cond)}
-              >
-                {cond}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="fv-voyage__table-scroll">
-          <table className="fv-voyage__dtable">
-            <thead>
-              <tr>
-                <th>Speed</th>
-                <th>Cons M/E</th>
-                <th>Cons A/E</th>
-                <th>RPM</th>
-                <th>MCR %</th>
-                <th>Power (KW)</th>
-                <th>EPL Limit</th>
-                {editing && <th aria-label="Actions" />}
-              </tr>
-            </thead>
-            <tbody>
-              {view.engineSpeedCons.map((row, i) =>
-                row.condition === profileCondition ? (
-                  <tr key={i}>
-                    <td><Cell editing={editing} value={row.speed} onChange={(x) => setEngine(i, 'speed', x)} /></td>
-                    <td><Cell editing={editing} value={row.consME} onChange={(x) => setEngine(i, 'consME', x)} /></td>
-                    <td><Cell editing={editing} value={row.consAE} onChange={(x) => setEngine(i, 'consAE', x)} /></td>
-                    <td><Cell editing={editing} value={row.rpm} onChange={(x) => setEngine(i, 'rpm', x)} /></td>
-                    <td><Cell editing={editing} value={row.mcrPercent} onChange={(x) => setEngine(i, 'mcrPercent', x)} /></td>
-                    <td><Cell editing={editing} value={row.powerKw} onChange={(x) => setEngine(i, 'powerKw', x)} /></td>
-                    <td><Cell editing={editing} value={row.eplLimit} onChange={(x) => setEngine(i, 'eplLimit', x)} /></td>
-                    {editing && (
-                      <td>
-                        <button
-                          type="button"
-                          className="fv-voyage__icon-btn"
-                          onClick={() => removeEngineRow(i)}
-                          aria-label="Remove row"
-                        >
-                          <i className="fas fa-trash" aria-hidden="true" />
-                        </button>
-                      </td>
-                    )}
+        {/* Speed & cons profile (per load condition) — Optimization service only */}
+        {isOptimization && (
+          <>
+            <div className="fv-voyage__profile-head">
+              <h5 className="fv-voyage__subhead">Speed and Cons Profile</h5>
+              <div className="fv-voyage__seg">
+                {(['Ballast', 'Laden'] as const).map((cond) => (
+                  <button
+                    key={cond}
+                    type="button"
+                    className={`fv-voyage__seg-btn${profileCondition === cond ? ' fv-voyage__seg-btn--active' : ''}`}
+                    onClick={() => setProfileCondition(cond)}
+                  >
+                    {cond}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="fv-voyage__table-scroll">
+              <table className="fv-voyage__dtable">
+                <thead>
+                  <tr>
+                    <th>Speed (kt)</th>
+                    <th>Cons M/E (mt/day)</th>
+                    <th>Cons A/E (mt/day)</th>
+                    <th>RPM</th>
+                    <th>MCR %</th>
+                    <th>Power (kW)</th>
+                    <th>EPL Limit</th>
+                    {editing && <th aria-label="Actions" />}
                   </tr>
-                ) : null,
-              )}
-            </tbody>
-          </table>
-        </div>
-        {editing && (
-          <div className="fv-voyage__leg-actions">
-            <button type="button" className="fv-voyage__btn" onClick={addEngineRow}>
-              <i className="fas fa-plus" aria-hidden="true" /> Add More
-            </button>
-          </div>
+                </thead>
+                <tbody>
+                  {view.engineSpeedCons.map((row, i) =>
+                    row.condition === profileCondition ? (
+                      <tr key={i}>
+                        <td><Cell editing={editing} value={row.speed} onChange={(x) => setEngine(i, 'speed', x)} type="number" /></td>
+                        <td><Cell editing={editing} value={row.consME} onChange={(x) => setEngine(i, 'consME', x)} type="number" /></td>
+                        <td><Cell editing={editing} value={row.consAE} onChange={(x) => setEngine(i, 'consAE', x)} type="number" /></td>
+                        <td><Cell editing={editing} value={row.rpm} onChange={(x) => setEngine(i, 'rpm', x)} type="number" /></td>
+                        <td><Cell editing={editing} value={row.mcrPercent} onChange={(x) => setEngine(i, 'mcrPercent', x)} type="number" /></td>
+                        <td><Cell editing={editing} value={row.powerKw} onChange={(x) => setEngine(i, 'powerKw', x)} type="number" /></td>
+                        <td><Cell editing={editing} value={row.eplLimit} onChange={(x) => setEngine(i, 'eplLimit', x)} /></td>
+                        {editing && (
+                          <td>
+                            <button
+                              type="button"
+                              className="fv-voyage__icon-btn"
+                              onClick={() => removeEngineRow(i)}
+                              aria-label="Remove row"
+                            >
+                              <i className="fas fa-trash" aria-hidden="true" />
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ) : null,
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {editing && (
+              <div className="fv-voyage__leg-actions">
+                <button type="button" className="fv-voyage__btn" onClick={addEngineRow}>
+                  <i className="fas fa-plus" aria-hidden="true" /> Add More
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </Card>

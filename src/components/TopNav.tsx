@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { setSelectedLegNo, useSelectedLegNo } from '../data/selectedLeg';
 import { buildView } from './voyage/buildView';
 import { ModuleSelector } from './ModuleSelector';
 
@@ -42,7 +43,7 @@ export function TopNav() {
   const voyage = useSelectedVoyage();
   const legs = useMemo(() => (voyage ? buildView(voyage).legs : []), [voyage]);
 
-  const [legNo, setLegNo] = useState<string>('');
+  const legNo = useSelectedLegNo();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
@@ -119,7 +120,7 @@ export function TopNav() {
                     leg.no === selectedLeg?.no ? ' fv-topnav__voyage-item--active' : ''
                   }`}
                   onClick={() => {
-                    setLegNo(leg.no);
+                    setSelectedLegNo(leg.no);
                     setDropdownOpen(false);
                   }}
                 >

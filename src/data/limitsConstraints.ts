@@ -58,6 +58,16 @@ export interface LimitsHistoryEntry {
   by: string;
   /** Short summary of what changed. */
   summary: string;
+  /** Per-field before/after values for the change. */
+  changes?: LimitsChange[];
+}
+
+/** One field's value before and after a change, for the audit log. */
+export interface LimitsChange {
+  /** Human-readable field name, e.g. "Market Factors · FO Price". */
+  field: string;
+  before: string;
+  after: string;
 }
 
 export const DEFAULT_LIMITS: VoyageLimits = {
@@ -95,6 +105,18 @@ export const DEFAULT_LIMITS: VoyageLimits = {
 const STORAGE_KEY = 'fv.voyageLimits';
 const HISTORY_KEY = 'fv.voyageLimits.history';
 
+/** Merge a parsed snapshot with the defaults so old saves stay valid. */
+function mergeWithDefaults(parsed: Partial<VoyageLimits> | undefined): VoyageLimits {
+  if (!parsed) return structuredClone(DEFAULT_LIMITS);
+  return {
+    marketFactors: { ...DEFAULT_LIMITS.marketFactors, ...parsed.marketFactors },
+    weatherLimits: { ...DEFAULT_LIMITS.weatherLimits, ...parsed.weatherLimits },
+    rta: { ...DEFAULT_LIMITS.rta, ...parsed.rta },
+    speedCons: { ...DEFAULT_LIMITS.speedCons, ...parsed.speedCons },
+    requirements: parsed.requirements ?? DEFAULT_LIMITS.requirements,
+  };
+}
+
 export function loadLimits(): VoyageLimits {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -118,6 +140,28 @@ export function loadLimits(): VoyageLimits {
 export function saveLimits(limits: VoyageLimits): void {
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(limits));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** Per-voyage variant of {@link loadLimits} (falls back to the global store). */
+export function loadLimitsFor(voyageId: string | undefined): VoyageLimits {
+  if (!voyageId) return loadLimits();
+  try {
+    const raw = window.localStorage.getItem(`${STORAGE_KEY}.${voyageId}`);
+    if (raw) return mergeWithDefaults(JSON.parse(raw));
+  } catch {
+    /* fall back to defaults */
+  }
+  return structuredClone(DEFAULT_LIMITS);
+}
+
+/** Per-voyage variant of {@link saveLimits}. */
+export function saveLimitsFor(voyageId: string | undefined, limits: VoyageLimits): void {
+  const storageKey = voyageId ? `${STORAGE_KEY}.${voyageId}` : STORAGE_KEY;
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(limits));
   } catch {
     /* storage unavailable */
   }
@@ -159,4 +203,44 @@ export function diffLimits(a: VoyageLimits, b: VoyageLimits): string[] {
   if (!eq(a.speedCons, b.speedCons)) changed.push('Speed / Cons Constraint');
   if (a.requirements !== b.requirements) changed.push('Requirements');
   return changed;
+}
+
+/** Flatten a limits snapshot into labelled scalar values for the audit diff. */
+function flattenLimits(l: VoyageLimits): Record<string, string> {
+  return {
+    'Market Factors · FO Price': l.marketFactors.foPrice,
+    'Market Factors · GO Price': l.marketFactors.goPrice,
+    'Market Factors · EUA Price': l.marketFactors.euaPrice,
+    'Market Factors · Hire Per Day': l.marketFactors.hirePerDay,
+    'Market Factors · Freight Rate': l.marketFactors.freightRate,
+    'Weather · Max Sig Wave Height': l.weatherLimits.maxSwh,
+    'Weather · Max Wind Speed': l.weatherLimits.maxWind,
+    'Weather · Max Sea State': l.weatherLimits.maxSeaState,
+    'Weather · Max Swell': l.weatherLimits.maxSwell,
+    'Weather · Max Roll Period': l.weatherLimits.maxRollPeriod,
+    'RTA · Enabled': l.rta.enabled ? 'Yes' : 'No',
+    'RTA · Entered In': l.rta.mode,
+    'RTA · Value': l.rta.value,
+    'RTA · Time Zone': l.rta.tz,
+    'Speed / Cons · Min Speed': l.speedCons.minSpeed,
+    'Speed / Cons · Max Speed': l.speedCons.maxSpeed,
+    'Speed / Cons · Min RPM': l.speedCons.minRpm,
+    'Speed / Cons · Max RPM': l.speedCons.maxRpm,
+    'Speed / Cons · Max FO / Day': l.speedCons.maxFoPerDay,
+    'Speed / Cons · Max GO / Day': l.speedCons.maxGoPerDay,
+    'Requirements / Notes': l.requirements,
+  };
+}
+
+/** Per-field before/after diff between two snapshots for the audit log. */
+export function diffLimitsDetailed(a: VoyageLimits, b: VoyageLimits): LimitsChange[] {
+  const fa = flattenLimits(a);
+  const fb = flattenLimits(b);
+  const out: LimitsChange[] = [];
+  (Object.keys(fa) as (keyof typeof fa)[]).forEach((key) => {
+    if (fa[key] !== fb[key]) {
+      out.push({ field: key, before: fa[key] || '—', after: fb[key] || '—' });
+    }
+  });
+  return out;
 }

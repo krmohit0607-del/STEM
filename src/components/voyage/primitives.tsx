@@ -128,8 +128,8 @@ interface FieldProps {
   display?: React.ReactNode;
   /** When provided, the field renders as a dropdown while editing. */
   options?: string[];
-  /** When set, the field renders a native date / datetime picker. */
-  type?: 'date' | 'datetime';
+  /** When set, the field renders a native date / datetime / numeric input. */
+  type?: 'date' | 'datetime' | 'number';
 }
 
 export function Field({ label, value, editing, onChange, inline, display, options, type }: FieldProps) {
@@ -150,6 +150,14 @@ export function Field({ label, value, editing, onChange, inline, display, option
               </option>
             ))}
           </select>
+        ) : type === 'number' ? (
+          <input
+            className="fv-voyage__input"
+            type="number"
+            inputMode="decimal"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+          />
         ) : type ? (
           <input
             className="fv-voyage__input"
@@ -209,8 +217,8 @@ interface CellProps {
   value: string;
   onChange: (value: string) => void;
   options?: string[];
-  /** When set, the cell renders a native date / datetime picker. */
-  type?: 'date' | 'datetime';
+  /** When set, the cell renders a native date / datetime / numeric input. */
+  type?: 'date' | 'datetime' | 'number';
 }
 
 export function Cell({ editing, value, onChange, options, type }: CellProps) {
@@ -229,6 +237,17 @@ export function Cell({ editing, value, onChange, options, type }: CellProps) {
           </option>
         ))}
       </select>
+    );
+  }
+  if (type === 'number') {
+    return (
+      <input
+        className="fv-voyage__cell-input"
+        type="number"
+        inputMode="decimal"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
     );
   }
   if (type) {

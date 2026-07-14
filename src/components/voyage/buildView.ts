@@ -70,10 +70,6 @@ function pick<T>(arr: T[], r: number): T {
   return arr[Math.floor(r * arr.length) % arr.length];
 }
 
-function numFmt(n: number): string {
-  return Math.round(n).toLocaleString();
-}
-
 /** Strip a trailing unit (e.g. "180,000 MT" -> 180000). */
 function toNumber(value: string): number {
   const m = value.replace(/,/g, '').match(/-?\d+(\.\d+)?/);
@@ -226,6 +222,13 @@ export function buildEmptyView(): VoyageView {
     optFuelPriceLsmgo: '',
     optCiiTarget: '',
 
+    hireRate: '',
+    foPrice: '',
+    goPrice: '',
+    thirdFuelType: '',
+    thirdFuelPrice: '',
+    euaPrice: '',
+
     operationalNotes: '',
     masterRemarks: '',
     internalNotes: '',
@@ -288,8 +291,8 @@ export function buildView(v: Voyage): VoyageView {
       consME: (consBase + idx * 2).toFixed(1),
       consAE: '2.5',
       rpm: String(Math.round(minRpm + (maxRpm - minRpm) * (mcr / 105))),
-      mcrPercent: `${mcr}%`,
-      powerKw: Math.round(maxMcr * (mcr / 100)).toLocaleString(),
+      mcrPercent: String(mcr),
+      powerKw: String(Math.round(maxMcr * (mcr / 100))),
       eplLimit: mcr <= 75 ? 'Yes' : '',
     }));
 
@@ -343,9 +346,9 @@ export function buildView(v: Voyage): VoyageView {
     cpCurrents: '0.5 kn',
     cpAllowableFuelMethod: 'VLSFO',
     cpGoodWeatherSelection: 'Noon-to-Noon',
-    cpAboutSpeed: `${ecoSpeed.toFixed(1)} kn`,
-    cpTimeGain: '0.0 h',
-    cpTimeLoss: '0.0 h',
+    cpAboutSpeed: ecoSpeed.toFixed(1),
+    cpTimeGain: '0',
+    cpTimeLoss: '0',
     speedCons: mkSpeedCons(),
   });
 
@@ -360,11 +363,11 @@ export function buildView(v: Voyage): VoyageView {
     return `${day} ${mon} ${d.getFullYear()}, ${hh}:${mm}`;
   };
 
-  const ladenDisp = numFmt(summerDisp * 0.92);
-  const ballastDisp = numFmt(summerDisp * 0.46);
+  const ladenDisp = String(Math.round(summerDisp * 0.92));
+  const ballastDisp = String(Math.round(summerDisp * 0.46));
 
   const legDist = (idx: number) =>
-    `${Math.round(1500 + r[21 + idx] * 4200).toLocaleString()} NM`;
+    String(Math.round(1500 + r[21 + idx] * 4200));
 
   const legs: LegRow[] = [
     mkLeg('LEG-1', 'Delivery', v.portFrom, interim, v.etdDisplay, 'Complete', ballastDraft.toFixed(1), ballastDisp, '4', '7', '5', legDist(0)),
@@ -412,10 +415,10 @@ export function buildView(v: Voyage): VoyageView {
 
     minRpm: String(minRpm),
     maxRpm: String(maxRpm),
-    minMcr: `${minMcr.toLocaleString()} kW`,
-    maxMcr: `${maxMcr.toLocaleString()} kW`,
-    minSpeed: `${(ecoSpeed - 3).toFixed(1)} kn`,
-    maxSpeed: `${(fullSpeed + 1).toFixed(1)} kn`,
+    minMcr: String(minMcr),
+    maxMcr: String(maxMcr),
+    minSpeed: (ecoSpeed - 3).toFixed(1),
+    maxSpeed: (fullSpeed + 1).toFixed(1),
     minPowerFraction: '0.10',
     maxPowerFraction: '0.90',
     nominalPowerFraction: '0.75',
@@ -435,13 +438,13 @@ export function buildView(v: Voyage): VoyageView {
 
     meType: r[29] > 0.5 ? '2-Stroke' : '4-Stroke',
     meModel,
-    loa: v.loa,
-    beam: v.beam,
-    defaultBallastDraft: `${ballastDraft.toFixed(1)} m`,
-    defaultLadenDraft: `${ladenDraft.toFixed(1)} m`,
-    summerDraft: `${summerDraftVal.toFixed(1)} m`,
-    summerDisplacement: `${numFmt(summerDisp)} MT`,
-    summerDeadweight: v.dwt,
+    loa: String(toNumber(v.loa)),
+    beam: String(toNumber(v.beam)),
+    defaultBallastDraft: ballastDraft.toFixed(1),
+    defaultLadenDraft: ladenDraft.toFixed(1),
+    summerDraft: summerDraftVal.toFixed(1),
+    summerDisplacement: String(Math.round(summerDisp)),
+    summerDeadweight: String(toNumber(v.dwt)),
 
     engineSpeedCons,
 
@@ -463,6 +466,13 @@ export function buildView(v: Voyage): VoyageView {
     optFuelPriceVlsfo: '585 USD/MT',
     optFuelPriceLsmgo: '780 USD/MT',
     optCiiTarget: pick(['A', 'B', 'C'], r[31]),
+
+    hireRate: '14000',
+    foPrice: '585',
+    goPrice: '780',
+    thirdFuelType: '',
+    thirdFuelPrice: '',
+    euaPrice: '80',
 
     operationalNotes:
       'Maintain ECO speed; report any deviation > 0.5 kn from plan. Keep within CP good-weather limits.',
