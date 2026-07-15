@@ -16,6 +16,9 @@ export interface VoyageSharedFields {
   foPrice: string;
   goPrice: string;
   euaPrice: string;
+  // Optional third fuel grade (blank when the vessel runs on two fuels only).
+  // Read by the Tracksheet to show a third fuel column group.
+  thirdFuelType: string;
   // Weather safety limits (ballast / laden)
   wslMaxSwhBallast: string;
   wslMaxSwhLaden: string;
@@ -31,6 +34,7 @@ export const SHARED_FIELD_KEYS: (keyof VoyageSharedFields)[] = [
   'foPrice',
   'goPrice',
   'euaPrice',
+  'thirdFuelType',
   'wslMaxSwhBallast',
   'wslMaxSwhLaden',
   'wslMaxWindsBallast',

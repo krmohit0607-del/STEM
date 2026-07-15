@@ -157,6 +157,13 @@ export function buildEmptyView(): VoyageView {
     clientEmailList: '',
     dailyFleetSummaryEmail: '',
     clientNotes: '',
+    jointNomination: false,
+    client2: '',
+    clientType2: '',
+    price2: '',
+    pricingBasis2: '',
+    clientEmailList2: '',
+    dailyFleetSummaryEmail2: '',
 
     vesselType: '',
     flag: '',
@@ -399,6 +406,13 @@ export function buildView(v: Voyage): VoyageView {
     price: `${v.price.toLocaleString()} USD`,
     clientEmailList: v.clientEmail,
     dailyFleetSummaryEmail: `reports@${v.clientEmail.split('@')[1] ?? 'client.example.com'}`,
+    jointNomination: false,
+    client2: '',
+    clientType2: '',
+    price2: '',
+    pricingBasis2: '',
+    clientEmailList2: '',
+    dailyFleetSummaryEmail2: '',
     clientNotes:
       v.handoverNote ||
       'Master to send daily noon report by 12:30 LT. Use ECO speed unless instructed otherwise.',

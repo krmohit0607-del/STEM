@@ -91,6 +91,13 @@ export interface EditorPoint {
   name: string;
   lat: number;
   lon: number;
+  /**
+   * Stable `[lat, lon]` tuple reused across renders. Passing this (instead of a
+   * fresh array literal) as the marker `position` stops react-leaflet from
+   * calling `setLatLng` on every re-render, which would otherwise yank a marker
+   * back to its committed position mid-drag.
+   */
+  latLng: [number, number];
   isPort: boolean;
   drift: boolean;
   /**
@@ -127,6 +134,8 @@ export interface ShipMarker {
 interface RouteEditorMapProps {
   points: EditorPoint[];
   plotMode: boolean;
+  /** When false the route is locked: no dragging, deleting or inserting. */
+  editable?: boolean;
   selected: string[];
   /** Candidate optimized routes to overlay, each with its own colour. */
   routes?: Array<{ id: string; color: string; path: Array<[number, number]> }>;
@@ -146,10 +155,18 @@ interface RouteEditorMapProps {
   onDeletePoint: (id: string) => void;
 }
 
+/** Cache of waypoint icons keyed by kind+selected so re-renders reuse the same
+ *  `DivIcon` instance; a fresh icon would make react-leaflet rebuild the marker
+ *  DOM, which can interrupt an in-progress drag. */
+const waypointIconCache = new Map<string, L.DivIcon>();
+
 function waypointIcon(opts: {
   kind: 'departure' | 'arrival' | 'drift' | 'waypoint';
   selected: boolean;
 }): L.DivIcon {
+  const cacheKey = `${opts.kind}:${opts.selected ? 1 : 0}`;
+  const cached = waypointIconCache.get(cacheKey);
+  if (cached) return cached;
   // Ports (departure/arrival) use a location-pin icon; plain waypoints and
   // drift points are shown as dots (app-wide convention).
   const isPort = opts.kind === 'departure' || opts.kind === 'arrival';
@@ -164,12 +181,14 @@ function waypointIcon(opts: {
   const inner = isPort
     ? '<i class="fas fa-location-dot" aria-hidden="true"></i>'
     : '<span class="fv-route-map__dot"></span>';
-  return L.divIcon({
+  const icon = L.divIcon({
     className: 'fv-route-map__pin-wrap',
     iconSize: [26, 26],
     iconAnchor: [13, 13],
     html: `<span class="${cls}">${inner}</span>`,
   });
+  waypointIconCache.set(cacheKey, icon);
+  return icon;
 }
 
 /**
@@ -284,6 +303,7 @@ function MapResizeHandler() {
 export function RouteEditorMap({
   points,
   plotMode,
+  editable = true,
   selected,
   routes = [],
   selectedRouteId,
@@ -332,7 +352,7 @@ export function RouteEditorMap({
           [next.lat, next.lon],
         ];
         return (
-          <Fragment key={`seg-${p.id}`}>
+          <Fragment key={`seg-${p.id}-${editable ? 'edit' : 'lock'}`}>
             <Polyline
               positions={visible}
               pathOptions={{ color: plannedRouteColor, weight: 3 }}
@@ -341,8 +361,10 @@ export function RouteEditorMap({
             <Polyline
               positions={hit}
               pathOptions={{ color: plannedRouteColor, weight: 12, opacity: 0 }}
+              interactive={editable}
               eventHandlers={{
                 click: (e) => {
+                  if (!editable) return;
                   if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
                   onInsertPoint(i, e.latlng.lat, e.latlng.lng);
                 },
@@ -377,11 +399,14 @@ export function RouteEditorMap({
           );
         })}
 
+      {/* Markers render from the committed `points`; the position is a stable
+          tuple (`latLng`) so unrelated re-renders never call setLatLng and the
+          drag is left entirely to Leaflet. The move is committed on drop. */}
       {points.map((p, idx) => (
         <Marker
           key={p.id}
-          position={[p.lat, p.lon]}
-          draggable
+          position={p.latLng}
+          draggable={editable}
           icon={waypointIcon({
             kind: p.isPort
               ? idx === 0
@@ -394,15 +419,14 @@ export function RouteEditorMap({
           })}
           eventHandlers={{
             click: () => {
-              if (!p.isPort) onDeletePoint(p.id);
+              if (editable && !p.isPort) onDeletePoint(p.id);
             },
             dblclick: (e) => {
               if (e.originalEvent) L.DomEvent.stop(e.originalEvent);
-              if (!p.isPort) onDeletePoint(p.id);
+              if (editable && !p.isPort) onDeletePoint(p.id);
             },
             dragend: (e) => {
-              const m = e.target as L.Marker;
-              const ll = m.getLatLng();
+              const ll = (e.target as L.Marker).getLatLng();
               onMovePoint(p.id, ll.lat, ll.lng);
             },
           }}

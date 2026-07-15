@@ -5,6 +5,7 @@ import L, { type ControlPosition } from 'leaflet';
 
 import { FIELD_FACTORS, getFieldFactor } from '../data/weatherField';
 import { MAX_FORECAST_HOURS } from '../data/openMeteo';
+import { useSimWeatherHour } from '../data/routeSimulatorStore';
 import { WeatherFieldLayer } from './WeatherFieldLayer';
 
 /**
@@ -108,6 +109,12 @@ export function WeatherFieldControl({
   const [factorIds, setFactorIds] = useState<string[]>(() => readFactors());
   const [hour, setHour] = useState<number>(() => readHour());
 
+  // While a route simulation is playing it drives the forecast time so the
+  // on-map weather advances in step with the vessel; when idle (null) the
+  // manual time slider below takes over again.
+  const simHour = useSimWeatherHour();
+  const effectiveHour = simHour ?? hour;
+
   // Keep every mounted control in sync via the shared event + storage.
   useEffect(() => {
     const sync = () => {
@@ -168,7 +175,7 @@ export function WeatherFieldControl({
     <>
       {on &&
         factorIds.map((id, i) => (
-          <WeatherFieldLayer key={id} factorId={id} showField={i === 0} hour={hour} />
+          <WeatherFieldLayer key={id} factorId={id} showField={i === 0} hour={effectiveHour} />
         ))}
       <ControlPortal position={position}>
         <button

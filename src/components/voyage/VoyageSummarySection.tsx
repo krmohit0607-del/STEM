@@ -180,6 +180,9 @@ export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse 
           <Info label="Vessel Type" value={dash(view.vesselType)} />
           <Info label="Flag" value={dash(view.flag)} />
           <Info label="Client" value={dash(view.client)} />
+          {view.jointNomination && (
+            <Info label="2nd Client (Joint Nom.)" value={dash(view.client2)} />
+          )}
           <Info label="Service Type" value={dash(view.serviceType)} />
           <Info label="PIC" value={dash(view.pic)} />
           <Info

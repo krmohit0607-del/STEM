@@ -5,7 +5,7 @@ import { useSelectedVoyage } from '../data/selectedVoyage';
 import { useSelectedLegNo } from '../data/selectedLeg';
 import { buildView } from './voyage/buildView';
 import { InterimTabs } from './InterimTabs';
-import { STUB_ROWS as TRACKSHEET_ROWS } from './TracksheetGrid';
+import { STUB_ROWS as TRACKSHEET_ROWS, computeCons } from './TracksheetGrid';
 import type { Voyage } from '../data/voyages';
 import type { LegRow } from './voyage/types';
 
@@ -158,7 +158,7 @@ const SERIES_DEFS: Record<DisplayKey, SeriesDef> = {
     color: '#f0b429',
     unit: 'MT/day',
     format: (n) => n.toFixed(2),
-    extract: (r) => parseNum(r.fo),
+    extract: (r) => parseNum(r.fo) + parseNum(r.doGo),
   },
   speed: {
     label: 'Speed (SOG)',
@@ -489,16 +489,11 @@ export function InterimDashboardPage() {
   const chartDays = useMemo<ChartDay[]>(() => {
     const noon = TRACKSHEET_ROWS.filter((r) => r.rt === 'N');
     return noon.map((r, idx) => {
-      const prev = noon[idx - 1];
       const hours = r.hrs && r.hrs > 0 ? r.hrs : 24;
       const factor = 24 / hours;
-      const dist = r.distR ?? r.distO ?? 0;
-      const foRaw = prev
-        ? Math.max(0, (prev.vlsfoRob ?? 0) - (r.vlsfoRob ?? 0) + (r.vlsfoBunkered ?? 0))
-        : 0;
-      const goRaw = prev
-        ? Math.max(0, (prev.lsmgoRob ?? 0) - (r.lsmgoRob ?? 0) + (r.lsmgoBunkered ?? 0))
-        : 0;
+      const dist = r.distO ?? r.distR ?? 0;
+      const foRaw = computeCons(noon, idx, 'vlsfo') ?? 0;
+      const goRaw = computeCons(noon, idx, 'lsmgo') ?? 0;
       return {
         date: fmtTrackDate(r.date),
         time: fmtTrackTime(r.time),
@@ -539,6 +534,7 @@ export function InterimDashboardPage() {
     const totalGo = sum((r) => parseNum(r.doGo));
     const avgSpeed = totalHours > 0 ? totalDistance / totalHours : 0;
     const avgFoPerDay = totalHours > 0 ? (totalFo / totalHours) * 24 : 0;
+    const avgGoPerDay = totalHours > 0 ? (totalGo / totalHours) * 24 : 0;
     return {
       count: reports.length,
       latest: reports[0],
@@ -550,6 +546,7 @@ export function InterimDashboardPage() {
       totalGo,
       avgSpeed,
       avgFoPerDay,
+      avgGoPerDay,
     };
   }, []);
 
@@ -706,6 +703,10 @@ export function InterimDashboardPage() {
             <li>
               <span>Avg FO / day</span>
               <strong>{noonSummary.avgFoPerDay.toFixed(2)} MT</strong>
+            </li>
+            <li>
+              <span>Avg GO / day</span>
+              <strong>{noonSummary.avgGoPerDay.toFixed(2)} MT</strong>
             </li>
           </ul>
         </div>

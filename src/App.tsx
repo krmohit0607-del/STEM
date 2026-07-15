@@ -8,6 +8,7 @@ import { InterimDashboardPage } from './components/InterimDashboardPage';
 import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
 import { RobCalculationPage } from './components/RobCalculationPage';
 import { VoyageEstimationPage } from './components/VoyageEstimationPage';
+import { ChateringEstimationPage } from './components/ChateringEstimationPage';
 import { WeatherMarginsPage } from './components/WeatherMarginsPage';
 import { VoyageDetailsPage } from './components/VoyageDetailsPage';
 import { ConfigHistoryPage } from './components/ConfigHistoryPage';
@@ -92,6 +93,14 @@ export function App() {
               element={
                 <Layout>
                   <VoyageEstimationPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/chartering"
+              element={
+                <Layout showModuleChrome={false}>
+                  <ChateringEstimationPage />
                 </Layout>
               }
             />

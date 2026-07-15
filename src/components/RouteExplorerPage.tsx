@@ -8,12 +8,16 @@ import { type OptimizedRoute } from '../data/routeOptimizer';
 import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
 import {
   setActiveSimRoute,
+  setEditCompareRoute,
+  setRouteEditActive,
   useMapCompareRoutes,
   useMapShipMarkers,
   useMapPlannedColor,
   useMapRouteWaypoints,
+  useRouteEditCommand,
 } from '../data/routeSimulatorStore';
 import { RouteEditorMap, type EditorPoint, legPositions } from './RouteEditorMap';
+import { bumpSavedRoutes } from '../data/optimizationStore';
 import { OptimizationRunDialog } from './OptimizationRunDialog';
 import { PortInput } from './PortInput';
 import { useVesselPosition } from '../data/vesselPosition';
@@ -379,6 +383,11 @@ export function RouteExplorerPage() {
   const [routeName, setRouteName] = useState('');
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() => readSavedRoutes());
 
+  // The map route is locked by default; "Edit" enters edit mode on a duplicate
+  // so the original stays visible for comparison until the edit is activated.
+  const [editMode, setEditMode] = useState(false);
+  const [originalRoute, setOriginalRoute] = useState<Waypoint[] | null>(null);
+
   // --- Auto sea-route generator ------------------------------------
   const [depInput, setDepInput] = useState(selectedVoyage?.portFrom ?? '');
   const [arrInput, setArrInput] = useState(selectedVoyage?.portTo ?? '');
@@ -557,9 +566,82 @@ export function RouteExplorerPage() {
 
   // Saved routes the user is comparing in the simulator, echoed onto the map.
   const compareRoutes = useMapCompareRoutes();
+
+  // While editing a duplicate, build the pre-edit original's densified path,
+  // distance and per-leg timing so it can be drawn faded on the map and shown
+  // as its own comparison row in the simulator table.
+  const originalSim = useMemo(() => {
+    if (!editMode || !originalRoute) return null;
+    const pts = originalRoute
+      .map((wp) => ({
+        id: wp.id,
+        lat: dmToDec(wp.lat),
+        lon: dmToDec(wp.lon),
+        legType: wp.legType ?? 'rhumb',
+      }))
+      .filter((p) => !Number.isNaN(p.lat) && !Number.isNaN(p.lon));
+    if (pts.length < 2) return null;
+    const speedById = new Map(originalRoute.map((w) => [w.id, w.speed]));
+    const path: Array<[number, number]> = [];
+    const timeHours: number[] = [];
+    let cum = 0;
+    for (let i = 0; i < pts.length - 1; i += 1) {
+      const seg = legPositions(
+        pts[i] as EditorPoint,
+        pts[i + 1] as EditorPoint,
+        pts[i].legType,
+      ).map((p) => p as [number, number]);
+      const raw = speedById.get(pts[i].id) ?? 0;
+      const legSpeed = raw > 0 ? raw : SERVICE_SPEED_KN;
+      if (i === 0 && seg.length > 0) {
+        path.push(seg[0]);
+        timeHours.push(0);
+      }
+      for (let k = 1; k < seg.length; k += 1) {
+        const a = seg[k - 1];
+        const b = seg[k];
+        cum += haversineNM(a[0], a[1], b[0], b[1]) / legSpeed;
+        path.push(b);
+        timeHours.push(cum);
+      }
+    }
+    const distanceNm = Math.round(
+      originalRoute.reduce((s, wp) => s + wp.distanceFromPrev, 0),
+    );
+    return { path, timeHours, distanceNm };
+  }, [editMode, originalRoute]);
+
+  const originalOverlay = useMemo(
+    () =>
+      originalSim
+        ? [{ id: 'original-compare', color: '#8b949e', path: originalSim.path }]
+        : [],
+    [originalSim],
+  );
+
+  // Publish the pre-edit original as a comparison route so the simulator table
+  // shows it as a separate row alongside the "Edit of …" route.
+  useEffect(() => {
+    if (!originalSim) {
+      setEditCompareRoute(null);
+      return;
+    }
+    setEditCompareRoute({
+      id: 'original-compare',
+      label: t('plannedRoute', 'Planned route'),
+      color: '#8b949e',
+      path: originalSim.path,
+      distanceNm: originalSim.distanceNm,
+      timeHours: originalSim.timeHours,
+      etdIso: selectedVoyage?.etdIso,
+    });
+  }, [originalSim, selectedVoyage?.etdIso]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => () => setEditCompareRoute(null), []);
+
   const overlayRoutes = useMemo(
-    () => [...mapRoutes, ...compareRoutes],
-    [mapRoutes, compareRoutes],
+    () => [...mapRoutes, ...compareRoutes, ...originalOverlay],
+    [mapRoutes, compareRoutes, originalOverlay],
   );
 
   // Vessel positions published by the simulator while it plays back.
@@ -638,6 +720,7 @@ export function RouteExplorerPage() {
           name: wp.name,
           lat: dmToDec(wp.lat),
           lon: dmToDec(wp.lon),
+          latLng: [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number],
           isPort: wp.isPort,
           drift: wp.drift,
           legType: wp.legType ?? 'rhumb',
@@ -656,28 +739,48 @@ export function RouteExplorerPage() {
   // exact track drawn on the map instead of cutting straight between points.
   useEffect(() => {
     const path: Array<[number, number]> = [];
+    // Cumulative voyage hours to each densified vertex, using the planned speed
+    // of the waypoint each leg departs from (so the vessel sails every leg at
+    // the speed set in the waypoint list).
+    const timeHours: number[] = [];
+    let cumHours = 0;
+    const speedById = new Map(waypoints.map((w) => [w.id, w.speed]));
     for (let i = 0; i < mapPoints.length - 1; i += 1) {
       const seg = legPositions(
         mapPoints[i],
         mapPoints[i + 1],
         mapPoints[i].legType ?? 'rhumb',
       ).map((p) => p as [number, number]);
-      if (i === 0) path.push(...seg);
-      else path.push(...seg.slice(1));
+      const rawSpeed = speedById.get(mapPoints[i].id) ?? 0;
+      const legSpeed = rawSpeed > 0 ? rawSpeed : SERVICE_SPEED_KN;
+      if (i === 0 && seg.length > 0) {
+        path.push(seg[0]);
+        timeHours.push(0);
+      }
+      for (let k = 1; k < seg.length; k += 1) {
+        const prev = seg[k - 1];
+        const curr = seg[k];
+        cumHours += haversineNM(prev[0], prev[1], curr[0], curr[1]) / legSpeed;
+        path.push(curr);
+        timeHours.push(cumHours);
+      }
     }
     if (path.length >= 2) {
       const distanceNm = waypoints.reduce((sum, wp) => sum + wp.distanceFromPrev, 0);
+      const plannedLabel = t('plannedRoute', 'Planned route');
       setActiveSimRoute({
         id: 'active-planned',
-        label: t('plannedRoute', 'Planned route'),
+        label: editMode ? `Edit of ${plannedLabel}` : plannedLabel,
         color: '#1f6feb',
         path,
         distanceNm: Math.round(distanceNm),
+        timeHours,
+        etdIso: selectedVoyage?.etdIso,
       });
     } else {
       setActiveSimRoute(null);
     }
-  }, [mapPoints, waypoints]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mapPoints, waypoints, editMode, selectedVoyage?.etdIso]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => setActiveSimRoute(null), []);
 
@@ -843,97 +946,75 @@ export function RouteExplorerPage() {
     setSelected([]);
   };
 
-  // --- CSV import / export -----------------------------------------
-  const downloadRef = useRef<HTMLAnchorElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const exportRoute = () => {
-    const header = 'name,lat,lon,speed,drift,isPort';
-    const rows = waypoints.map((wp) => {
-      const name = `"${wp.name.replace(/"/g, '""')}"`;
-      return [
-        name,
-        dmToDec(wp.lat).toFixed(5),
-        dmToDec(wp.lon).toFixed(5),
-        wp.speed,
-        wp.drift,
-        wp.isPort,
-      ].join(',');
-    });
-    const csv = [header, ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = downloadRef.current;
-    if (a) {
-      a.href = url;
-      a.download = 'expected-route.csv';
-      a.click();
+  /**
+   * Enter edit mode. When a route already exists it is duplicated: the original
+   * is snapshotted and drawn faded on the map for comparison, and the copy is
+   * edited. From an empty route this simply unlocks the map to plot a new one.
+   */
+  const startEditDuplicate = () => {
+    if (waypoints.length > 0) {
+      setOriginalRoute(waypoints.map((wp) => ({ ...wp })));
+      setRouteName((n) => (n.trim() ? `${n.trim()} (copy)` : 'Route (copy)'));
     }
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setEditMode(true);
+    setSideCollapsed(false);
   };
 
-  /** Split a CSV line, honouring quoted fields with embedded commas. */
-  const parseCsvLine = (line: string): string[] => {
-    const out: string[] = [];
-    let cur = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i += 1) {
-      const ch = line[i];
-      if (inQuotes) {
-        if (ch === '"' && line[i + 1] === '"') {
-          cur += '"';
-          i += 1;
-        } else if (ch === '"') {
-          inQuotes = false;
-        } else {
-          cur += ch;
-        }
-      } else if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        out.push(cur);
-        cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    out.push(cur);
-    return out;
-  };
-
-  const importRoute = (text: string) => {
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (lines.length && /name\s*,\s*lat/i.test(lines[0])) lines.shift();
-    if (lines.length < 2) return;
-    const imported: Waypoint[] = lines.map((line, i) => {
-      const [name, lat, lon, speed, drift, isPort] = parseCsvLine(line);
-      return {
-        id: `wp-${Date.now()}-${i}`,
-        name: (name ?? `Waypoint ${i + 1}`).trim(),
-        lat: decToDM(Number(lat) || 0, true),
-        lon: decToDM(Number(lon) || 0, false),
-        course: 0,
-        speed: Number(speed) || 0,
-        distanceFromPrev: 0,
-        eta: '',
-        drift: String(drift).trim().toLowerCase() === 'true',
-        isPort:
-          String(isPort).trim().toLowerCase() === 'true' || i === 0 || i === lines.length - 1,
+  /**
+   * Keep the edited route (stays live/editable on the map) and preserve the
+   * pre-edit original as a saved route so both remain available in the routes
+   * list below for comparison — the operator can activate or delete either.
+   */
+  const activateEdit = () => {
+    if (originalRoute && originalRoute.length >= 2) {
+      const baseName =
+        routeName.trim().replace(/\s*\(copy\)\s*$/i, '') || 'Planned route';
+      const saved: SavedRoute = {
+        id: `route-${Date.now()}`,
+        name: `${baseName} (original)`,
+        savedAt: new Date().toISOString(),
+        waypoints: originalRoute,
       };
-    });
-    setWaypoints(recomputeGeometry(imported));
-    setSelected([]);
+      const next = [...savedRoutes, saved];
+      setSavedRoutes(next);
+      writeSavedRoutes(next);
+      bumpSavedRoutes();
+    }
+    setEditMode(false);
+    setOriginalRoute(null);
     setPlotMode(false);
   };
 
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => importRoute(String(reader.result ?? ''));
-    reader.readAsText(file);
-    e.target.value = '';
+  /** Discard the edits, restore the original route and re-lock the map. */
+  const discardEdit = () => {
+    if (originalRoute) {
+      setWaypoints(originalRoute);
+      setSelected([]);
+    }
+    setEditMode(false);
+    setOriginalRoute(null);
+    setPlotMode(false);
   };
+
+  // --- Duplicate & Edit bridge -------------------------------------
+  // The button lives in the Route Simulator panel; it issues commands here and
+  // we report whether an edit is in progress so the panel can show Activate /
+  // Discard.
+  useEffect(() => {
+    setRouteEditActive(editMode);
+  }, [editMode]);
+  useEffect(() => () => setRouteEditActive(false), []);
+
+  const editCommand = useRouteEditCommand();
+  const lastEditNonceRef = useRef(0);
+  useEffect(() => {
+    if (!editCommand || editCommand.nonce === lastEditNonceRef.current) return;
+    lastEditNonceRef.current = editCommand.nonce;
+    if (editCommand.action === 'start') startEditDuplicate();
+    else if (editCommand.action === 'activate') activateEdit();
+    else if (editCommand.action === 'discard') discardEdit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editCommand]);
 
   const updateWaypoint = <K extends keyof Waypoint>(
     id: string,
@@ -956,7 +1037,12 @@ export function RouteExplorerPage() {
               type="button"
               className={`fv-route__btn${plotMode ? ' fv-route__btn--active' : ''}`}
               onClick={() => setPlotMode((p) => !p)}
-              title={t('plotHint', 'Click on the map to add waypoints')}
+              disabled={!editMode}
+              title={
+                editMode
+                  ? t('plotHint', 'Click on the map to add waypoints')
+                  : t('plotLockedHint', 'Click Edit to unlock the route first')
+              }
             >
               <i className="fas fa-map-marker-alt" aria-hidden="true" />{' '}
               {plotMode ? t('plottingOn', 'Plotting…') : t('plotOnMap', 'Plot on map')}
@@ -984,30 +1070,6 @@ export function RouteExplorerPage() {
             >
               <i className="fas fa-eraser" aria-hidden="true" /> {t('clear', 'Clear')}
             </button>
-            <button
-              type="button"
-              className="fv-route__btn"
-              onClick={exportRoute}
-              disabled={waypoints.length === 0}
-            >
-              <i className="fas fa-file-export" aria-hidden="true" /> {t('export', 'Export')}
-            </button>
-            <button
-              type="button"
-              className="fv-route__btn"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <i className="fas fa-file-import" aria-hidden="true" /> {t('import', 'Import')}
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,.json,text/csv"
-              style={{ display: 'none' }}
-              onChange={handleFile}
-            />
-            {/* eslint-disable-next-line jsx-a11y/anchor-has-content */}
-            <a ref={downloadRef} style={{ display: 'none' }} aria-hidden="true" />
           </div>
         </header>
 
@@ -1283,13 +1345,6 @@ export function RouteExplorerPage() {
               <button
                 type="button"
                 className="fv-route__btn"
-                onClick={notImplemented('Validate')}
-              >
-                <i className="fas fa-circle-check" aria-hidden="true" /> {t('validate', 'Validate')}
-              </button>
-              <button
-                type="button"
-                className="fv-route__btn"
                 onClick={() => setOptDialogOpen(true)}
               >
                 <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
@@ -1323,6 +1378,7 @@ export function RouteExplorerPage() {
             <RouteEditorMap
               points={mapPoints}
               plotMode={plotMode}
+              editable={editMode}
               selected={selected}
               routes={overlayRoutes}
               selectedRouteId={selectedRouteId}

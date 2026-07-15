@@ -8,7 +8,6 @@ import { type Priority, type TaskRow } from '../data/fleetTasks';
 import { useTheme } from '../theme';
 import { FleetMapView, type MapVessel } from './FleetMapView';
 import { SettingsModal } from './SettingsModal';
-import { ModuleSelector } from './ModuleSelector';
 
 /**
  * Fleet List View page — `/main`.
@@ -444,7 +443,6 @@ export function FleetListPage() {
           <i className="fas fa-ship" aria-hidden="true" />
           <span>STEM</span>
         </div>
-        <ModuleSelector />
 
         {!shiftView && view !== 'map' && (
           <div className="fv-fleet__topbar-fields">

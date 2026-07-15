@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
 
 import { useFleetView } from '../context/FleetViewContext';
+import { FleetMenu } from './FleetMenu';
 import { LeftSidebar } from './LeftSidebar';
 import { MapView } from './MapView';
+import { ModuleBar } from './ModuleBar';
 import { TopNav } from './TopNav';
 import { BottomPanel } from './BottomPanel';
 
@@ -21,7 +23,15 @@ import { BottomPanel } from './BottomPanel';
  * (TopNav, LeftSidebar, BottomPanel) stays the same so the user can keep
  * navigating between pages without losing their dashboard chrome.
  */
-export function Layout({ children }: { children?: ReactNode }) {
+export function Layout({
+  children,
+  showModuleChrome = true,
+}: {
+  children?: ReactNode;
+  /** When false, hides the Performance-module chrome (icon sidebar, module bar,
+   *  bottom panel) — used by other modules like Chartering. */
+  showModuleChrome?: boolean;
+}) {
   const { isLoading, error, user } = useFleetView();
 
   if (isLoading) {
@@ -50,10 +60,12 @@ export function Layout({ children }: { children?: ReactNode }) {
       <TopNav />
 
       <div id="main-wrapper">
-        <LeftSidebar />
+        <FleetMenu />
+        {showModuleChrome && <LeftSidebar />}
         <div id="portal" className="portal-container">
+          {showModuleChrome && <ModuleBar />}
           {children ?? <MapView />}
-          <BottomPanel />
+          {showModuleChrome && <BottomPanel />}
         </div>
       </div>
     </div>

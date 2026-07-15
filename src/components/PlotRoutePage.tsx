@@ -351,6 +351,7 @@ export function PlotRoutePage() {
         name: p.name,
         lat: p.lat,
         lon: p.lon,
+        latLng: [p.lat, p.lon] as [number, number],
         isPort: p.isPort,
         drift: false,
         latLabel: decToDM(p.lat, true),

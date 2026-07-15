@@ -89,6 +89,36 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
         </div>
       </div>
 
+      <div className="fv-voyage__cols fv-voyage__cols--3">
+        <div className="fv-voyage__col">
+          <BoolField label="Joint Nomination?" value={view.jointNomination} editing={editing} onChange={(b) => set('jointNomination', b)} />
+        </div>
+      </div>
+
+      {view.jointNomination && (
+        <>
+          <h5 className="fv-voyage__subhead fv-voyage__subhead--spaced">2nd Client (Joint Nomination)</h5>
+          <div className="fv-voyage__cols fv-voyage__cols--2">
+            <div className="fv-voyage__col">
+              <Field label="Client Name" value={view.client2} editing={editing} onChange={(x) => set('client2', x)} />
+              <Field label="Client Type" value={view.clientType2} editing={editing} onChange={(x) => set('clientType2', x)} options={CLIENT_TYPE_OPTIONS} />
+            </div>
+            <div className="fv-voyage__col">
+              <Field label="Price" value={view.price2} editing={editing} onChange={(x) => set('price2', x)} />
+              <Field label="Pricing Basis" value={view.pricingBasis2} editing={editing} onChange={(x) => set('pricingBasis2', x)} options={PRICING_BASIS_OPTIONS} />
+            </div>
+          </div>
+          <div className="fv-voyage__cols fv-voyage__cols--2">
+            <div className="fv-voyage__col">
+              <Field label="Client Email List" value={view.clientEmailList2} editing={editing} onChange={(x) => set('clientEmailList2', x)} />
+            </div>
+            <div className="fv-voyage__col">
+              <Field label="For Daily Fleet Summary" value={view.dailyFleetSummaryEmail2} editing={editing} onChange={(x) => set('dailyFleetSummaryEmail2', x)} />
+            </div>
+          </div>
+        </>
+      )}
+
       {isOptimization && (
         <>
           <h5 className="fv-voyage__subhead fv-voyage__subhead--spaced">Market Factors</h5>

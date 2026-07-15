@@ -20,11 +20,12 @@
  * the markup does not need to change.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { fetchPointWeatherAt } from '../data/openMeteo';
 import { setVesselPosition } from '../data/vesselPosition';
+import { loadVoyageShared } from '../data/voyageOverrides';
 import {
   fromDateInput,
   fromTimeInput,
@@ -37,7 +38,7 @@ export interface TrackRow {
   id: string;
   /** Next port for this leg / report. */
   nextPort: string;
-  /** Report type marker (E = ETA/estimate, N = noon report). */
+  /** Report type code (D/A/N/FC/SC/BS/S/R); blank for interpolated weather rows. */
   rt: string;
   date: string;
   time: string;
@@ -112,7 +113,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '26Jun2026', time: '0300', hrs: 25.0, lat: '0604N', lng: '15138E',
     vlsfoRob: 460.25, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 77.2, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 155.0, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 217.0, distO: 216.7, dtgO: 1839.7, avgSpeedO: 8.7,
     rpm: 83.03, enginePower: 2567.0, slip: 22.56, course: 278, amount: 0,
@@ -121,7 +122,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '27Jun2026', time: '0300', hrs: 24.0, lat: '0638N', lng: '14750E',
     vlsfoRob: 447.86, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 77.1, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 149.5, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 230.0, distO: 230.0, dtgO: 1770.5, avgSpeedO: 9.6,
     rpm: 83.01, enginePower: 2565.0, slip: 14.56, course: 278, amount: 0,
@@ -130,7 +131,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '28Jun2026', time: '0300', hrs: 24.0, lat: '0713N', lng: '14355E',
     vlsfoRob: 435.66, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 77, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 143.7, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 236.0, distO: 577.3, dtgO: 1267.9, avgSpeedO: 24.1,
     rpm: 83.02, enginePower: 2566.0, slip: 12.29, course: 278, amount: 0,
@@ -139,7 +140,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '29Jun2026', time: '0300', hrs: 24.0, lat: '0740N', lng: '14000E',
     vlsfoRob: 423.40, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.9, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 138.3, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 232.0, distO: 231.5, dtgO: 1150.0, avgSpeedO: 9.7,
     rpm: 83.00, enginePower: 2564.0, slip: 15.10, course: 279, amount: 0,
@@ -148,7 +149,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '30Jun2026', time: '0300', hrs: 24.0, lat: '0808N', lng: '13606E',
     vlsfoRob: 411.05, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.8, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 132.4, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 235.0, distO: 234.6, dtgO: 1030.0, avgSpeedO: 9.8,
     rpm: 83.05, enginePower: 2568.0, slip: 13.80, course: 280, amount: 0,
@@ -157,7 +158,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '01Jul2026', time: '0300', hrs: 24.0, lat: '0835N', lng: '13212E',
     vlsfoRob: 398.90, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.7, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 126.8, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 228.0, distO: 227.4, dtgO: 912.0, avgSpeedO: 9.5,
     rpm: 82.95, enginePower: 2560.0, slip: 16.40, course: 278, amount: 0,
@@ -166,7 +167,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '02Jul2026', time: '0300', hrs: 24.0, lat: '0902N', lng: '12818E',
     vlsfoRob: 386.55, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.6, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 121.6, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 240.0, distO: 239.2, dtgO: 795.0, avgSpeedO: 10.0,
     rpm: 83.10, enginePower: 2571.0, slip: 12.90, course: 281, amount: 0,
@@ -175,7 +176,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '03Jul2026', time: '0300', hrs: 24.0, lat: '0929N', lng: '12424E',
     vlsfoRob: 374.30, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.5, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 115.9, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 233.0, distO: 232.1, dtgO: 679.0, avgSpeedO: 9.7,
     rpm: 83.02, enginePower: 2566.0, slip: 14.20, course: 279, amount: 0,
@@ -184,7 +185,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '04Jul2026', time: '0300', hrs: 24.0, lat: '0956N', lng: '12030E',
     vlsfoRob: 362.10, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.4, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 110.4, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 236.0, distO: 235.5, dtgO: 564.0, avgSpeedO: 9.8,
     rpm: 83.06, enginePower: 2569.0, slip: 13.10, course: 280, amount: 0,
@@ -193,7 +194,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '05Jul2026', time: '0300', hrs: 24.0, lat: '1023N', lng: '11636E',
     vlsfoRob: 349.95, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.3, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 104.6, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 229.0, distO: 228.3, dtgO: 450.0, avgSpeedO: 9.5,
     rpm: 82.98, enginePower: 2562.0, slip: 15.80, course: 278, amount: 0,
@@ -202,7 +203,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '06Jul2026', time: '0300', hrs: 24.0, lat: '1050N', lng: '11242E',
     vlsfoRob: 337.70, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.2, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 99.3, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 238.0, distO: 237.4, dtgO: 337.0, avgSpeedO: 9.9,
     rpm: 83.08, enginePower: 2570.0, slip: 12.60, course: 281, amount: 0,
@@ -211,7 +212,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '07Jul2026', time: '0300', hrs: 24.0, lat: '1117N', lng: '10848E',
     vlsfoRob: 325.50, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.1, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 93.3, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 231.0, distO: 230.2, dtgO: 225.0, avgSpeedO: 9.6,
     rpm: 83.00, enginePower: 2565.0, slip: 14.90, course: 279, amount: 0,
@@ -220,7 +221,7 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   {
     rt: 'N', date: '08Jul2026', time: '0300', hrs: 24.0, lat: '1144N', lng: '10454E',
     vlsfoRob: 313.40, vlsfoBunkered: 0, vlsfoCorrected: 0,
-    lsmgoRob: 76.0, lsmgoBunkered: 0, lsmgoCorrected: 0,
+    lsmgoRob: 87.7, lsmgoBunkered: 0, lsmgoCorrected: 0,
     noneRob: 0, noneBunkered: 0, noneCorrected: 0,
     distR: 234.0, distO: 233.1, dtgO: 114.0, avgSpeedO: 9.75,
     rpm: 83.03, enginePower: 2567.0, slip: 13.40, course: 280, amount: 0,
@@ -246,35 +247,24 @@ type StrField = {
   [K in keyof TrackRow]: TrackRow[K] extends string ? K : never;
 }[keyof TrackRow];
 
-/** Report-type (RT) options shown in the RT column dropdown. */
-const RT_OPTIONS = [
-  'Arrival',
-  'Departure',
-  'Stop',
-  'Resume',
-  'Delivery',
-  'Bunker correction',
-  'First line report',
-  'Last Line report',
-  'Standby engine',
-];
+/** Report-type (RT) codes shown in the RT column dropdown. */
+const RT_OPTIONS = ['D', 'A', 'N', 'FC', 'SC', 'BS', 'S', 'R'];
 
-/** Short form shown in the cell while not editing. */
-const RT_SHORT: Record<string, string> = {
-  Arrival: 'Arr',
-  Departure: 'Dep',
-  Stop: 'Stop',
-  Resume: 'Res',
-  Delivery: 'Dlv',
-  'Bunker correction': 'BC',
-  'First line report': 'FLR',
-  'Last Line report': 'LLR',
-  'Standby engine': 'SBE',
+/** Human-readable label for each RT code. */
+const RT_LABELS: Record<string, string> = {
+  D: 'Departure',
+  A: 'Arrival',
+  N: 'Noon',
+  FC: 'Fuel Changeover',
+  SC: 'Speed Change',
+  BS: 'Bunker Survey',
+  S: 'Stop',
+  R: 'Resume',
 };
 
 function rtShort(value: string): string {
   if (!value) return '—';
-  return RT_SHORT[value] ?? value;
+  return value;
 }
 
 /** Epoch (ms) for a row's date + time, or null when unparseable. */
@@ -295,6 +285,70 @@ function computeHrs(prev: TrackRow, cur: TrackRow): number | null {
   return Math.round(((b - a) / 3_600_000) * 10) / 10;
 }
 
+/** Fuel type whose consumption can be derived from tracksheet ROB readings. */
+export type ConsFuel = 'vlsfo' | 'lsmgo' | 'none';
+
+/**
+ * Fuel consumption (MT) for row `i`: the drop in ROB since the previous report
+ * that carried a reading, plus any bunkers taken on this report. Returns null
+ * until a prior reading exists. Shared by the tracksheet Cons columns and the
+ * Interim Dashboard performance chart so both views stay in sync.
+ */
+export function computeCons(
+  rows: Pick<
+    TrackRow,
+    | 'vlsfoRob' | 'vlsfoBunkered'
+    | 'lsmgoRob' | 'lsmgoBunkered'
+    | 'noneRob' | 'noneBunkered'
+  >[],
+  i: number,
+  fuel: ConsFuel,
+): number | null {
+  const robKey = `${fuel}Rob` as 'vlsfoRob' | 'lsmgoRob' | 'noneRob';
+  const bunkKey = `${fuel}Bunkered` as
+    | 'vlsfoBunkered'
+    | 'lsmgoBunkered'
+    | 'noneBunkered';
+  const cur = rows[i]?.[robKey];
+  if (cur == null) return null;
+  for (let j = i - 1; j >= 0; j--) {
+    const prev = rows[j][robKey];
+    if (prev != null) {
+      return Math.max(0, prev - cur + (rows[i][bunkKey] ?? 0));
+    }
+  }
+  return null;
+}
+
+/**
+ * Ship local time approximated from longitude: offset = round(lon/15) hours.
+ * Returns `HHMM`, with a day-offset marker (`+1d` / `-1d`) appended when the
+ * longitude offset pushes the local calendar day past midnight, so a UTC time
+ * near midnight (e.g. 2300 UTC → 0100 +1d) is never mistaken for the same day.
+ */
+export function computeLt(date: string, time: string, lng: string): string {
+  const epoch = rowEpoch(date, time);
+  const lon = parseCoord(lng);
+  if (epoch == null || lon == null) return '';
+  const shifted = epoch + Math.round(lon / 15) * 3_600_000;
+  const d = new Date(shifted);
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  const dayDiff =
+    Math.floor(shifted / 86_400_000) - Math.floor(epoch / 86_400_000);
+  const marker = dayDiff > 0 ? ' +1d' : dayDiff < 0 ? ' \u22121d' : '';
+  return `${hh}${mm}${marker}`;
+}
+
+/** Average speed (kt) from the system distance (Dist O) over the steaming hours. */
+export function computeSpeed(
+  distO: number | null,
+  hrs: number | null,
+): number | null {
+  if (distO == null || hrs == null || hrs <= 0) return null;
+  return distO / hrs;
+}
+
 /**
  * Parse a tracksheet coordinate such as `0545N` (05°45'N) or `15347E`
  * (153°47'E) to a signed decimal degree. The last two digits are minutes.
@@ -307,6 +361,24 @@ function parseCoord(s: string): number | null {
   let val = degs + mins / 60;
   if (m[2].toUpperCase() === 'S' || m[2].toUpperCase() === 'W') val = -val;
   return Number.isFinite(val) ? val : null;
+}
+
+/**
+ * Inverse of `parseCoord`: format a signed decimal degree back to the tracksheet
+ * coordinate string (e.g. 6.07 → `0604N`, 151.63 → `15138E`).
+ */
+function toCoord(dec: number, isLat: boolean): string {
+  const hemi = isLat ? (dec >= 0 ? 'N' : 'S') : (dec >= 0 ? 'E' : 'W');
+  const abs = Math.abs(dec);
+  let deg = Math.floor(abs);
+  let min = Math.round((abs - deg) * 60);
+  if (min === 60) {
+    deg += 1;
+    min = 0;
+  }
+  const degStr = String(deg).padStart(isLat ? 2 : 3, '0');
+  const minStr = String(min).padStart(2, '0');
+  return `${degStr}${minStr}${hemi}`;
 }
 
 const COMPASS16 = [
@@ -413,7 +485,19 @@ export function TracksheetGrid() {
   const routeLabel = selectedVoyage
     ? `${selectedVoyage.portFrom} → ${selectedVoyage.portTo}`
     : 'Singapore → Rotterdam';
-  const nextPortLabel = selectedVoyage?.portTo ?? '—';
+
+  // Fuel column groups shown in the grid. VLSFO + LSMGO are always present; a
+  // third group appears only when a 3rd fuel type was configured on the voyage
+  // (Create/Edit Voyage → 3rd Fuel Type). `key` maps to the row field prefix.
+  const fuelGroups = useMemo(() => {
+    const third = loadVoyageShared(selectedVoyage?.id)?.thirdFuelType?.trim();
+    const groups: { key: ConsFuel; label: string; robDigits: number }[] = [
+      { key: 'vlsfo', label: 'VLSFO 0.5% Sulphur', robDigits: 2 },
+      { key: 'lsmgo', label: 'LSMGO 0.1% Sulphur', robDigits: 1 },
+    ];
+    if (third) groups.push({ key: 'none', label: third, robDigits: 1 });
+    return groups;
+  }, [selectedVoyage?.id]);
 
   const [rows, setRows] = useState<TrackRow[]>(() =>
     STUB_ROWS.map((r, i) => ({ ...r, id: `row-${i}`, nextPort: '' })),
@@ -421,7 +505,7 @@ export function TracksheetGrid() {
   const [editing, setEditing] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [validating, setValidating] = useState(false);
 
   const allChecked = rows.length > 0 && checkedIds.length === rows.length;
   const someChecked = checkedIds.length > 0;
@@ -448,6 +532,139 @@ export function TracksheetGrid() {
     window.setTimeout(() => setSavedFlash(false), 1500);
   };
 
+  /**
+   * Add a blank Noon report row for manual entry. When one or more rows are
+   * checked, the new row is inserted directly below the lowest-most selected
+   * row; otherwise it is appended at the bottom.
+   */
+  const addRow = () => {
+    const newRow: TrackRow = {
+      id: `row-${Date.now()}`,
+      nextPort: '',
+      rt: 'N', date: '', time: '', hrs: null, lat: '', lng: '',
+      vlsfoRob: null, vlsfoBunkered: null, vlsfoCorrected: null,
+      lsmgoRob: null, lsmgoBunkered: null, lsmgoCorrected: null,
+      noneRob: null, noneBunkered: null, noneCorrected: null,
+      distR: null, distO: null, dtgO: null, avgSpeedO: null,
+      rpm: null, enginePower: null, slip: null, course: null, amount: null,
+      windO: '', wavesO: '', windF: 0, waveF: 0, currF: 0, avgF: '',
+    };
+    setRows((prev) => {
+      // Insert after the last selected row (by grid order); append when none.
+      let insertAt = prev.length;
+      for (let i = prev.length - 1; i >= 0; i--) {
+        if (checkedIds.includes(prev[i].id)) {
+          insertAt = i + 1;
+          break;
+        }
+      }
+      return [...prev.slice(0, insertAt), newRow, ...prev.slice(insertAt)];
+    });
+  };
+
+  /**
+   * Validate the checked reports (or every Noon report when none are checked):
+   * fetch weather and expand each ~24h leg into 6-hourly steps. Three
+   * interpolated weather rows (at +6h / +12h / +18h) are inserted ahead of each
+   * report and the report row itself gets refreshed weather at its position.
+   */
+  const validateSelected = async () => {
+    setValidating(true);
+    try {
+      const sample = async (lat: number, lon: number, when: Date) => {
+        const res = await fetchPointWeatherAt(lat, lon, when);
+        const wind = res.wind;
+        const waves = res.waves;
+        const curr = res.currents;
+        const windO = wind
+          ? `${compass16(wind.directionDeg)}${beaufort(wind.magnitude)}`
+          : '';
+        const wavesO = waves
+          ? `${compass16(waves.directionDeg)}${waves.magnitude.toFixed(1)}`
+          : '';
+        const windF = wind ? round2(-wind.magnitude / 40) : 0;
+        const waveF = waves ? round2(-waves.magnitude / 6) : 0;
+        const currF = curr ? round2(-curr.magnitude) : 0;
+        return { windO, wavesO, windF, waveF, currF, avgF: `${windF} / ${waveF} / ${currF}` };
+      };
+
+      const src = rows;
+      const targetIds = new Set(
+        someChecked ? checkedIds : src.filter((r) => r.rt === 'N').map((r) => r.id),
+      );
+      const out: TrackRow[] = [];
+      for (let i = 0; i < src.length; i++) {
+        const cur = src[i];
+        const prev = src[i - 1];
+        const startEpoch = prev ? rowEpoch(prev.date, prev.time) : null;
+        const endEpoch = rowEpoch(cur.date, cur.time);
+        const lat0 = prev ? parseCoord(prev.lat) : null;
+        const lon0 = prev ? parseCoord(prev.lng) : null;
+        const lat1 = parseCoord(cur.lat);
+        const lon1 = parseCoord(cur.lng);
+        const canExpand =
+          targetIds.has(cur.id) &&
+          prev != null &&
+          startEpoch != null &&
+          endEpoch != null &&
+          endEpoch > startEpoch &&
+          lat0 != null &&
+          lon0 != null &&
+          lat1 != null &&
+          lon1 != null;
+
+        if (canExpand) {
+          for (let k = 1; k <= 3; k++) {
+            const f = k / 4;
+            const epoch = startEpoch! + (endEpoch! - startEpoch!) * f;
+            const lat = lat0! + (lat1! - lat0!) * f;
+            const lon = lon0! + (lon1! - lon0!) * f;
+            const wx = await sample(lat, lon, new Date(epoch));
+            const iso = new Date(epoch);
+            const pad = (x: number) => String(x).padStart(2, '0');
+            const lerp = (a: number | null, b: number | null) =>
+              a == null || b == null ? null : round2(a + (b - a) * f);
+            out.push({
+              ...cur,
+              id: `${cur.id}-h${k * 6}`,
+              rt: '',
+              date: fromDateInput(
+                `${iso.getUTCFullYear()}-${pad(iso.getUTCMonth() + 1)}-${pad(iso.getUTCDate())}`,
+              ),
+              time: fromTimeInput(`${pad(iso.getUTCHours())}:${pad(iso.getUTCMinutes())}`),
+              hrs: null,
+              lat: toCoord(lat, true),
+              lng: toCoord(lon, false),
+              vlsfoRob: lerp(prev!.vlsfoRob, cur.vlsfoRob),
+              vlsfoBunkered: 0,
+              vlsfoCorrected: 0,
+              lsmgoRob: lerp(prev!.lsmgoRob, cur.lsmgoRob),
+              lsmgoBunkered: 0,
+              lsmgoCorrected: 0,
+              noneRob: lerp(prev!.noneRob, cur.noneRob),
+              noneBunkered: 0,
+              noneCorrected: 0,
+              distR: null,
+              distO: null,
+              dtgO: null,
+              avgSpeedO: null,
+              amount: null,
+              ...wx,
+            });
+          }
+          const wxEnd = await sample(lat1!, lon1!, new Date(endEpoch!));
+          out.push({ ...cur, ...wxEnd });
+        } else {
+          out.push(cur);
+        }
+      }
+      setRows(out);
+      setCheckedIds([]);
+    } finally {
+      setValidating(false);
+    }
+  };
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Publish the last row's position so the route editor map can show the
@@ -460,44 +677,6 @@ export function TracksheetGrid() {
       setVesselPosition({ lat, lon, label: vesselName });
     }
   }, [rows, vesselName]);
-
-  /** Auto-fill weather conditions + factors from Open-Meteo using each row's
-   *  lat/lng and date/time. */
-  const autoWeather = async () => {
-    setWeatherLoading(true);
-    try {
-      const updates = await Promise.all(
-        rows.map(async (r) => {
-          const lat = parseCoord(r.lat);
-          const lon = parseCoord(r.lng);
-          const epoch = rowEpoch(r.date, r.time);
-          if (lat == null || lon == null || epoch == null) return null;
-          const res = await fetchPointWeatherAt(lat, lon, new Date(epoch));
-          const wind = res.wind;
-          const waves = res.waves;
-          const curr = res.currents;
-          if (!wind && !waves && !curr) return null;
-          const windO = wind
-            ? `${compass16(wind.directionDeg)}${beaufort(wind.magnitude)}`
-            : r.windO;
-          const wavesO = waves
-            ? `${compass16(waves.directionDeg)}${waves.magnitude.toFixed(1)}`
-            : r.wavesO;
-          const windF = wind ? round2(-wind.magnitude / 40) : r.windF;
-          const waveF = waves ? round2(-waves.magnitude / 6) : r.waveF;
-          const currF = curr ? round2(-curr.magnitude) : r.currF;
-          const avgF = `${windF} / ${waveF} / ${currF}`;
-          return { id: r.id, windO, wavesO, windF, waveF, currF, avgF };
-        }),
-      );
-      const byId = new Map(
-        updates.filter((u): u is NonNullable<typeof u> => u !== null).map((u) => [u.id, u]),
-      );
-      setRows((prev) => prev.map((r) => ({ ...r, ...(byId.get(r.id) ?? {}) })));
-    } finally {
-      setWeatherLoading(false);
-    }
-  };
 
   const exportCsv = () => {
     const header = CSV_COLS.map((c) => String(c.key)).join(',');
@@ -621,7 +800,7 @@ export function TracksheetGrid() {
           <option value="">—</option>
           {opts.map((o) => (
             <option key={o} value={o}>
-              {o}
+              {RT_LABELS[o] ? `${o} — ${RT_LABELS[o]}` : o}
             </option>
           ))}
         </select>
@@ -658,21 +837,28 @@ export function TracksheetGrid() {
   return (
     <div className="fv-tracksheet">
       <div className="fv-tracksheet__header">
-        <span className="fv-tracksheet__vessel">{vesselName}</span>
         <span className="fv-tracksheet__route">{routeLabel}</span>
         <div className="fv-tracksheet__actions">
           <button
             type="button"
             className="fv-tracksheet__action"
-            onClick={autoWeather}
-            disabled={weatherLoading}
-            title="Fill weather from Open-Meteo using each row's position & time"
+            onClick={validateSelected}
+            disabled={validating}
+            title="Fetch weather and expand each 24h report into 6-hourly steps"
           >
             <i
-              className={`fas ${weatherLoading ? 'fa-spinner fa-spin' : 'fa-cloud-sun-rain'}`}
+              className={`fas ${validating ? 'fa-spinner fa-spin' : 'fa-circle-check'}`}
               aria-hidden="true"
             />{' '}
-            {weatherLoading ? 'Fetching…' : 'Weather'}
+            {validating ? 'Validating…' : `Validate${someChecked ? ` (${checkedIds.length})` : ''}`}
+          </button>
+          <button
+            type="button"
+            className="fv-tracksheet__action"
+            onClick={addRow}
+            title="Add a blank report row for manual entry"
+          >
+            <i className="fas fa-plus" aria-hidden="true" /> Add Row
           </button>
           <input
             ref={fileInputRef}
@@ -730,11 +916,10 @@ export function TracksheetGrid() {
                 aria-label="Select all rows"
               />
             </th>
-            <th rowSpan={2}>Next Port</th>
-            <th colSpan={6}>Fundamentals</th>
-            <th colSpan={3}>VLSFO 0.5% Sulphur</th>
-            <th colSpan={3}>LSMGO 0.1% Sulphur</th>
-            <th colSpan={3}>None</th>
+            <th colSpan={7}>Fundamentals</th>
+            {fuelGroups.map((f) => (
+              <th key={f.key} colSpan={4}>{f.label}</th>
+            ))}
             <th colSpan={3}>Distances</th>
             <th colSpan={1}>Speed</th>
             <th colSpan={4}>Engine</th>
@@ -745,22 +930,20 @@ export function TracksheetGrid() {
           <tr className="fv-tracksheet__head-row">
             <th>RT</th>
             <th>Date</th>
-            <th>Time</th>
+            <th>Time (UTC)</th>
+            <th>Time (LT)</th>
             <th>HRS</th>
             <th>Lat</th>
             <th>Lng</th>
 
-            <th>ROB</th>
-            <th>Bunkered</th>
-            <th>Corrected</th>
-
-            <th>ROB</th>
-            <th>Bunkered</th>
-            <th>Corrected</th>
-
-            <th>ROB</th>
-            <th>Bunkered</th>
-            <th>Corrected</th>
+            {fuelGroups.map((f) => (
+              <Fragment key={f.key}>
+                <th>ROB</th>
+                <th>Bunkered</th>
+                <th>Corrected</th>
+                <th>Cons</th>
+              </Fragment>
+            ))}
 
             <th>DistR</th>
             <th>DistO</th>
@@ -795,33 +978,42 @@ export function TracksheetGrid() {
                   aria-label="Select row"
                 />
               </td>
-              <td className="fv-tracksheet__nextport">{nextPortLabel}</td>
               {selectCell(i, 'rt', RT_OPTIONS)}
               {dateCell(i, 'date')}
               {timeCell(i, 'time')}
+              <td
+                className="fv-tracksheet__num fv-tracksheet__calc"
+                title="Ship local time (from longitude). +1d / -1d marks a local date that differs from the UTC date."
+              >
+                {computeLt(r.date, r.time, r.lng)}
+              </td>
               <td className="fv-tracksheet__num fv-tracksheet__calc">
                 {n(i > 0 ? computeHrs(rows[i - 1], r) : null, 1)}
               </td>
               {textCell(i, 'lat')}
               {textCell(i, 'lng')}
 
-              {numCell(i, 'vlsfoRob', 2)}
-              {numCell(i, 'vlsfoBunkered', 0)}
-              {numCell(i, 'vlsfoCorrected', 0)}
-
-              {numCell(i, 'lsmgoRob', 1)}
-              {numCell(i, 'lsmgoBunkered', 0)}
-              {numCell(i, 'lsmgoCorrected', 0)}
-
-              {numCell(i, 'noneRob', 0)}
-              {numCell(i, 'noneBunkered', 0)}
-              {numCell(i, 'noneCorrected', 0)}
+              {fuelGroups.map((f) => (
+                <Fragment key={f.key}>
+                  {numCell(i, `${f.key}Rob` as NumField, f.robDigits)}
+                  {numCell(i, `${f.key}Bunkered` as NumField, 0)}
+                  {numCell(i, `${f.key}Corrected` as NumField, 0)}
+                  <td className="fv-tracksheet__num fv-tracksheet__calc">
+                    {n(computeCons(rows, i, f.key), f.robDigits)}
+                  </td>
+                </Fragment>
+              ))}
 
               {numCell(i, 'distR', 2)}
               {numCell(i, 'distO', 1)}
               {numCell(i, 'dtgO', 1)}
 
-              {numCell(i, 'avgSpeedO', 1)}
+              <td className="fv-tracksheet__num fv-tracksheet__calc">
+                {n(
+                  computeSpeed(r.distO, i > 0 ? computeHrs(rows[i - 1], r) : null),
+                  1,
+                )}
+              </td>
 
               {numCell(i, 'rpm', 2)}
               {numCell(i, 'enginePower', 1)}

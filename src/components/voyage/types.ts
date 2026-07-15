@@ -115,6 +115,15 @@ export interface VoyageView {
   clientEmailList: string;
   dailyFleetSummaryEmail: string;
   clientNotes: string;
+  // Joint nomination — the same vessel serviced for two clients. When enabled,
+  // the second client's details are captured below.
+  jointNomination: boolean;
+  client2: string;
+  clientType2: string;
+  price2: string;
+  pricingBasis2: string;
+  clientEmailList2: string;
+  dailyFleetSummaryEmail2: string;
 
   // 2. Vessel profile
   vesselType: string;

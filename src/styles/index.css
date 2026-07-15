@@ -47,6 +47,896 @@ a {
   flex-direction: column;
 }
 
+/* Fleet menu (far-left vessel list) ------------------------------------ */
+.fv-fleetmenu {
+  width: 250px;
+  flex: 0 0 250px;
+  background: #10192a;
+  border-right: 1px solid #2a3447;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  color: #e6edf3;
+}
+.fv-fleetmenu--collapsed {
+  width: 40px;
+  flex: 0 0 40px;
+  align-items: center;
+  padding-top: 8px;
+}
+.fv-fleetmenu__expand {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #2a3447;
+  background: #141c2b;
+  color: #c9d1d9;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fv-fleetmenu__expand:hover {
+  background: #2a3447;
+  color: #fff;
+}
+.fv-fleetmenu__head {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid #2a3447;
+}
+.fv-fleetmenu__module {
+  flex: 1;
+  min-width: 0;
+  background: #141c2b;
+  color: #fff;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.fv-fleetmenu__collapse {
+  width: 32px;
+  border: 1px solid #2a3447;
+  background: #141c2b;
+  color: #8b949e;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fv-fleetmenu__collapse:hover {
+  background: #2a3447;
+  color: #fff;
+}
+.fv-fleetmenu__filters {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+}
+.fv-fleetmenu__filters select {
+  flex: 1;
+  min-width: 0;
+  background: #141c2b;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 5px 6px;
+  font-size: 12px;
+}
+.fv-fleetmenu__tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 8px 8px;
+}
+.fv-fleetmenu__tab {
+  flex: 1;
+  padding: 5px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: #141c2b;
+  color: #8b949e;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fv-fleetmenu__tab--active {
+  background: #1559c4;
+  border-color: #1559c4;
+  color: #fff;
+}
+.fv-fleetmenu__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 8px 8px;
+  padding: 0 8px;
+  background: #141c2b;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  color: #8b949e;
+}
+.fv-fleetmenu__search input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-size: 12px;
+  padding: 6px 0;
+}
+.fv-fleetmenu__search input::placeholder {
+  color: #6e7681;
+}
+.fv-fleetmenu__list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 8px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.fv-fleetmenu__empty {
+  padding: 16px;
+  text-align: center;
+  color: #6e7681;
+  font-size: 12px;
+}
+.fv-fleetmenu__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid #1b2434;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: inherit;
+}
+.fv-fleetmenu__item:hover {
+  background: #172136;
+}
+.fv-fleetmenu__item--active {
+  background: #1b2740;
+  border-left-color: #58a6ff;
+}
+.fv-fleetmenu__item-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+.fv-fleetmenu__vessel {
+  font-weight: 600;
+  font-size: 13px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fv-fleetmenu__order {
+  font-size: 11px;
+  color: #8b949e;
+  flex: 0 0 auto;
+}
+.fv-fleetmenu__item-route {
+  font-size: 11px;
+  color: #c9d1d9;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fv-fleetmenu__item-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #8b949e;
+}
+.fv-fleetmenu__charter {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #d29922;
+}
+.fv-fleetmenu__badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.fv-fleetmenu__badge--active {
+  background: rgba(63, 185, 80, 0.18);
+  color: #3fb950;
+}
+.fv-fleetmenu__badge--complete {
+  background: rgba(88, 166, 255, 0.18);
+  color: #58a6ff;
+}
+.fv-fleetmenu__badge--closed {
+  background: rgba(139, 148, 158, 0.2);
+  color: #8b949e;
+}
+.fv-fleetmenu__footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px;
+  border-top: 1px solid #2a3447;
+  background: #141c2b;
+  flex-shrink: 0;
+}
+.fv-fleetmenu__footer--collapsed {
+  margin-top: auto;
+  flex-wrap: wrap;
+  padding: 6px 3px;
+}
+.fv-appctrls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Fleet menu — light theme */
+.fv-light .fv-fleetmenu {
+  background: #ffffff;
+  border-right: 1px solid #d6dde7;
+  color: #1b2330;
+}
+.fv-light .fv-fleetmenu__head,
+.fv-light .fv-fleetmenu__item {
+  border-color: #e3e8f0;
+}
+.fv-light .fv-fleetmenu__module,
+.fv-light .fv-fleetmenu__collapse,
+.fv-light .fv-fleetmenu__expand,
+.fv-light .fv-fleetmenu__filters select,
+.fv-light .fv-fleetmenu__tab,
+.fv-light .fv-fleetmenu__search {
+  background: #f3f6fb;
+  border-color: #d6dde7;
+  color: #1b2330;
+}
+.fv-light .fv-fleetmenu__module {
+  color: #0b1320;
+}
+.fv-light .fv-fleetmenu__tab--active {
+  background: #1559c4;
+  border-color: #1559c4;
+  color: #fff;
+}
+.fv-light .fv-fleetmenu__search input {
+  color: #0b1320;
+}
+.fv-light .fv-fleetmenu__item:hover {
+  background: #eef2f8;
+}
+.fv-light .fv-fleetmenu__item--active {
+  background: #dce7fb;
+  border-left-color: #1f6feb;
+}
+.fv-light .fv-fleetmenu__vessel {
+  color: #0b1320;
+}
+.fv-light .fv-fleetmenu__item-route {
+  color: #3f4a5a;
+}
+.fv-light .fv-fleetmenu__footer {
+  background: #f3f6fb;
+  border-color: #d6dde7;
+}
+
+/* Chartering — voyage estimation ------------------------------------- */
+.fv-chest {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: #0e1626;
+  color: #e6edf3;
+}
+.fv-chest__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #2a3447;
+}
+.fv-chest__heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.fv-chest__heading h1 {
+  margin: 0;
+  font-size: 18px;
+}
+.fv-chest__heading-icon {
+  color: #f0b429;
+}
+.fv-chest__toolbar {
+  display: flex;
+  gap: 8px;
+}
+.fv-chest__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #141c2b;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.fv-chest__btn:hover {
+  background: #2a3447;
+  border-color: #58a6ff;
+}
+.fv-chest__wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 24px;
+}
+.fv-chest__table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.fv-chest__corner {
+  min-width: 210px;
+  background: #0e1626;
+}
+.fv-chest__colhead {
+  position: relative;
+  min-width: 180px;
+  background: #141c2b;
+  border: 1px solid #2a3447;
+  padding: 6px 28px 6px 8px;
+  text-align: left;
+}
+.fv-chest__collabel {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+}
+.fv-chest__colidx {
+  position: absolute;
+  right: 26px;
+  top: 6px;
+  font-size: 10px;
+  color: #6e7681;
+}
+.fv-chest__remove {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: #8b949e;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.fv-chest__remove:hover {
+  background: #3a2430;
+  color: #ff7b72;
+}
+.fv-chest__rowlabel {
+  text-align: left;
+  font-weight: 500;
+  color: #c9d1d9;
+  background: #0e1626;
+  border: 1px solid #1b2434;
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+.fv-chest__cell {
+  border: 1px solid #1b2434;
+  padding: 0;
+  background: #10192a;
+}
+.fv-chest__in-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+}
+.fv-chest__affix {
+  color: #6e7681;
+  font-size: 11px;
+}
+.fv-chest__in {
+  width: 100%;
+  min-width: 60px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-size: 13px;
+  padding: 5px 2px;
+}
+.fv-chest__in--num {
+  text-align: right;
+}
+.fv-chest__section th {
+  text-align: left;
+  background: #1b2740;
+  color: #9fd0ff;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  padding: 6px 8px;
+  border: 1px solid #2a3447;
+}
+.fv-chest__section--result th {
+  background: #17301f;
+  color: #6fdc8c;
+}
+.fv-chest__out {
+  text-align: right;
+  padding: 5px 8px;
+  color: #e6edf3;
+  font-variant-numeric: tabular-nums;
+}
+.fv-chest__row--strong .fv-chest__rowlabel,
+.fv-chest__row--strong .fv-chest__out {
+  font-weight: 700;
+  background: #131d2e;
+}
+.fv-chest__out--pos {
+  color: #3fb950;
+}
+.fv-chest__out--neg {
+  color: #ff7b72;
+}
+/* Chartering estimation — light theme */
+.fv-light .fv-chest {
+  background: #eef1f6;
+  color: #1b2330;
+}
+.fv-light .fv-chest__header {
+  border-bottom-color: #d6dde7;
+}
+.fv-light .fv-chest__btn {
+  background: #ffffff;
+  color: #1b2330;
+  border-color: #d6dde7;
+}
+.fv-light .fv-chest__corner,
+.fv-light .fv-chest__rowlabel {
+  background: #eef1f6;
+  color: #3f4a5a;
+  border-color: #e3e8f0;
+}
+.fv-light .fv-chest__colhead {
+  background: #ffffff;
+  border-color: #d6dde7;
+}
+.fv-light .fv-chest__collabel {
+  color: #0b1320;
+}
+.fv-light .fv-chest__cell {
+  background: #ffffff;
+  border-color: #e3e8f0;
+}
+.fv-light .fv-chest__in {
+  color: #0b1320;
+}
+.fv-light .fv-chest__section th {
+  background: #dce7fb;
+  color: #1559c4;
+  border-color: #d6dde7;
+}
+.fv-light .fv-chest__section--result th {
+  background: #dcf5e3;
+  color: #1a7f37;
+}
+.fv-light .fv-chest__row--strong .fv-chest__rowlabel,
+.fv-light .fv-chest__row--strong .fv-chest__out {
+  background: #eaf0f8;
+}
+.fv-light .fv-chest__out {
+  color: #1b2330;
+}
+
+/* ============================================================
+   Chartering — Voyage Estimation (spreadsheet layout, fv-est2)
+   ============================================================ */
+.fv-est2 {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: #0e1626;
+  color: #e6edf3;
+  font-size: 12px;
+}
+.fv-est2__tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 6px 10px 0;
+  background: #0b111d;
+  border-bottom: 1px solid #2a3447;
+}
+.fv-est2__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #141c2b;
+  color: #9aa6b6;
+  border: 1px solid #2a3447;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.fv-est2__tab--active {
+  background: #1b2740;
+  color: #fff;
+  border-color: #3d5c8f;
+}
+.fv-est2__tab--add {
+  padding: 6px 10px;
+  color: #6fdc8c;
+}
+.fv-est2__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fv-est2__panel {
+  background: #10192a;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.fv-est2__panel--flex {
+  flex: 1;
+  min-width: 0;
+}
+.fv-est2__panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: linear-gradient(#1b2740, #16203a);
+  border-bottom: 1px solid #2a3447;
+}
+.fv-est2__panel-title {
+  font-weight: 700;
+  color: #9fd0ff;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.fv-est2__panel-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+.fv-est2__update {
+  margin-left: auto;
+  color: #6e7681;
+  font-size: 11px;
+}
+.fv-est2__muted {
+  color: #6e7681;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.fv-est2__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #141c2b;
+  color: #c9d1d9;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 4px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.fv-est2__chip:hover {
+  border-color: #58a6ff;
+}
+.fv-est2__chip--on {
+  background: #1559c4;
+  color: #fff;
+  border-color: #1559c4;
+}
+.fv-est2__mini {
+  background: #141c2b;
+  color: #c9d1d9;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+/* Vessel Particular */
+.fv-est2__vessel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 10px;
+  align-items: flex-start;
+}
+.fv-est2__vp-speed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fv-est2__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #c9d1d9;
+}
+.fv-est2__vp-name {
+  font-weight: 700;
+  color: #fff;
+}
+
+/* Generic estimation tables */
+.fv-est2 table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.fv-est2__vp-main,
+.fv-est2__vp-spd,
+.fv-est2__vp-cons {
+  width: auto;
+}
+.fv-est2 th {
+  background: #16203a;
+  color: #9fd0ff;
+  font-weight: 600;
+  text-align: left;
+  padding: 4px 8px;
+  border: 1px solid #2a3447;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.fv-est2 td {
+  padding: 4px 8px;
+  border: 1px solid #223049;
+  color: #dfe6ee;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.fv-est2__r {
+  text-align: right;
+}
+.fv-est2__num {
+  text-align: center;
+  color: #6e7681;
+  width: 28px;
+}
+.fv-est2__edit {
+  background: #182a1c;
+  color: #d7ffe0;
+}
+.fv-est2__unit {
+  color: #6e7681;
+  font-size: 10px;
+}
+
+/* Grid wrappers scroll horizontally on small screens */
+.fv-est2__gridwrap {
+  overflow-x: auto;
+}
+.fv-est2__grid {
+  font-size: 11px;
+}
+.fv-est2__grid tbody tr:hover td {
+  background: #17233a;
+}
+.fv-est2__grid tbody tr:hover .fv-est2__edit {
+  background: #1e3524;
+}
+.fv-est2__empty-row td {
+  height: 22px;
+}
+.fv-est2__total td {
+  background: #14203a;
+  font-weight: 700;
+  color: #fff;
+  border-top: 2px solid #3d5c8f;
+}
+.fv-est2__grid--bunker {
+  margin: 0;
+}
+
+/* Port rotation extras */
+.fv-est2__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #c9d1d9;
+}
+.fv-est2__portsum {
+  width: 100%;
+  color: #9aa6b6;
+  font-size: 11px;
+  padding-top: 4px;
+}
+.fv-est2__portfoot {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  border-top: 1px solid #2a3447;
+  flex-wrap: wrap;
+}
+.fv-est2__portfoot-right {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Bottom 3-panel row */
+.fv-est2__bottom {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+.fv-est2__kv2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 18px;
+  padding: 10px;
+}
+.fv-est2__kv-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px;
+  border-bottom: 1px solid #1b2434;
+}
+.fv-est2__kv-key {
+  color: #9aa6b6;
+}
+.fv-est2__kv-val {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.fv-est2__kv-row--profit {
+  background: #17301f;
+  border-radius: 4px;
+  border-bottom: none;
+  margin-top: 4px;
+  padding: 6px;
+}
+.fv-est2__kv-row--profit .fv-est2__kv-key,
+.fv-est2__kv-row--profit .fv-est2__kv-val {
+  color: #6fdc8c;
+  font-weight: 800;
+  font-size: 13px;
+}
+
+/* fv-est2 — light theme */
+.fv-light .fv-est2 {
+  background: #eef1f6;
+  color: #1b2330;
+}
+.fv-light .fv-est2__tabs {
+  background: #e2e7ef;
+  border-bottom-color: #d6dde7;
+}
+.fv-light .fv-est2__tab {
+  background: #f4f6fa;
+  color: #556;
+  border-color: #d6dde7;
+}
+.fv-light .fv-est2__tab--active {
+  background: #ffffff;
+  color: #0b1320;
+  border-color: #9dbdf0;
+}
+.fv-light .fv-est2__panel {
+  background: #ffffff;
+  border-color: #d6dde7;
+}
+.fv-light .fv-est2__panel-head {
+  background: linear-gradient(#eaf1fc, #dfe9fb);
+  border-bottom-color: #d6dde7;
+}
+.fv-light .fv-est2__panel-title {
+  color: #1559c4;
+}
+.fv-light .fv-est2__chip {
+  background: #f4f6fa;
+  color: #354056;
+  border-color: #d6dde7;
+}
+.fv-light .fv-est2__chip--on {
+  background: #1559c4;
+  color: #fff;
+  border-color: #1559c4;
+}
+.fv-light .fv-est2__mini {
+  background: #ffffff;
+  color: #354056;
+  border-color: #d6dde7;
+}
+.fv-light .fv-est2 th {
+  background: #eaf1fc;
+  color: #1559c4;
+  border-color: #d6dde7;
+}
+.fv-light .fv-est2 td {
+  color: #1b2330;
+  border-color: #e3e8f0;
+}
+.fv-light .fv-est2__vp-name {
+  color: #0b1320;
+}
+.fv-light .fv-est2__edit {
+  background: #fdf7dc;
+  color: #6b5a12;
+}
+.fv-light .fv-est2__grid tbody tr:hover td {
+  background: #f3f6fc;
+}
+.fv-light .fv-est2__grid tbody tr:hover .fv-est2__edit {
+  background: #f7efc9;
+}
+.fv-light .fv-est2__total td {
+  background: #eaf0f8;
+  color: #0b1320;
+  border-top-color: #9dbdf0;
+}
+.fv-light .fv-est2__kv-row {
+  border-bottom-color: #e3e8f0;
+}
+.fv-light .fv-est2__kv-key {
+  color: #556074;
+}
+.fv-light .fv-est2__kv-val {
+  color: #0b1320;
+}
+.fv-light .fv-est2__kv-row--profit {
+  background: #dcf5e3;
+}
+.fv-light .fv-est2__kv-row--profit .fv-est2__kv-key,
+.fv-light .fv-est2__kv-row--profit .fv-est2__kv-val {
+  color: #1a7f37;
+}
+.fv-light .fv-est2__muted,
+.fv-light .fv-est2__update,
+.fv-light .fv-est2__portsum {
+  color: #6b7688;
+}
+
 #notifications-header nav ul {
   list-style: none;
   margin: 0;
@@ -123,10 +1013,26 @@ a {
 
 /* The portal stacks the page/map on top of the bottom (tracksheet) panel.
    The page content fills the space above the panel and shrinks when the
-   panel is expanded, so the panel sits below it instead of overlaying it. */
-#portal.portal-container > *:not(.fv-bottom-panel) {
+   panel is expanded, so the panel sits below it instead of overlaying it.
+   The module bar is a fixed-height strip and is excluded from stretching. */
+#portal.portal-container > *:not(.fv-bottom-panel):not(.fv-modulebar) {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* Module bar — vessel search + leg selector at the top of the module. */
+.fv-modulebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  background: #10192a;
+  border-bottom: 1px solid #2a3447;
+}
+.fv-light .fv-modulebar {
+  background: #f3f6fb;
+  border-bottom: 1px solid #d6dde7;
 }
 
 .fv-portal-selector {
@@ -737,6 +1643,76 @@ a {
   font-size: 12px;
   color: #8b949e;
   text-transform: lowercase;
+}
+
+/* Vessel search input + suggestions dropdown. */
+.fv-topnav__vessel-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #141c2b;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  padding: 0 8px;
+  min-width: 220px;
+}
+
+.fv-topnav__vessel-search-icon {
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.fv-topnav__vessel-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 7px 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.fv-topnav__vessel-input::placeholder {
+  color: #6e7681;
+  font-weight: 400;
+}
+
+.fv-topnav__vessel-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 240px;
+  background: #1b2434;
+  border: 1px solid #2a3447;
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  z-index: 1200;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.fv-topnav__vessel-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #e6edf3;
+  border-left: 3px solid transparent;
+  white-space: nowrap;
+}
+
+.fv-topnav__vessel-item:hover {
+  background: #2a3447;
+}
+
+.fv-topnav__vessel-item--active {
+  background: #243049;
+  border-left-color: #58a6ff;
 }
 
 .fv-topnav__voyage {
@@ -10605,6 +11581,30 @@ select.fv-voyage__input {
 }
 .fv-light .fv-topnav__voyage-button:hover {
   background: #e7edf6;
+}
+.fv-light .fv-topnav__vessel-search {
+  background: #f3f6fb;
+  border: 1px solid #d6dde7;
+}
+.fv-light .fv-topnav__vessel-input {
+  color: #0b1320;
+}
+.fv-light .fv-topnav__vessel-input::placeholder {
+  color: #98a2b0;
+}
+.fv-light .fv-topnav__vessel-list {
+  background: #ffffff;
+  border: 1px solid #d6dde7;
+}
+.fv-light .fv-topnav__vessel-item {
+  color: #1b2330;
+}
+.fv-light .fv-topnav__vessel-item:hover {
+  background: #e7edf6;
+}
+.fv-light .fv-topnav__vessel-item--active {
+  background: #dce7fb;
+  border-left-color: #1f6feb;
 }
 .fv-light .fv-topnav__voyage-route,
 .fv-light .fv-topnav__voyage-item-route {

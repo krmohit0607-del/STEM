@@ -6,6 +6,7 @@ import {
   ensureLiveData,
   sampleLiveField,
   getLiveDataTime,
+  MAX_FORECAST_HOURS,
   type LatLngBounds,
 } from '../data/openMeteo';
 import {
@@ -13,7 +14,11 @@ import {
   setMapShipMarkers,
   setMapPlannedColor,
   setMapRouteWaypoints,
+  setSimWeatherHour,
+  requestRouteEdit,
   useActiveSimRoute,
+  useEditCompareRoute,
+  useRouteEditActive,
 } from '../data/routeSimulatorStore';
 import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute } from '../data/optimizationStore';
 import { computeRouteMetrics, DEFAULT_MARKET_FACTORS, type RouteMetrics } from '../data/routeMetrics';
@@ -187,6 +192,37 @@ function samplePath(
   return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
 }
 
+/**
+ * Position along `path` at a given elapsed voyage time, using a parallel
+ * cumulative-hours array (`timeHours`). This advances the vessel by time so
+ * each leg is sailed at its own planned speed. Falls back to `null` when no
+ * timing profile is available (caller then interpolates by path fraction).
+ */
+function positionAtHours(
+  path: Array<[number, number]>,
+  timeHours: number[] | undefined,
+  hours: number,
+): [number, number] | null {
+  const n = path.length;
+  if (!timeHours || timeHours.length !== n || n === 0) return null;
+  const total = timeHours[n - 1];
+  if (hours <= 0) return path[0];
+  if (hours >= total) return path[n - 1];
+  let i = 0;
+  while (i < n - 1 && timeHours[i + 1] < hours) i += 1;
+  const t0 = timeHours[i];
+  const t1 = timeHours[i + 1];
+  const f = t1 > t0 ? (hours - t0) / (t1 - t0) : 0;
+  const [lat0, lon0] = path[i];
+  const [lat1, lon1] = path[i + 1];
+  return [lat0 * (1 - f) + lat1 * f, lon0 * (1 - f) + lon1 * f];
+}
+
+/** Clamp an hour offset into the live-forecast window as a whole number. */
+function clampHour(hours: number): number {
+  return Math.max(0, Math.min(MAX_FORECAST_HOURS, Math.round(hours)));
+}
+
 // --- Compass / units ---------------------------------------------------------
 
 const COMPASS8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -282,9 +318,10 @@ function readoutAt(
   pos: [number, number],
   factor: WeatherFactorDef,
   bounds: LatLngBounds | null,
+  hour = 0,
 ): { mag: number; dir: number | null } {
   if (bounds) {
-    const live = sampleLiveField(pos[0], pos[1], factor.liveId, bounds, 0);
+    const live = sampleLiveField(pos[0], pos[1], factor.liveId, bounds, hour);
     if (live && Number.isFinite(live.magnitude)) {
       return { mag: Math.max(0, live.magnitude), dir: live.directionDeg };
     }
@@ -520,6 +557,8 @@ interface SimRoute {
   path: Array<[number, number]>;
   distanceNm: number;
   hours: number;
+  /** Cumulative hours to each path vertex (per-leg speed); active route only. */
+  timeHours?: number[];
   active: boolean;
   sentAt: string | null;
   /** Set for system-generated optimized routes appended after saved routes. */
@@ -536,6 +575,8 @@ export function RouteSimulatorPanel() {
   };
 
   const activeRoute = useActiveSimRoute();
+  const routeEditActive = useRouteEditActive();
+  const editCompareRoute = useEditCompareRoute();
 
   // System-generated optimized routes (from the route editor's Optimize run),
   // appended after the saved routes in the table + chart + map.
@@ -583,13 +624,37 @@ export function RouteSimulatorPanel() {
   const simRoutes = useMemo<SimRoute[]>(() => {
     const base: Array<Omit<SimRoute, 'color' | 'active'>> = [];
     if (activeRoute && activeRoute.path.length >= 2) {
+      const profile = activeRoute.timeHours;
+      const plannedHours =
+        profile && profile.length > 0
+          ? profile[profile.length - 1]
+          : transitHours(activeRoute.distanceNm);
       base.push({
         id: activeRoute.id,
         savedId: null,
         label: activeRoute.label,
         path: activeRoute.path,
         distanceNm: activeRoute.distanceNm,
-        hours: transitHours(activeRoute.distanceNm),
+        hours: plannedHours,
+        timeHours: profile,
+        sentAt: null,
+      });
+    }
+    // While editing, the pre-edit original is shown as its own comparison row.
+    if (editCompareRoute && editCompareRoute.path.length >= 2) {
+      const oProfile = editCompareRoute.timeHours;
+      const oHours =
+        oProfile && oProfile.length > 0
+          ? oProfile[oProfile.length - 1]
+          : transitHours(editCompareRoute.distanceNm);
+      base.push({
+        id: editCompareRoute.id,
+        savedId: null,
+        label: editCompareRoute.label,
+        path: editCompareRoute.path,
+        distanceNm: editCompareRoute.distanceNm,
+        hours: oHours,
+        timeHours: oProfile,
         sentAt: null,
       });
     }
@@ -642,7 +707,7 @@ export function RouteSimulatorPanel() {
         metrics: o.metrics,
       }));
     return [...mapped, ...optimized];
-  }, [activeRoute, savedRoutes, activeRouteId, optimizedResults]);
+  }, [activeRoute, editCompareRoute, savedRoutes, activeRouteId, optimizedResults]);
 
   const hasRoutes = simRoutes.length > 0;
 
@@ -751,6 +816,11 @@ export function RouteSimulatorPanel() {
 
   const simBaseDate = useMemo(() => {
     void liveVersion;
+    // Prefer the voyage's ETD so the timeline starts when the vessel departs.
+    if (activeRoute?.etdIso) {
+      const d = new Date(activeRoute.etdIso);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
     if (simBounds) {
       const iso = getLiveDataTime(simFactorDef.liveId, simBounds, 0);
       if (iso) {
@@ -762,7 +832,7 @@ export function RouteSimulatorPanel() {
     const now = new Date();
     now.setUTCMinutes(0, 0, 0);
     return now;
-  }, [simBounds, simFactorDef.liveId, liveVersion]);
+  }, [activeRoute?.etdIso, simBounds, simFactorDef.liveId, liveVersion]);
 
   const simWeather = useMemo(() => {
     const series = visibleRoutes.map((r) => {
@@ -771,7 +841,9 @@ export function RouteSimulatorPanel() {
         const f = i / SIM_WEATHER_SAMPLES;
         points.push({
           t: f * r.hours,
-          w: weatherAt(r.path, f, simFactorDef, simBounds, 0),
+          // Forecast the vessel will actually meet at that point: sampled at the
+          // time the vessel reaches it (fraction of its own transit time).
+          w: weatherAt(r.path, f, simFactorDef, simBounds, clampHour(f * r.hours)),
         });
       }
       return { id: r.id, color: r.color, points };
@@ -837,12 +909,28 @@ export function RouteSimulatorPanel() {
   const simElapsedHours = simClock * simMaxHours;
   const cursorDate = new Date(simBaseDate.getTime() + simElapsedHours * 3600_000);
 
+  /**
+   * Vessel position on a route after `hours` of sailing. Uses the per-leg
+   * timing profile (so each leg is sailed at its planned speed) when available,
+   * otherwise falls back to constant-speed interpolation by path fraction.
+   */
+  const posAtHours = (r: SimRoute, hours: number): [number, number] => {
+    const byTime = positionAtHours(r.path, r.timeHours, hours);
+    if (byTime) return byTime;
+    const frac = r.hours > 0 ? Math.min(1, hours / r.hours) : 0;
+    return samplePath(r.path, frac * (r.path.length - 1));
+  };
+
   /** Per-route fraction sailed + current-cursor weather on the chart factor. */
   const simLive = useMemo(() => {
     const byId: Record<string, { frac: number; weather: number }> = {};
     simRoutes.forEach((r) => {
       const frac = r.hours > 0 ? Math.min(1, simElapsedHours / r.hours) : 0;
-      byId[r.id] = { frac, weather: weatherAt(r.path, frac, simFactorDef, simBounds, 0) };
+      const elapsed = Math.min(simElapsedHours, r.hours);
+      byId[r.id] = {
+        frac,
+        weather: weatherAt(r.path, frac, simFactorDef, simBounds, clampHour(elapsed)),
+      };
     });
     return byId;
   }, [simRoutes, simElapsedHours, simFactorDef, simBounds, liveVersion]);
@@ -853,14 +941,14 @@ export function RouteSimulatorPanel() {
   const readout = useMemo(() => {
     void liveVersion;
     if (!selectedRoute) return null;
-    const frac = simLive[selectedRoute.id]?.frac ?? 0;
-    const lastIdx = selectedRoute.path.length - 1;
-    const pos = samplePath(selectedRoute.path, frac * lastIdx);
+    const elapsed = Math.min(simElapsedHours, selectedRoute.hours);
+    const pos = posAtHours(selectedRoute, elapsed);
     const heading = bearingDeg(
-      samplePath(selectedRoute.path, Math.max(0, frac * lastIdx - 0.5)),
-      samplePath(selectedRoute.path, Math.min(lastIdx, frac * lastIdx + 0.5)),
+      posAtHours(selectedRoute, Math.max(0, elapsed - 0.5)),
+      posAtHours(selectedRoute, Math.min(selectedRoute.hours, elapsed + 0.5)),
     );
-    const get = (id: WeatherFactorId) => readoutAt(pos, WEATHER_FACTOR_BY_ID[id], simBounds);
+    const get = (id: WeatherFactorId) =>
+      readoutAt(pos, WEATHER_FACTOR_BY_ID[id], simBounds, clampHour(elapsed));
     return {
       pos,
       heading,
@@ -869,7 +957,8 @@ export function RouteSimulatorPanel() {
       wind: get('wind'),
       current: get('current'),
     };
-  }, [selectedRoute, simLive, simBounds, liveVersion]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRoute, simLive, simElapsedHours, simBounds, liveVersion]);
 
   // Vessel markers at each route's current simulated position, mirrored onto
   // the Route Explorer map so the live position is visible while simulating.
@@ -877,22 +966,22 @@ export function RouteSimulatorPanel() {
     () =>
       mapRoutes.map((r) => {
         const frac = simLive[r.id]?.frac ?? 0;
-        const lastIdx = r.path.length - 1;
-        const p = frac * lastIdx;
+        const elapsed = Math.min(simElapsedHours, r.hours);
         return {
           id: r.id,
           color: r.color,
-          pos: samplePath(r.path, p),
+          pos: posAtHours(r, elapsed),
           heading: bearingDeg(
-            samplePath(r.path, Math.max(0, p - 0.5)),
-            samplePath(r.path, Math.min(lastIdx, p + 0.5)),
+            posAtHours(r, Math.max(0, elapsed - 0.5)),
+            posAtHours(r, Math.min(r.hours, elapsed + 0.5)),
           ),
           label: r.label,
           sublabel: `${Math.round(frac * 100)}%`,
           active: r.id === selectedRouteId,
         };
       }),
-    [mapRoutes, simLive, selectedRouteId],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mapRoutes, simLive, simElapsedHours, selectedRouteId],
   );
 
   useEffect(() => {
@@ -900,6 +989,21 @@ export function RouteSimulatorPanel() {
   }, [shipMarkers]);
 
   useEffect(() => () => setMapShipMarkers([]), []);
+
+  // Drive the map weather layers from the simulation time while playing (or
+  // scrubbing), so the on-map weather advances in step with the vessel; hand
+  // control back to the manual weather slider when the simulation is idle.
+  const lastSimHourRef = useRef<number | null>(null);
+  useEffect(() => {
+    const active = simPlaying || simClock > 0;
+    const next = active ? clampHour(simElapsedHours) : null;
+    if (next !== lastSimHourRef.current) {
+      lastSimHourRef.current = next;
+      setSimWeatherHour(next);
+    }
+  }, [simPlaying, simClock, simElapsedHours]);
+
+  useEffect(() => () => setSimWeatherHour(null), []);
 
   // --- Drag-to-scrub the blue time cursor on the chart -----------------------
   const plotAreaRef = useRef<HTMLDivElement>(null);
@@ -1339,6 +1443,29 @@ export function RouteSimulatorPanel() {
                           aria-label={t('splitRoute', 'Split route')}>
                           <i className="fas fa-scissors" aria-hidden="true" />
                         </button>
+                        {routeEditActive ? (
+                          <>
+                            <button type="button" className="fv-sim2__routes-btn fv-sim2__routes-btn--on"
+                              onClick={() => requestRouteEdit('activate')}
+                              title={t('activateEditHint', 'Keep this edited route')}
+                              aria-label={t('activate', 'Activate')}>
+                              <i className="fas fa-circle-check" aria-hidden="true" />
+                            </button>
+                            <button type="button" className="fv-sim2__routes-btn"
+                              onClick={() => requestRouteEdit('discard')}
+                              title={t('discardEditHint', 'Discard edits and restore the original route')}
+                              aria-label={t('discard', 'Discard')}>
+                              <i className="fas fa-rotate-left" aria-hidden="true" />
+                            </button>
+                          </>
+                        ) : (
+                          <button type="button" className="fv-sim2__routes-btn"
+                            onClick={() => requestRouteEdit('start')}
+                            title={t('editRouteHint', 'Duplicate the route and edit the copy')}
+                            aria-label={t('duplicateEdit', 'Duplicate & Edit')}>
+                            <i className="fas fa-pen-to-square" aria-hidden="true" />
+                          </button>
+                        )}
                         <input
                           ref={importInputRef}
                           type="file"
