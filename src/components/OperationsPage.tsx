@@ -774,70 +774,132 @@ function VoyageDetailsTab({ recap, set }: { recap: Recap; set: (k: keyof Recap, 
 /* ------------------------------------------------------------ Live P&L tab */
 
 function PnlTab({ recap, set, pnl }: { recap: Recap; set: (k: keyof Recap, v: string) => void; pnl: Pnl }) {
-  const est = { revenue: pnl.revenue * 0.98, expenses: pnl.expenses * 0.96 };
-  const estProfit = est.revenue - est.expenses;
-  return (
-    <div className="fv-ops__grid2">
-      <div className="fv-ops__col">
-        <div className="fv-ops__kpis">
-          <Kpi label="Revenue" value={money(pnl.revenue)} />
-          <Kpi label="Expenses" value={money(pnl.expenses)} />
-          <Kpi label="Profit" value={money(pnl.profit)} tone={pnl.profit >= 0 ? 'good' : 'bad'} />
-          <Kpi label="Daily Profit" value={money(pnl.dailyProfit)} tone={pnl.dailyProfit >= 0 ? 'good' : 'bad'} />
-          <Kpi label="TCE / Day" value={money(pnl.tce)} />
-          <Kpi label="Voyage Days" value={fmt(pnl.days, 2)} />
-        </div>
+  const kvIn = (label: string, key: keyof Recap, pct?: boolean) => (
+    <li className="fv-ops__kv-line">
+      <span>{label}</span>
+      <span className="fv-ops__kv-edit">
+        <input value={recap[key]} onChange={(e) => set(key, e.target.value)} />
+        {pct && <em>%</em>}
+      </span>
+    </li>
+  );
+  const kvOut = (label: string, value: string, strong?: boolean) => (
+    <li className={`fv-ops__kv-line${strong ? ' fv-ops__kv-line--sub' : ''}`}>
+      <span>{label}</span>
+      <span className="fv-ops__kv-out">{value}</span>
+    </li>
+  );
 
-        <Card title="Profit &amp; Loss Breakdown" icon="fa-sack-dollar">
+  return (
+    <div className="fv-ops__col">
+      {/* KPI cards */}
+      <div className="fv-ops__kpis">
+        <Kpi label="Revenue" value={money(pnl.revenue)} />
+        <Kpi label="Expenses" value={money(pnl.totalExpense)} />
+        <Kpi label="Profit" value={money(pnl.profit)} tone={pnl.profit >= 0 ? 'good' : 'bad'} />
+        <Kpi label="Profit / Day" value={money(pnl.dailyProfit)} tone={pnl.dailyProfit >= 0 ? 'good' : 'bad'} />
+        <Kpi label="TCE / Day" value={money(pnl.tce)} />
+        <Kpi label="Voyage Days" value={fmt(pnl.days, 2)} />
+        <Kpi label="Hire Cost" value={money(pnl.totalHire)} />
+        <Kpi label="Freight" value={money(pnl.freight)} />
+        <Kpi label="Bunker Cost" value={money(pnl.bunkerCost)} />
+        <Kpi label="Port Cost" value={money(pnl.portCost)} />
+      </div>
+
+      {/* Three-panel estimation-style row with ACTUAL figures */}
+      <div className="fv-ops__panels3">
+        {/* Operation Expense */}
+        <Card title="Operation Expense (Actual)" icon="fa-file-invoice-dollar">
+          <div className="fv-ops__kv2">
+            <ul className="fv-ops__kv-list">
+              {kvIn('Port DA — Load', 'portDaLoad')}
+              {kvIn('Port DA — Disch', 'portDaDisch')}
+              {kvIn('C.V.E.', 'cve')}
+            </ul>
+            <ul className="fv-ops__kv-list">
+              {kvIn('ILOHC', 'ilohc')}
+              {kvOut('Bunker Expense', money(pnl.bunkerCost))}
+              {kvIn('Other', 'otherCost')}
+            </ul>
+          </div>
+          {kvOut('Total Operation Expense', money(pnl.opExpense), true)}
+        </Card>
+
+        {/* Bunker Expense */}
+        <Card title="Bunker Expense (Actual)" icon="fa-gas-pump">
           <table className="fv-ops__table">
+            <thead>
+              <tr>
+                <th>Grade</th>
+                <th className="fv-ops__r">Price / MT</th>
+                <th className="fv-ops__r">Consumed</th>
+                <th className="fv-ops__r">Expense</th>
+              </tr>
+            </thead>
             <tbody>
-              <tr className="fv-ops__row-group"><td colSpan={2}>Revenue</td></tr>
-              <tr><td>Freight ({fmt(pnl.qty, 0)} MT × {recap.freightPerMt})</td><td className="fv-ops__r">{money(pnl.freightRevenue)}</td></tr>
-              <tr><td>Demurrage / Despatch</td><td className="fv-ops__r">{money(pnl.demDespatch)}</td></tr>
-              <tr><td>Misc Income</td><td className="fv-ops__r">{money(pnl.miscIncome)}</td></tr>
-              <tr className="fv-ops__row-sub"><td>Total Revenue</td><td className="fv-ops__r">{money(pnl.revenue)}</td></tr>
-              <tr className="fv-ops__row-group"><td colSpan={2}>Expenses</td></tr>
-              <tr><td>Hire ({fmt(pnl.days, 2)} d × {recap.hirePerDay})</td><td className="fv-ops__r">{money(pnl.hireGross)}</td></tr>
-              <tr><td>Less Add. Comm / Brokerage</td><td className="fv-ops__r fv-ops__pos">-{money(pnl.hireDeductions)}</td></tr>
-              <tr><td>C/V/E ({recap.cve} × months)</td><td className="fv-ops__r">{money(pnl.cveTotal)}</td></tr>
-              <tr><td>ILOHC</td><td className="fv-ops__r">{money(pnl.ilohc)}</td></tr>
-              <tr><td>Bunkers</td><td className="fv-ops__r">{money(pnl.bunkerCost)}</td></tr>
-              <tr><td>Port DA (Load + Disch)</td><td className="fv-ops__r">{money(pnl.portCost)}</td></tr>
-              <tr><td>Other</td><td className="fv-ops__r">{money(pnl.otherCost)}</td></tr>
-              <tr className="fv-ops__row-sub"><td>Total Expenses</td><td className="fv-ops__r">{money(pnl.expenses)}</td></tr>
-              <tr className={`fv-ops__row-profit${pnl.profit < 0 ? ' fv-ops__row-loss' : ''}`}>
-                <td>VOYAGE RESULT</td><td className="fv-ops__r">{money(pnl.profit)}</td>
+              <tr>
+                <td>FO (VLSFO)</td>
+                <td className="fv-ops__r"><input className="fv-ops__cell-num" value={recap.foPrice} onChange={(e) => set('foPrice', e.target.value)} /></td>
+                <td className="fv-ops__r"><input className="fv-ops__cell-num" value={recap.foCons} onChange={(e) => set('foCons', e.target.value)} /></td>
+                <td className="fv-ops__r fv-ops__calc">{fmt(pnl.foExp)}</td>
+              </tr>
+              <tr>
+                <td>DO (MGO)</td>
+                <td className="fv-ops__r"><input className="fv-ops__cell-num" value={recap.doPrice} onChange={(e) => set('doPrice', e.target.value)} /></td>
+                <td className="fv-ops__r"><input className="fv-ops__cell-num" value={recap.doCons} onChange={(e) => set('doCons', e.target.value)} /></td>
+                <td className="fv-ops__r fv-ops__calc">{fmt(pnl.doExp)}</td>
               </tr>
             </tbody>
+            <tfoot>
+              <tr className="fv-ops__row-sub"><td colSpan={3}>Total Bunker Expense</td><td className="fv-ops__r">{fmt(pnl.bunkerCost)}</td></tr>
+            </tfoot>
           </table>
+          <p className="fv-ops__hint">Consumption &amp; prices come from the vessel reports / bunker invoices.</p>
+        </Card>
+
+        {/* Result */}
+        <Card title="Result (Actual)" icon="fa-chart-line">
+          <div className="fv-ops__kv2">
+            <ul className="fv-ops__kv-list">
+              {kvIn('Hire / Day', 'hirePerDay')}
+              {kvIn('Add Comm.', 'adcom', true)}
+              {kvOut('Net Hire / Day', money(pnl.netHirePerDay))}
+              {kvOut('C / Base (TCE)', money(pnl.tce))}
+            </ul>
+            <ul className="fv-ops__kv-list">
+              {kvOut('Revenue', money(pnl.revenue))}
+              {kvOut('Op. Expense', money(pnl.opExpense))}
+              {kvOut('Op. Profit', money(pnl.opProfit), true)}
+              {kvOut('Total Hire', money(pnl.totalHire))}
+              {kvOut('Total Expense', money(pnl.totalExpense))}
+            </ul>
+          </div>
+          <div className={`fv-ops__kv-line fv-ops__kv-line--profit${pnl.profit < 0 ? ' fv-ops__kv-line--loss' : ''}`}>
+            <span>PROFIT (USD)</span>
+            <span className="fv-ops__kv-out">{money(pnl.profit)}</span>
+          </div>
         </Card>
       </div>
 
-      <div className="fv-ops__col">
-        <Card title="Operating Figures" icon="fa-sliders">
-          <div className="fv-ops__figs">
-            <RecapField label="Hire Per Day" value={recap.hirePerDay} onChange={(v) => set('hirePerDay', v)} accent />
-            <RecapField label="Freight / MT" value={recap.freightPerMt} onChange={(v) => set('freightPerMt', v)} accent />
-            <RecapField label="Final Qty Loaded" value={recap.finalQtyLoaded} onChange={(v) => set('finalQtyLoaded', v)} />
-            <RecapField label="Bunker Cost" value={recap.bunkerCost} onChange={(v) => set('bunkerCost', v)} />
-            <RecapField label="Port DA — Load" value={recap.portDaLoad} onChange={(v) => set('portDaLoad', v)} />
-            <RecapField label="Port DA — Disch" value={recap.portDaDisch} onChange={(v) => set('portDaDisch', v)} />
-            <RecapField label="Other Cost" value={recap.otherCost} onChange={(v) => set('otherCost', v)} />
-            <RecapField label="Misc Income" value={recap.miscIncome} onChange={(v) => set('miscIncome', v)} />
-          </div>
-        </Card>
-
-        <Card title="Estimate vs Actual" icon="fa-scale-balanced">
+      {/* Revenue + operating figures editor */}
+      <div className="fv-ops__grid2">
+        <Card title="Revenue" icon="fa-sack-dollar">
           <table className="fv-ops__table">
-            <thead>
-              <tr><th>Metric</th><th className="fv-ops__r">Estimate</th><th className="fv-ops__r">Actual</th><th className="fv-ops__r">Var.</th></tr>
-            </thead>
             <tbody>
-              <tr><td>Revenue</td><td className="fv-ops__r">{money(est.revenue)}</td><td className="fv-ops__r">{money(pnl.revenue)}</td><td className="fv-ops__r fv-ops__pos">{money(pnl.revenue - est.revenue)}</td></tr>
-              <tr><td>Expenses</td><td className="fv-ops__r">{money(est.expenses)}</td><td className="fv-ops__r">{money(pnl.expenses)}</td><td className="fv-ops__r fv-ops__neg">{money(pnl.expenses - est.expenses)}</td></tr>
-              <tr className="fv-ops__row-sub"><td>Profit</td><td className="fv-ops__r">{money(estProfit)}</td><td className="fv-ops__r">{money(pnl.profit)}</td><td className={`fv-ops__r ${pnl.profit - estProfit >= 0 ? 'fv-ops__pos' : 'fv-ops__neg'}`}>{money(pnl.profit - estProfit)}</td></tr>
+              <tr><td>Freight ({fmt(pnl.qty, 0)} MT × {recap.freightPerMt})</td><td className="fv-ops__r">{money(pnl.freight)}</td></tr>
+              <tr><td>Demurrage / Despatch</td><td className="fv-ops__r">{money(pnl.demDespatch)}</td></tr>
+              <tr><td>Misc Income</td><td className="fv-ops__r">{money(pnl.miscIncome)}</td></tr>
+              <tr className="fv-ops__row-sub"><td>Total Revenue</td><td className="fv-ops__r">{money(pnl.revenue)}</td></tr>
             </tbody>
           </table>
+        </Card>
+        <Card title="Operating Figures" icon="fa-sliders">
+          <div className="fv-ops__figs">
+            <RecapField label="Freight / MT" value={recap.freightPerMt} onChange={(v) => set('freightPerMt', v)} accent />
+            <RecapField label="Final Qty Loaded" value={recap.finalQtyLoaded} onChange={(v) => set('finalQtyLoaded', v)} />
+            <RecapField label="Demurrage / Despatch" value={recap.demDespatch} onChange={(v) => set('demDespatch', v)} />
+            <RecapField label="Misc Income" value={recap.miscIncome} onChange={(v) => set('miscIncome', v)} />
+          </div>
         </Card>
       </div>
     </div>
