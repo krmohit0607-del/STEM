@@ -3,7 +3,11 @@ import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { VOYAGES, type Voyage } from '../data/voyages';
-import { writeSelectedVoyageId, useSelectedVoyageId } from '../data/selectedVoyage';
+import {
+  writeSelectedVoyageId,
+  useSelectedVoyageId,
+  clearSelectedVoyageId,
+} from '../data/selectedVoyage';
 import { AppFooterControls } from './AppFooterControls';
 
 /**
@@ -31,7 +35,7 @@ const MODULES = [
  * optimization) is the Performance module; Chartering hosts the voyage
  * estimation. The rest are placeholders for future roles/access.
  */
-const ACTIVE_MODULES = new Set(['Performance', 'Chartering']);
+const ACTIVE_MODULES = new Set(['Performance', 'Chartering', 'Operations']);
 
 type Lifecycle = 'active' | 'complete' | 'closed';
 
@@ -69,6 +73,11 @@ const MODULE_STATUSES: Record<string, { key: Lifecycle; label: string }[]> = {
     { key: 'active', label: 'Estimation' },
     { key: 'complete', label: 'Fixed' },
     { key: 'closed', label: 'Cancelled' },
+  ],
+  Operations: [
+    { key: 'active', label: 'On Voyage' },
+    { key: 'complete', label: 'Completed' },
+    { key: 'closed', label: 'Closed' },
   ],
 };
 
@@ -150,9 +159,20 @@ export function FleetMenu() {
     });
   };
 
+  const moduleRoute = (m: string) =>
+    m === 'Chartering' ? '/chartering' : m === 'Operations' ? '/operations' : '/voyage';
+
   const openVoyage = (v: Voyage) => {
     writeSelectedVoyageId(v.id);
-    navigate(module === 'Chartering' ? '/chartering' : '/voyage');
+    navigate(moduleRoute(module));
+  };
+
+  // Switching module clears the active vessel so the details area starts blank;
+  // data only reappears once the user picks a vessel from the list.
+  const changeModule = (next: string) => {
+    setModule(next);
+    clearSelectedVoyageId();
+    navigate(moduleRoute(next));
   };
 
   if (collapsed) {
@@ -180,7 +200,7 @@ export function FleetMenu() {
         <select
           className="fv-fleetmenu__module"
           value={module}
-          onChange={(e) => setModule(e.target.value)}
+          onChange={(e) => changeModule(e.target.value)}
           aria-label={t('module', 'Module')}
         >
           {MODULES.map((m) => (

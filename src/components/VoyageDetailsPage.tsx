@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { NoVesselSelected } from './NoVesselSelected';
 import { loadVoyageShared, mergeVoyageShared } from '../data/voyageOverrides';
 import { buildEmptyView, buildView, nowStamp } from './voyage/buildView';
 import { LegsSection } from './voyage/LegsSection';
@@ -197,6 +198,10 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
     { id: 'legs', label: t('legDetails', 'Leg Details'), icon: 'fa-route' },
     { id: 'voyageNotes', label: t('notes', 'Notes'), icon: 'fa-note-sticky' },
   ];
+
+  if (!selectedVoyage && !isCreate) {
+    return <NoVesselSelected />;
+  }
 
   return (
     <div className="fv-voyage">
