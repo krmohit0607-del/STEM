@@ -25,7 +25,7 @@ interface DetailPageProps {
 const CROSS_LINKS: Array<{ to: DetailPageProps['current']; icon: string; label: string }> = [
   { to: '/voyage', icon: 'fa-route', label: 'Voyage Details' },
   { to: '/vessel', icon: 'fa-ship', label: 'Vessel Details' },
-  { to: '/client', icon: 'fa-building', label: 'Client Details' },
+  { to: '/client', icon: 'fa-building', label: 'Account Details' },
   { to: '/email', icon: 'fa-envelope', label: 'Email Details' },
   { to: '/passage', icon: 'fa-map-location-dot', label: 'Passage Details' },
 ];

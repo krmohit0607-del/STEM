@@ -12,7 +12,7 @@ import { useL } from '../i18n/LocalizationProvider';
 const PORTALS = [
   'Voyages',
   'Vessels',
-  'Clients',
+  'Accounts',
   'Employees',
   'Reports',
   'Administration',

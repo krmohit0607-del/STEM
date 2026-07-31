@@ -83,7 +83,7 @@ export function AppFooterControls() {
               role="menuitem"
             >
               <i className="fas fa-id-badge" aria-hidden="true" />
-              <span>{t('accountDetails', 'Account Details')}</span>
+              <span>{t('profileSettingsItem', 'Profile Settings')}</span>
             </button>
             <button
               type="button"

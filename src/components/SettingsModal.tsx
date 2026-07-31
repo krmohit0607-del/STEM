@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import {
-  EMAIL_TEMPLATE_CATEGORIES,
+  EMAIL_MAIN_CATEGORIES,
+  EMAIL_SUB_CATEGORIES,
+  EMAIL_SUB_SUB_CATEGORIES,
   loadEmailTemplates,
   newTemplateId,
   resetEmailTemplates,
@@ -10,8 +12,10 @@ import {
   type EmailTemplate,
 } from '../data/emailTemplates';
 import {
+  ACCOUNT_TYPES,
   CLIENT_ROLES,
-  STEM_PICS,
+  ODAS_PICS,
+  SERVICE_PROVIDER_TYPES,
   loadClients,
   newClientId,
   resetClients,
@@ -46,7 +50,8 @@ const SECTIONS: SettingsSection[] = [
   { id: 'email-templates', labelKey: 'emailTemplates', labelFallback: 'Email Templates', icon: 'fa-envelope' },
   { id: 'report-templates', labelKey: 'reportTemplates', labelFallback: 'Report Templates', icon: 'fa-file-lines' },
   { id: 'vessel-details', labelKey: 'vesselsDetails', labelFallback: 'Vessels Details', icon: 'fa-ship' },
-  { id: 'client-details', labelKey: 'clientDetails', labelFallback: 'Client Details', icon: 'fa-user-tie' },
+  { id: 'client-details', labelKey: 'accountDetails', labelFallback: 'Account Details', icon: 'fa-user-tie' },
+  { id: 'service-providers', labelKey: 'serviceProviderDetails', labelFallback: 'Service Provider Details', icon: 'fa-user-gear' },
   { id: 'port-details', labelKey: 'portDetails', labelFallback: 'Port Details', icon: 'fa-anchor' },
   { id: 'area-constraints', labelKey: 'areaConstraints', labelFallback: 'Area Constraints', icon: 'fa-draw-polygon' },
   { id: 'saved-passages', labelKey: 'savedPassages', labelFallback: 'Saved Passages', icon: 'fa-route' },
@@ -130,7 +135,8 @@ export function SettingsModal({
             </h4>
             {active.id === 'email-templates' && <EmailTemplatesPanel />}
             {active.id === 'vessel-details' && <VesselsPanel />}
-            {active.id === 'client-details' && <ClientsPanel />}
+            {active.id === 'client-details' && <ClientsPanel kind="Account" />}
+            {active.id === 'service-providers' && <ClientsPanel kind="Service Provider" />}
             {active.id === 'port-details' && <PortsPanel />}
             {active.id === 'area-constraints' && (
               <div className="fv-settings-area">
@@ -168,7 +174,9 @@ function EmailTemplatesPanel() {
         (tpl) =>
           tpl.title.toLowerCase().includes(q) ||
           tpl.body.toLowerCase().includes(q) ||
-          tpl.category.toLowerCase().includes(q),
+          tpl.category.toLowerCase().includes(q) ||
+          (tpl.subCategory ?? '').toLowerCase().includes(q) ||
+          (tpl.subSubCategory ?? '').toLowerCase().includes(q),
       )
     : templates;
 
@@ -185,7 +193,9 @@ function EmailTemplatesPanel() {
   const startNew = () =>
     setEditing({
       id: '',
-      category: EMAIL_TEMPLATE_CATEGORIES[0],
+      category: EMAIL_MAIN_CATEGORIES[0],
+      subCategory: '',
+      subSubCategory: '',
       title: '',
       body: '',
     });
@@ -203,14 +213,21 @@ function EmailTemplatesPanel() {
     const title = editing.title.trim();
     const body = editing.body.trim();
     if (!title || !body) return;
-    const category = editing.category.trim() || EMAIL_TEMPLATE_CATEGORIES[0];
+    const category = editing.category.trim() || EMAIL_MAIN_CATEGORIES[0];
+    const subCategory = (editing.subCategory ?? '').trim();
+    const subSubCategory = (editing.subSubCategory ?? '').trim();
     setTemplates((prev) => {
       if (editing.id) {
         return prev.map((x) =>
-          x.id === editing.id ? { ...editing, title, body, category } : x,
+          x.id === editing.id
+            ? { ...editing, title, body, category, subCategory, subSubCategory }
+            : x,
         );
       }
-      return [{ id: newTemplateId(), title, body, category }, ...prev];
+      return [
+        { id: newTemplateId(), title, body, category, subCategory, subSubCategory },
+        ...prev,
+      ];
     });
     setEditing(null);
   };
@@ -286,7 +303,11 @@ function EmailTemplatesPanel() {
               <article key={tpl.id} className="fv-email-template">
                 <header className="fv-email-template__head">
                   <div className="fv-email-template__titles">
-                    <span className="fv-email-template__cat">{tpl.category}</span>
+                    <span className="fv-email-template__cat">
+                      {[tpl.category, tpl.subCategory, tpl.subSubCategory]
+                        .filter((x) => x && x.trim())
+                        .join(' › ')}
+                    </span>
                     <h5 className="fv-email-template__title">{tpl.title}</h5>
                   </div>
                   <div className="fv-email-template__actions">
@@ -364,18 +385,47 @@ function TemplateEditor({
           />
         </label>
         <label className="fv-email-template__field fv-email-template__field--cat">
-          <span>{t('category', 'Category')}</span>
-          <input
-            type="text"
-            list="fv-template-categories"
+          <span>{t('mainCategory', 'Main Category')}</span>
+          <select
             value={value.category}
             onChange={(e) => onChange({ ...value, category: e.target.value })}
-          />
-          <datalist id="fv-template-categories">
-            {EMAIL_TEMPLATE_CATEGORIES.map((c) => (
-              <option key={c} value={c} />
+          >
+            {EMAIL_MAIN_CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
             ))}
-          </datalist>
+          </select>
+        </label>
+      </div>
+      <div className="fv-email-template__field-row">
+        <label className="fv-email-template__field fv-email-template__field--cat">
+          <span>{t('subCategory', 'Sub Category')}</span>
+          <select
+            value={value.subCategory ?? ''}
+            onChange={(e) => onChange({ ...value, subCategory: e.target.value })}
+          >
+            <option value="">{t('none', 'None')}</option>
+            {EMAIL_SUB_CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="fv-email-template__field fv-email-template__field--cat">
+          <span>{t('subSubCategory', 'Sub-Sub Category')}</span>
+          <select
+            value={value.subSubCategory ?? ''}
+            onChange={(e) => onChange({ ...value, subSubCategory: e.target.value })}
+          >
+            <option value="">{t('none', 'None')}</option>
+            {EMAIL_SUB_SUB_CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
         </label>
       </div>
       <label className="fv-email-template__field">
@@ -405,38 +455,46 @@ function TemplateEditor({
 function clientToText(c: Client): string {
   return [
     `Name: ${c.name}`,
+    `Type: ${c.category}`,
     `Location: ${c.location}`,
     `Contact: ${c.contactName}`,
     `Email: ${c.email}`,
     `Phone: ${c.phone}`,
     `Username: ${c.username}`,
     `Role: ${c.role}`,
-    `STEM PIC: ${c.pic || 'Unassigned'}`,
+    `ODAS PIC: ${c.pic || 'Unassigned'}`,
     `Status: ${c.active ? 'Active' : 'Inactive'}`,
   ].join('\n');
 }
 
-function ClientsPanel() {
+function ClientsPanel({ kind }: { kind: Client['kind'] }) {
   const l = useL();
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
   };
 
+  const isService = kind === 'Service Provider';
+  const noun = isService ? t('serviceProvider', 'service provider') : t('account', 'account');
+  const NounCap = isService ? t('ServiceProvider', 'Service provider') : t('Account', 'Account');
+  const categoryLabel = isService ? t('providerType', 'Provider type') : t('accountType', 'Account type');
+  const typeOptions = isService ? SERVICE_PROVIDER_TYPES : ACCOUNT_TYPES;
+
   const [clients, setClients] = useState<Client[]>(() => loadClients());
   const [query, setQuery] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [revealId, setRevealId] = useState<string | null>(null);
-  // `editing` holds the client currently in the editor (id === '' for a new one).
+  // `editing` holds the record currently in the editor (id === '' for a new one).
   const [editing, setEditing] = useState<Client | null>(null);
 
   useEffect(() => {
     saveClients(clients);
   }, [clients]);
 
+  const ofKind = clients.filter((c) => (c.kind ?? 'Account') === kind);
   const q = query.trim().toLowerCase();
   const filtered = q
-    ? clients.filter(
+    ? ofKind.filter(
         (c) =>
           c.name.toLowerCase().includes(q) ||
           c.location.toLowerCase().includes(q) ||
@@ -444,9 +502,10 @@ function ClientsPanel() {
           c.contactName.toLowerCase().includes(q) ||
           c.username.toLowerCase().includes(q) ||
           c.role.toLowerCase().includes(q) ||
+          c.category.toLowerCase().includes(q) ||
           c.pic.toLowerCase().includes(q),
       )
-    : clients;
+    : ofKind;
 
   const copy = async (id: string, text: string) => {
     try {
@@ -461,6 +520,8 @@ function ClientsPanel() {
   const startNew = () =>
     setEditing({
       id: '',
+      kind,
+      category: typeOptions[0],
       name: '',
       location: '',
       email: '',
@@ -486,7 +547,7 @@ function ClientsPanel() {
   };
 
   const deleteClient = (id: string) => {
-    if (!window.confirm(t('confirmDeleteClient', 'Delete this client?'))) return;
+    if (!window.confirm(t('confirmDeleteAccount', `Delete this ${noun}?`))) return;
     setClients((prev) => prev.filter((x) => x.id !== id));
     setEditing((e) => (e && e.id === id ? null : e));
   };
@@ -498,6 +559,8 @@ function ClientsPanel() {
     if (!name || !email) return;
     const next: Client = {
       ...editing,
+      kind,
+      category: editing.category.trim() || typeOptions[0],
       name,
       email,
       location: editing.location.trim(),
@@ -520,8 +583,8 @@ function ClientsPanel() {
     if (
       !window.confirm(
         t(
-          'confirmRestoreClients',
-          'Restore the built-in clients? Your custom changes will be lost.',
+          'confirmRestoreAccounts',
+          `Restore the built-in ${noun}s? Your custom changes will be lost.`,
         ),
       )
     )
@@ -539,12 +602,12 @@ function ClientsPanel() {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={t('searchClients', 'Search clients…')}
-            aria-label={t('searchClients', 'Search clients…')}
+            placeholder={t('searchAccounts', `Search ${noun}s…`)}
+            aria-label={t('searchAccounts', `Search ${noun}s…`)}
           />
         </div>
         <button type="button" className="fv-email-templates__new" onClick={startNew}>
-          <i className="fas fa-plus" aria-hidden="true" /> {t('newClient', 'New client')}
+          <i className="fas fa-plus" aria-hidden="true" /> {t('newAccount', `New ${noun}`)}
         </button>
         <button
           type="button"
@@ -564,13 +627,16 @@ function ClientsPanel() {
           onChange={setEditing}
           onSave={saveEditing}
           onCancel={() => setEditing(null)}
+          nounCap={NounCap}
+          categoryLabel={categoryLabel}
+          typeOptions={typeOptions}
         />
       )}
 
       <div className="fv-email-templates__list">
         {filtered.length === 0 ? (
           <p className="fv-email-templates__empty">
-            {t('noClientsMatch', 'No clients match your search.')}
+            {t('noAccountsMatch', `No ${noun}s match your search.`)}
           </p>
         ) : (
           filtered.map((c) =>
@@ -582,12 +648,15 @@ function ClientsPanel() {
                 onChange={setEditing}
                 onSave={saveEditing}
                 onCancel={() => setEditing(null)}
+                nounCap={NounCap}
+                categoryLabel={categoryLabel}
+                typeOptions={typeOptions}
               />
             ) : (
               <article key={c.id} className="fv-client-card">
                 <header className="fv-email-template__head">
                   <div className="fv-email-template__titles">
-                    <span className="fv-email-template__cat">{c.role}</span>
+                    <span className="fv-email-template__cat">{c.category || c.role}</span>
                     <h5 className="fv-email-template__title">
                       {c.name}
                       <span
@@ -642,6 +711,10 @@ function ClientsPanel() {
                 </header>
                 <dl className="fv-client-card__grid">
                   <div>
+                    <dt>{isService ? t('providerType', 'Provider type') : t('accountType', 'Account type')}</dt>
+                    <dd>{c.category || '—'}</dd>
+                  </div>
+                  <div>
                     <dt>{t('clientLocation', 'Location')}</dt>
                     <dd>{c.location || '—'}</dd>
                   </div>
@@ -662,7 +735,7 @@ function ClientsPanel() {
                     <dd>{c.username || '—'}</dd>
                   </div>
                   <div>
-                    <dt>{t('clientPic', 'STEM PIC')}</dt>
+                    <dt>{t('clientPic', 'ODAS PIC')}</dt>
                     <dd>{c.pic || t('unassigned', 'Unassigned')}</dd>
                   </div>
                   <div>
@@ -709,12 +782,18 @@ function ClientEditor({
   onChange,
   onSave,
   onCancel,
+  nounCap,
+  categoryLabel,
+  typeOptions,
 }: {
   t: (key: string, fallback: string) => string;
   value: Client;
   onChange: (client: Client) => void;
   onSave: () => void;
   onCancel: () => void;
+  nounCap: string;
+  categoryLabel: string;
+  typeOptions: readonly string[];
 }) {
   const canSave = value.name.trim().length > 0 && value.email.trim().length > 0;
   return (
@@ -727,7 +806,7 @@ function ClientEditor({
     >
       <div className="fv-email-template__field-row">
         <label className="fv-email-template__field">
-          <span>{t('clientName', 'Client name')}</span>
+          <span>{t('accountName', `${nounCap} name`)}</span>
           <input
             type="text"
             value={value.name}
@@ -735,12 +814,36 @@ function ClientEditor({
             onChange={(e) => onChange({ ...value, name: e.target.value })}
           />
         </label>
+        <label className="fv-email-template__field fv-email-template__field--cat">
+          <span>{categoryLabel}</span>
+          <select
+            value={value.category}
+            onChange={(e) => onChange({ ...value, category: e.target.value })}
+          >
+            {typeOptions.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="fv-email-template__field-row">
         <label className="fv-email-template__field">
           <span>{t('clientLocation', 'Location')}</span>
           <input
             type="text"
             value={value.location}
             onChange={(e) => onChange({ ...value, location: e.target.value })}
+          />
+        </label>
+        <label className="fv-email-template__field">
+          <span>{t('clientPhone', 'Phone')}</span>
+          <input
+            type="tel"
+            value={value.phone}
+            onChange={(e) => onChange({ ...value, phone: e.target.value })}
           />
         </label>
       </div>
@@ -755,23 +858,14 @@ function ClientEditor({
           />
         </label>
         <label className="fv-email-template__field">
-          <span>{t('clientPhone', 'Phone')}</span>
+          <span>{t('clientEmail', 'Email')}</span>
           <input
-            type="tel"
-            value={value.phone}
-            onChange={(e) => onChange({ ...value, phone: e.target.value })}
+            type="email"
+            value={value.email}
+            onChange={(e) => onChange({ ...value, email: e.target.value })}
           />
         </label>
       </div>
-
-      <label className="fv-email-template__field">
-        <span>{t('clientEmail', 'Email')}</span>
-        <input
-          type="email"
-          value={value.email}
-          onChange={(e) => onChange({ ...value, email: e.target.value })}
-        />
-      </label>
 
       <div className="fv-email-template__field-row">
         <label className="fv-email-template__field">
@@ -809,13 +903,13 @@ function ClientEditor({
           </select>
         </label>
         <label className="fv-email-template__field fv-email-template__field--cat">
-          <span>{t('clientPic', 'STEM PIC (assigned to)')}</span>
+          <span>{t('clientPic', 'ODAS PIC (assigned to)')}</span>
           <select
             value={value.pic}
             onChange={(e) => onChange({ ...value, pic: e.target.value })}
           >
             <option value="">{t('unassigned', 'Unassigned')}</option>
-            {STEM_PICS.map((p) => (
+            {ODAS_PICS.map((p) => (
               <option key={p} value={p}>
                 {p}
               </option>

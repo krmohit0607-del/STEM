@@ -6,7 +6,7 @@ import { useL } from '../i18n/LocalizationProvider';
  * Module selector — a small dropdown that lets the user pick which product
  * module to work in (Chartering, Operations, Postfix, Routing, Accounts).
  *
- * It is rendered next to the "STEM" brand in the application headers. Only
+ * It is rendered next to the "ODAS" brand in the application headers. Only
  * the "Routing" module is currently wired up; the rest are placeholders and
  * are disabled until they are built out.
  */

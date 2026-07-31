@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 
 import {
@@ -128,11 +128,14 @@ interface FieldProps {
   display?: React.ReactNode;
   /** When provided, the field renders as a dropdown while editing. */
   options?: string[];
+  /** When provided, the text field offers these as type-ahead suggestions. */
+  suggestions?: string[];
   /** When set, the field renders a native date / datetime / numeric input. */
   type?: 'date' | 'datetime' | 'number';
 }
 
-export function Field({ label, value, editing, onChange, inline, display, options, type }: FieldProps) {
+export function Field({ label, value, editing, onChange, inline, display, options, suggestions, type }: FieldProps) {
+  const listId = useId();
   return (
     <div className={`fv-voyage__info${inline ? ' fv-voyage__info--inline' : ''}`}>
       <span className="fv-voyage__info-label">{label}</span>
@@ -172,11 +175,21 @@ export function Field({ label, value, editing, onChange, inline, display, option
             }
           />
         ) : (
-          <input
-            className="fv-voyage__input"
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-          />
+          <>
+            <input
+              className="fv-voyage__input"
+              value={value}
+              list={suggestions ? listId : undefined}
+              onChange={(e) => onChange(e.target.value)}
+            />
+            {suggestions && (
+              <datalist id={listId}>
+                {suggestions.map((opt) => (
+                  <option key={opt} value={opt} />
+                ))}
+              </datalist>
+            )}
+          </>
         )
       ) : (
         <span className="fv-voyage__info-value">{display ?? (value || '—')}</span>

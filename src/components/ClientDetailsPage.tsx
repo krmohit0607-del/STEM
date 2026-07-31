@@ -16,7 +16,7 @@ export function ClientDetailsPage() {
 
   if (!voyage) {
     return (
-      <DetailPage icon="fa-building" title="Client Details" current="/client">
+      <DetailPage icon="fa-building" title="Account Details" current="/client">
         <NoVoyage voyage={voyage} />
       </DetailPage>
     );
@@ -25,11 +25,11 @@ export function ClientDetailsPage() {
   const c = getClientDetails(voyage);
 
   return (
-    <DetailPage icon="fa-building" title="Client Details" current="/client">
-      <DetailCard number={1} title="CLIENT PROFILE">
+    <DetailPage icon="fa-building" title="Account Details" current="/client">
+      <DetailCard number={1} title="ACCOUNT PROFILE">
         <div className="fv-voyage__grid fv-voyage__grid--3">
-          <Info label="Client Name" value={c.clientName} />
-          <Info label="Client Type" value={c.clientType} />
+          <Info label="Account Name" value={c.clientName} />
+          <Info label="Account Type" value={c.clientType} />
           <Info label="Segment" value={c.segment} />
           <Info label="Region" value={c.region} />
           <Info label="Account Manager" value={c.accountManager} />
@@ -38,7 +38,7 @@ export function ClientDetailsPage() {
             value={<span className="fv-voyage__badge fv-voyage__badge--active">{c.status}</span>}
           />
           <Info label="Contract Ref" value={c.contractRef} />
-          <Info label="Client Since" value={c.clientSince} />
+          <Info label="Account Since" value={c.clientSince} />
         </div>
       </DetailCard>
 

@@ -7,7 +7,12 @@
 
 export interface EmailTemplate {
   id: string;
+  /** Main category (required). */
   category: string;
+  /** Sub category — empty string means "None" (fall back to main category). */
+  subCategory?: string;
+  /** Sub-sub category — empty string means "None". */
+  subSubCategory?: string;
   title: string;
   body: string;
 }
@@ -22,6 +27,15 @@ export const EMAIL_TEMPLATE_CATEGORIES = [
   'Weather Synopsis',
   'Ice',
 ] as const;
+
+/** Main-category options for email templates (same as {@link EMAIL_TEMPLATE_CATEGORIES}). */
+export const EMAIL_MAIN_CATEGORIES = EMAIL_TEMPLATE_CATEGORIES;
+
+/** Sub-category options. Detailed list to be provided later; '' = None. */
+export const EMAIL_SUB_CATEGORIES: string[] = [];
+
+/** Sub-sub-category options. Detailed list to be provided later; '' = None. */
+export const EMAIL_SUB_SUB_CATEGORIES: string[] = [];
 
 export const EMAIL_TEMPLATES: EmailTemplate[] = [
   // --- Deferrals -------------------------------------------------------------
@@ -81,7 +95,7 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'Monitoring & Suggestions',
     title: 'Suggestion',
     body:
-      'Synopsis:\n\nPlease use the link below to view a comparison in Stem:\nStem COMPARISON LINK',
+      'Synopsis:\n\nPlease use the link below to view a comparison in ODAS:\nStem COMPARISON LINK',
   },
   {
     id: 'followed-yesterday',
@@ -111,7 +125,7 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'Navwarning',
     title: 'Advisory: Navwarning along Active route / 72-24 hours out',
     body:
-      'Advisory: Your route converges with [navwarning type] Navwarning [Navwarning Number] on [convergence date]. We defer to your expertise for avoidance and kindly ask you update your route in Stem if required.\nIf no response to this advisory received, will assume sailing through Navwarning is acceptable.',
+      'Advisory: Your route converges with [navwarning type] Navwarning [Navwarning Number] on [convergence date]. We defer to your expertise for avoidance and kindly ask you update your route in ODAS if required.\nIf no response to this advisory received, will assume sailing through Navwarning is acceptable.',
   },
   {
     id: 'navwarning-suggested',
@@ -123,9 +137,9 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
   {
     id: 'navwarning-ecdis',
     category: 'Navwarning',
-    title: 'ECDIS navwarnings marginally different from Stem',
+    title: 'ECDIS navwarnings marginally different from ODAS',
     body:
-      'Good Day Captain,\n\nMany thanks for your feedback, it will be used to improve navwarnings in Stem.\n\nOur navwarnings are meant to supplement navwarnings found in your onboard ECDIS, as our navwarnings do not include information from Navtex. Should discrepancies exist between navwarnings in Stem and navwarnings in your onboard ECDIS, navwarnings in your onboard ECDIS should be treated as a source of truth.\n\nWe will always defer to your expertise to determine what navwarnings are not safe to sail and to adjust course for avoidance as necessary. We welcome any questions or concerns you may have.',
+      'Good Day Captain,\n\nMany thanks for your feedback, it will be used to improve navwarnings in ODAS.\n\nOur navwarnings are meant to supplement navwarnings found in your onboard ECDIS, as our navwarnings do not include information from Navtex. Should discrepancies exist between navwarnings in ODAS and navwarnings in your onboard ECDIS, navwarnings in your onboard ECDIS should be treated as a source of truth.\n\nWe will always defer to your expertise to determine what navwarnings are not safe to sail and to adjust course for avoidance as necessary. We welcome any questions or concerns you may have.',
   },
   {
     id: 'ngz-callout',
@@ -148,7 +162,7 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'AIS & Position',
     title: 'Position Request - Capt confirmed their AIS is working',
     body:
-      "Many thanks for your confirmation that your AIS system is working in good order. Note that vessel's latest position has not yet updated within our system and kindly request you to provide the following for us to update the vessel's position within Stem:\n\nUTC Date/Time -\nlat/long -\nCourse/Speed -",
+      "Many thanks for your confirmation that your AIS system is working in good order. Note that vessel's latest position has not yet updated within our system and kindly request you to provide the following for us to update the vessel's position within ODAS:\n\nUTC Date/Time -\nlat/long -\nCourse/Speed -",
   },
   {
     id: 'persian-gulf-ais',
@@ -164,42 +178,42 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'Constraints (RTA / Speed / MCR)',
     title: 'RTA updated by Capt by email',
     body:
-      'Well noted your updated RTA of XXXX. We have input this RTA into Stem on your behalf. Please see below fresh guidance for your reference:',
+      'Well noted your updated RTA of XXXX. We have input this RTA into ODAS on your behalf. Please see below fresh guidance for your reference:',
   },
   {
     id: 'rta-wf',
     category: 'Constraints (RTA / Speed / MCR)',
     title: 'RTA updated by Capt in WF',
     body:
-      'Well noted that RTA of XXXX has been updated in Stem. Below guidance and guidance generated hereafter will apply this RTA unless otherwise advised. Operators RIC, please be advised.',
+      'Well noted that RTA of XXXX has been updated in ODAS. Below guidance and guidance generated hereafter will apply this RTA unless otherwise advised. Operators RIC, please be advised.',
   },
   {
     id: 'speedcons-email',
     category: 'Constraints (RTA / Speed / MCR)',
     title: 'Speed/Cons updated by Capt in email',
     body:
-      'Well noted your updated speed and consumption constraint of XXkts and XXmt. We have input this constraint into Stem on your behalf. Please see below fresh guidance for your reference:',
+      'Well noted your updated speed and consumption constraint of XXkts and XXmt. We have input this constraint into ODAS on your behalf. Please see below fresh guidance for your reference:',
   },
   {
     id: 'speedcons-wf',
     category: 'Constraints (RTA / Speed / MCR)',
     title: 'Speed/Cons updated by Capt in WF',
     body:
-      'Well noted that speed and consumption constraint of XXkts and XXmt have been updated in Stem. Below guidance and guidance generated hereafter will apply this constraint unless otherwise advised. Operators RIC, please be advised.',
+      'Well noted that speed and consumption constraint of XXkts and XXmt have been updated in ODAS. Below guidance and guidance generated hereafter will apply this constraint unless otherwise advised. Operators RIC, please be advised.',
   },
   {
     id: 'shoreside-removes-rta',
     category: 'Constraints (RTA / Speed / MCR)',
     title: 'Shoreside Removes RTA',
     body:
-      "Please note that Stem's RTA has been removed by operators. Below guidance and guidance generated hereafter will apply no constraints unless otherwise advised by operators.",
+      "Please note that ODAS's RTA has been removed by operators. Below guidance and guidance generated hereafter will apply no constraints unless otherwise advised by operators.",
   },
   {
     id: 'assumed-rta',
     category: 'Constraints (RTA / Speed / MCR)',
     title: 'Assumed RTA constraint',
     body:
-      'Please Note: We have applied vessel\u2019s ETA from route import of [DATE/TIME] as an RTA, as no RTA or speed constraint has been input into Stem. Below and future guidance will be generated to make this RTA unless otherwise advised. Please kindly confirm all is in good order.',
+      'Please Note: We have applied vessel\u2019s ETA from route import of [DATE/TIME] as an RTA, as no RTA or speed constraint has been input into ODAS. Below and future guidance will be generated to make this RTA unless otherwise advised. Please kindly confirm all is in good order.',
   },
   {
     id: 'rta-cant-be-met-cons',
@@ -222,14 +236,14 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'Route & Deviation',
     title: 'Assumed track, Adjusted route',
     body:
-      "We note vessel is sailing [direction] of expected track. We have adjusted the route in Stem along an assumed track. This is not a route suggestion and we kindly ask you import an updated route if your intended route differs greatly from the assumed route in Stem.\n\nIf having connectivity issues and can\u2019t access Stem, please provide your latest route file in email and we will input into Stem on your behalf.",
+      "We note vessel is sailing [direction] of expected track. We have adjusted the route in ODAS along an assumed track. This is not a route suggestion and we kindly ask you import an updated route if your intended route differs greatly from the assumed route in ODAS.\n\nIf having connectivity issues and can\u2019t access ODAS, please provide your latest route file in email and we will input into ODAS on your behalf.",
   },
   {
     id: 'noted-deviation',
     category: 'Route & Deviation',
     title: 'Noted a Deviation, Please Import',
     body:
-      'We have noticed a [add direction] deviation from your active route as it exists in Stem. Although Stem shows a tentative re-entry path to that original route, we defer to your expertise in regards to hazard avoidance and general vessel maneuvering.\n\nIf your intended route has significantly changed, please kindly import your newest intentions into Stem so that we may provide the most accurate weather and route guidance.',
+      'We have noticed a [add direction] deviation from your active route as it exists in ODAS. Although ODAS shows a tentative re-entry path to that original route, we defer to your expertise in regards to hazard avoidance and general vessel maneuvering.\n\nIf your intended route has significantly changed, please kindly import your newest intentions into ODAS so that we may provide the most accurate weather and route guidance.',
   },
   {
     id: 'alt-route-unacceptable-wx',
@@ -243,7 +257,7 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'Route & Deviation',
     title: 'Multiple Options Presented',
     body:
-      'Please see the Stem COMPARISON LINK displaying our updated analysis for possible avoidance strategies with below descriptions. Please review and advise your preference as well as any questions or comments.\n\nPresent Route (Black): route description\nAlternate Route 1 (Orange): route description\nAlternate Route 2 (Green): route description\nAlternate Route 3 (Purple): route description',
+      'Please see the ODAS COMPARISON LINK displaying our updated analysis for possible avoidance strategies with below descriptions. Please review and advise your preference as well as any questions or comments.\n\nPresent Route (Black): route description\nAlternate Route 1 (Orange): route description\nAlternate Route 2 (Green): route description\nAlternate Route 3 (Purple): route description',
   },
 
   // --- Weather Synopsis ------------------------------------------------------
@@ -296,7 +310,7 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
     category: 'Ice',
     title: 'Iceberg/Sea Ice Comms',
     body:
-      'Advisory: Your route converges with region of potential known [icebergs or sea ice] on [convergence date]. Please see attached ice chart and bulletin for your reference.\n\nWe defer to your expertise for adjusting course and speed as needed to avoid any [icebergs or sea ice]. If this route is unacceptable, we kindly ask you import an updated route into Stem.\nIf no response to this advisory received, we will assume sailing along present route is acceptable.',
+      'Advisory: Your route converges with region of potential known [icebergs or sea ice] on [convergence date]. Please see attached ice chart and bulletin for your reference.\n\nWe defer to your expertise for adjusting course and speed as needed to avoid any [icebergs or sea ice]. If this route is unacceptable, we kindly ask you import an updated route into ODAS.\nIf no response to this advisory received, we will assume sailing along present route is acceptable.',
   },
 ];
 
@@ -312,7 +326,11 @@ export function loadEmailTemplates(): EmailTemplate[] {
     if (!raw) return [...EMAIL_TEMPLATES];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every(isEmailTemplate)) {
-      return parsed as EmailTemplate[];
+      return (parsed as EmailTemplate[]).map((t) => ({
+        ...t,
+        subCategory: t.subCategory ?? '',
+        subSubCategory: t.subSubCategory ?? '',
+      }));
     }
   } catch {
     /* fall back to defaults */

@@ -1,15 +1,19 @@
 /**
- * Client administration records shown in Settings → Client Details.
+ * Account & Service-Provider administration records shown in
+ * Settings → Account Details / Service Provider Details.
  *
- * This is the admin store for clients: their contact details plus the login
- * credentials and role assigned to them. User edits (add / update / delete)
- * are persisted to localStorage and layered over the built-in seed list,
- * mirroring the Email Templates store.
+ * Admin store: contact details plus login credentials and role. User edits
+ * (add / update / delete) are persisted to localStorage and layered over the
+ * built-in seed list, mirroring the Email Templates store.
  */
 
 export interface Client {
   id: string;
-  /** Company / client name. */
+  /** Record kind — a commercial account or a service provider. */
+  kind: 'Account' | 'Service Provider';
+  /** Category/type within the kind (e.g. Owner / Charterer, or Bunker Surveyor). */
+  category: string;
+  /** Company / account name. */
   name: string;
   /** City / country or office location. */
   location: string;
@@ -25,11 +29,26 @@ export interface Client {
   password: string;
   /** Assigned role controlling access. */
   role: string;
-  /** STEM PIC — company person-in-charge this client is assigned to. */
+  /** ODAS PIC — company person-in-charge this account is assigned to. */
   pic: string;
   /** Whether the login is enabled. */
   active: boolean;
 }
+
+/** Account types (Settings → Account Details). */
+export const ACCOUNT_TYPES = ['Owner', 'Charterer', 'Broker', 'Operator'] as const;
+
+/** Service provider types (Settings → Service Provider Details). */
+export const SERVICE_PROVIDER_TYPES = [
+  'Bunker Surveyor',
+  'Draft Surveyor',
+  'Bunker Sample Testing',
+  'Hold Inspector',
+  'OnHire-OffHire Bunker Surveyor',
+  'Bunker Supplier / Trader',
+  'Weather Routing Service',
+  'PNI Club',
+] as const;
 
 export const CLIENT_ROLES = [
   'Administrator',
@@ -37,15 +56,15 @@ export const CLIENT_ROLES = [
   'Operations Manager',
   'Chartering',
   'Accounts',
-  'Client User',
+  'Account User',
   'Viewer',
 ] as const;
 
 /**
- * Company (STEM) persons-in-charge a client can be assigned to when
- * created in Settings → Client Details.
+ * Company (ODAS) persons-in-charge an account can be assigned to when
+ * created in Settings → Account Details.
  */
-export const STEM_PICS = [
+export const ODAS_PICS = [
   'Amit Sharma',
   'Rahul Verma',
   'Priya Nair',
@@ -58,6 +77,8 @@ export const STEM_PICS = [
 export const CLIENTS: Client[] = [
   {
     id: 'cl-oceanic',
+    kind: 'Account',
+    category: 'Owner',
     name: 'Oceanic Bulk Carriers',
     location: 'Singapore',
     email: 'ops@oceanicbulk.example.com',
@@ -71,6 +92,8 @@ export const CLIENTS: Client[] = [
   },
   {
     id: 'cl-northstar',
+    kind: 'Account',
+    category: 'Charterer',
     name: 'Northstar Chartering',
     location: 'London, UK',
     email: 'chartering@northstar.example.com',
@@ -84,6 +107,8 @@ export const CLIENTS: Client[] = [
   },
   {
     id: 'cl-pacifica',
+    kind: 'Account',
+    category: 'Operator',
     name: 'Pacifica Shipping Lines',
     location: 'Rotterdam, NL',
     email: 'accounts@pacifica.example.com',
@@ -94,6 +119,51 @@ export const CLIENTS: Client[] = [
     role: 'Accounts',
     pic: 'Tom Becker',
     active: false,
+  },
+  {
+    id: 'sp-veritas',
+    kind: 'Service Provider',
+    category: 'Draft Surveyor',
+    name: 'Bureau Veritas Marine',
+    location: 'Rotterdam, NL',
+    email: 'survey@bvmarine.example.com',
+    contactName: 'Lars Jansen',
+    phone: '+31 10 445 9900',
+    username: 'bv.survey',
+    password: 'Survey#2026',
+    role: 'Viewer',
+    pic: 'Tom Becker',
+    active: true,
+  },
+  {
+    id: 'sp-oceanbunkers',
+    kind: 'Service Provider',
+    category: 'Bunker Supplier / Trader',
+    name: 'Ocean Bunkers',
+    location: 'Singapore',
+    email: 'trading@oceanbunkers.example.com',
+    contactName: 'Wei Ling',
+    phone: '+65 6222 8080',
+    username: 'ocean.bunkers',
+    password: 'Bunker$77',
+    role: 'Account User',
+    pic: 'Liang Wei',
+    active: true,
+  },
+  {
+    id: 'sp-stormgeo',
+    kind: 'Service Provider',
+    category: 'Weather Routing Service',
+    name: 'StormGeo Routing',
+    location: 'Bergen, NO',
+    email: 'routing@stormgeo.example.com',
+    contactName: 'Ingrid Solberg',
+    phone: '+47 55 60 38 00',
+    username: 'stormgeo.route',
+    password: 'Route!2026',
+    role: 'Viewer',
+    pic: 'Sofia Marin',
+    active: true,
   },
 ];
 
@@ -107,8 +177,8 @@ export function loadClients(): Client[] {
     if (!raw) return [...CLIENTS];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every(isClient)) {
-      // Normalise older records saved before `pic` existed.
-      return (parsed as Client[]).map((c) => ({ ...c, pic: c.pic ?? '' }));
+      // Normalise older records saved before newer fields existed.
+      return (parsed as Client[]).map((c) => ({ ...c, pic: c.pic ?? '', kind: c.kind ?? 'Account', category: c.category ?? '' }));
     }
   } catch {
     /* fall back to defaults */
@@ -135,6 +205,19 @@ export function resetClients(): Client[] {
 
 export function newClientId(): string {
   return `cl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * Names of the commercial accounts (kind === 'Account') created in
+ * Settings → Account Details, for use as autocomplete options wherever an
+ * account/counterparty is selected across the app.
+ */
+export function accountNames(): string[] {
+  return loadClients()
+    .filter((c) => (c.kind ?? 'Account') === 'Account')
+    .map((c) => c.name.trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
 }
 
 function isClient(v: unknown): v is Client {

@@ -81,7 +81,7 @@ const TABS: TabDef[] = [
     labelFallback: 'Limits & Constraints',
     route: '/limits',
     planned: [
-      'Clients → optimization',
+      'Accounts → optimization',
       'Masters → weather limits',
       'Vessel limits / constraints',
     ],

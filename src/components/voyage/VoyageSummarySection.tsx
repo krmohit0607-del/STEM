@@ -179,12 +179,11 @@ export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse 
           <Info label="IMO" value={dash(view.imo)} />
           <Info label="Vessel Type" value={dash(view.vesselType)} />
           <Info label="Flag" value={dash(view.flag)} />
-          <Info label="Client" value={dash(view.client)} />
+          <Info label="Account" value={dash(view.client)} />
           {view.jointNomination && (
-            <Info label="2nd Client (Joint Nom.)" value={dash(view.client2)} />
+            <Info label="2nd Account (Joint Nom.)" value={dash(view.client2)} />
           )}
           <Info label="Service Type" value={dash(view.serviceType)} />
-          <Info label="PIC" value={dash(view.pic)} />
           <Info
             label="Status"
             value={view.status ? <Badge tone="active">{view.status}</Badge> : '—'}
@@ -202,18 +201,38 @@ export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse 
           <Info label="Last Updated" value={dash(view.lastUpdated)} />
         </div>
 
-        {/* 1. Order & Client Information */}
-        <h5 className="fv-voyage__subhead">Order &amp; Client Information</h5>
+        {/* 1. Order & Account Information */}
+        <h5 className="fv-voyage__subhead">Order &amp; Account Information</h5>
         <div className="fv-voyage__cols fv-voyage__cols--3">
           <Info label="Service Type" value={dash(view.serviceType)} />
-          <Info label="Client Name" value={dash(view.client)} />
-          <Info label="Client Type" value={dash(view.clientType)} />
+          <Info label="Account Name" value={dash(view.client)} />
+          <Info label="Account Type" value={dash(view.clientType)} />
           <Info label="Price" value={dash(view.price)} />
           <Info label="Pricing Basis" value={dash(view.pricingBasis)} />
           <Info label="Emission Report Required?" value={yn(view.emissionReportRequired)} />
-          <Info label="Client Email List" value={dash(view.clientEmailList)} />
+          <Info label="Account Email List" value={dash(view.clientEmailList)} />
           <Info label="For Daily Fleet Summary" value={dash(view.dailyFleetSummaryEmail)} />
         </div>
+        <div className="fv-voyage__cols fv-voyage__cols--3">
+          <Info label="Joint Nomination?" value={yn(view.jointNomination)} />
+          {!view.jointNomination && <Info label="ODAS PIC" value={dash(view.pic)} />}
+        </div>
+        {view.jointNomination && (
+          <>
+            <h5 className="fv-voyage__subhead">2nd Account (Joint Nomination)</h5>
+            <div className="fv-voyage__cols fv-voyage__cols--3">
+              <Info label="Account Name" value={dash(view.client2)} />
+              <Info label="Account Type" value={dash(view.clientType2)} />
+              <Info label="Price" value={dash(view.price2)} />
+              <Info label="Pricing Basis" value={dash(view.pricingBasis2)} />
+              <Info label="Account Email List" value={dash(view.clientEmailList2)} />
+              <Info label="For Daily Fleet Summary" value={dash(view.dailyFleetSummaryEmail2)} />
+            </div>
+            <div className="fv-voyage__cols fv-voyage__cols--3">
+              <Info label="ODAS PIC" value={dash(view.pic)} />
+            </div>
+          </>
+        )}
         {isOptimization && (
           <>
             <p className="fv-voyage__subhead">Market Factors</p>
@@ -228,7 +247,7 @@ export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse 
           </>
         )}
         <div className="fv-voyage__cols fv-voyage__cols--1">
-          <NoteBlock label="Client Notes / Instructions" value={view.clientNotes} />
+          <NoteBlock label="Account Notes / Instructions" value={view.clientNotes} />
         </div>
 
         {/* 2. Vessel Profile */}

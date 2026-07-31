@@ -3,7 +3,7 @@ import { useSyncExternalStore } from 'react';
 /**
  * Cross-page "selected leg" plumbing.
  *
- * The leg the operator picks in the top header (STEM row) leg dropdown is the
+ * The leg the operator picks in the top header (ODAS row) leg dropdown is the
  * single source of truth for the active leg across the app. Pages such as the
  * Interim Dashboard read it via `useSelectedLegNo()` instead of owning their
  * own leg picker, so the header selection and the page stay in sync.

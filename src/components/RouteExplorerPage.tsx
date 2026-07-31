@@ -362,7 +362,7 @@ export function RouteExplorerPage() {
   // Placeholder action for toolbar buttons whose endpoints are not wired yet.
   const notImplemented = (label: string) => () => {
     // eslint-disable-next-line no-console
-    console.warn(`[STEM] '${label}' is not wired yet — see MIGRATION.md.`);
+    console.warn(`[ODAS] '${label}' is not wired yet — see MIGRATION.md.`);
   };
 
   /**

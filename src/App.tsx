@@ -10,6 +10,9 @@ import { RobCalculationPage } from './components/RobCalculationPage';
 import { VoyageEstimationPage } from './components/VoyageEstimationPage';
 import { ChateringEstimationPage } from './components/ChateringEstimationPage';
 import { OperationsPage } from './components/OperationsPage';
+import { BunkerManagementPage } from './components/BunkerManagementPage';
+import { AccountsPage } from './components/AccountsPage';
+import { PostfixPage } from './components/PostfixPage';
 import { WeatherMarginsPage } from './components/WeatherMarginsPage';
 import { VoyageDetailsPage } from './components/VoyageDetailsPage';
 import { ConfigHistoryPage } from './components/ConfigHistoryPage';
@@ -110,6 +113,30 @@ export function App() {
               element={
                 <Layout showModuleChrome={false}>
                   <OperationsPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/bunker"
+              element={
+                <Layout showModuleChrome={false}>
+                  <BunkerManagementPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <Layout showModuleChrome={false}>
+                  <AccountsPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/postfix"
+              element={
+                <Layout showModuleChrome={false}>
+                  <PostfixPage />
                 </Layout>
               }
             />

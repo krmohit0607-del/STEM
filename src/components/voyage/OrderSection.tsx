@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import { BoolField, Card, Field } from './primitives';
+import { ODAS_PICS, accountNames } from '../../data/clients';
 import {
   CLIENT_TYPE_OPTIONS,
   FUEL_TYPE_OPTIONS,
@@ -27,6 +28,9 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
 
   // Market factors are only relevant for the Optimization service type.
   const isOptimization = view.serviceType === 'Optimization';
+
+  // Account suggestions come from Settings → Account Details.
+  const accounts = accountNames();
 
   // "For daily fleet summary" can mirror the client email list (Excel toggle).
   const [summaryEmailSameAsClient, setSummaryEmailSameAsClient] = useState(false);
@@ -56,8 +60,8 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
           <BoolField label="Emission Report Required?" value={view.emissionReportRequired} editing={editing} onChange={(b) => set('emissionReportRequired', b)} />
         </div>
         <div className="fv-voyage__col">
-          <Field label="Client Name" value={view.client} editing={editing} onChange={(x) => set('client', x)} />
-          <Field label="Client Type" value={view.clientType} editing={editing} onChange={(x) => set('clientType', x)} options={CLIENT_TYPE_OPTIONS} />
+          <Field label="Account Name" value={view.client} editing={editing} onChange={(x) => set('client', x)} suggestions={accounts} />
+          <Field label="Account Type" value={view.clientType} editing={editing} onChange={(x) => set('clientType', x)} options={CLIENT_TYPE_OPTIONS} />
         </div>
         <div className="fv-voyage__col">
           <Field label="Price" value={view.price} editing={editing} onChange={(x) => set('price', x)} />
@@ -67,7 +71,7 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
 
       <div className="fv-voyage__cols fv-voyage__cols--2">
         <div className="fv-voyage__col">
-          <Field label="Client Email List" value={view.clientEmailList} editing={editing} onChange={(x) => set('clientEmailList', x)} />
+          <Field label="Account Email List" value={view.clientEmailList} editing={editing} onChange={(x) => set('clientEmailList', x)} />
         </div>
         <div className="fv-voyage__col">
           <Field
@@ -83,7 +87,7 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
                 checked={summaryEmailSameAsClient}
                 onChange={(e) => setSummaryEmailSameAsClient(e.target.checked)}
               />
-              <span>Same as client email list</span>
+              <span>Same as account email list</span>
             </label>
           )}
         </div>
@@ -93,15 +97,21 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
         <div className="fv-voyage__col">
           <BoolField label="Joint Nomination?" value={view.jointNomination} editing={editing} onChange={(b) => set('jointNomination', b)} />
         </div>
+        {/* When not a joint nomination, ODAS PIC sits to the right of the toggle. */}
+        {!view.jointNomination && (
+          <div className="fv-voyage__col">
+            <Field label="ODAS PIC" value={view.pic} editing={editing} onChange={(x) => set('pic', x)} options={[...ODAS_PICS]} />
+          </div>
+        )}
       </div>
 
       {view.jointNomination && (
         <>
-          <h5 className="fv-voyage__subhead fv-voyage__subhead--spaced">2nd Client (Joint Nomination)</h5>
+          <h5 className="fv-voyage__subhead fv-voyage__subhead--spaced">2nd Account (Joint Nomination)</h5>
           <div className="fv-voyage__cols fv-voyage__cols--2">
             <div className="fv-voyage__col">
-              <Field label="Client Name" value={view.client2} editing={editing} onChange={(x) => set('client2', x)} />
-              <Field label="Client Type" value={view.clientType2} editing={editing} onChange={(x) => set('clientType2', x)} options={CLIENT_TYPE_OPTIONS} />
+              <Field label="Account Name" value={view.client2} editing={editing} onChange={(x) => set('client2', x)} suggestions={accounts} />
+              <Field label="Account Type" value={view.clientType2} editing={editing} onChange={(x) => set('clientType2', x)} options={CLIENT_TYPE_OPTIONS} />
             </div>
             <div className="fv-voyage__col">
               <Field label="Price" value={view.price2} editing={editing} onChange={(x) => set('price2', x)} />
@@ -110,10 +120,16 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
           </div>
           <div className="fv-voyage__cols fv-voyage__cols--2">
             <div className="fv-voyage__col">
-              <Field label="Client Email List" value={view.clientEmailList2} editing={editing} onChange={(x) => set('clientEmailList2', x)} />
+              <Field label="Account Email List" value={view.clientEmailList2} editing={editing} onChange={(x) => set('clientEmailList2', x)} />
             </div>
             <div className="fv-voyage__col">
               <Field label="For Daily Fleet Summary" value={view.dailyFleetSummaryEmail2} editing={editing} onChange={(x) => set('dailyFleetSummaryEmail2', x)} />
+            </div>
+          </div>
+          {/* ODAS PIC comes after the joint-nomination details. */}
+          <div className="fv-voyage__cols fv-voyage__cols--3">
+            <div className="fv-voyage__col">
+              <Field label="ODAS PIC" value={view.pic} editing={editing} onChange={(x) => set('pic', x)} options={[...ODAS_PICS]} />
             </div>
           </div>
         </>
@@ -147,7 +163,7 @@ export function OrderSection({ view, setView, editing, onToggleEdit, title, coll
 
       <div className="fv-voyage__cols fv-voyage__cols--1">
         <div className="fv-voyage__col" id="notes">
-          <span className="fv-voyage__info-label">Client Notes / Instructions</span>
+          <span className="fv-voyage__info-label">Account Notes / Instructions</span>
           {editing ? (
             <textarea
               className="fv-voyage__textarea"

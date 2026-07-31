@@ -111,8 +111,8 @@ const COLUMNS: { key: keyof TaskRow | 'actions'; label: string; width?: number }
   { key: 'vessel', label: 'Vessel', width: 110 },
   { key: 'createdDate', label: 'Created On', width: 160 },
   { key: 'pic', label: 'PIC', width: 90 },
-  { key: 'client', label: 'Client', width: 100 },
-  { key: 'clientType', label: 'Client Type', width: 110 },
+  { key: 'client', label: 'Account', width: 100 },
+  { key: 'clientType', label: 'Account Type', width: 110 },
   { key: 'voyageType', label: 'Voyage Type', width: 130 },
   { key: 'service', label: 'Service', width: 100 },
   { key: 'status', label: 'Status', width: 90 },
@@ -441,7 +441,7 @@ export function FleetListPage() {
       <header className="fv-fleet__topbar">
         <div className="fv-fleet__brand">
           <i className="fas fa-ship" aria-hidden="true" />
-          <span>STEM</span>
+          <span>ODAS</span>
         </div>
 
         {!shiftView && view !== 'map' && (
@@ -570,7 +570,7 @@ export function FleetListPage() {
                 </div>
                 <button type="button" className="fv-fleet__profile-item" role="menuitem">
                   <i className="fas fa-id-badge" aria-hidden="true" />
-                  <span>{t('accountDetails', 'Account Details')}</span>
+                  <span>{t('profileSettingsItem', 'Profile Settings')}</span>
                 </button>
                 <button
                   type="button"

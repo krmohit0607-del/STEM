@@ -266,7 +266,7 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
           setView={setView}
           editing={ed('order')}
           onToggleEdit={() => toggleEdit('order')}
-          title={t('orderClientInformation', 'ORDER & CLIENT INFORMATION')}
+          title={t('orderClientInformation', 'ORDER & ACCOUNT INFORMATION')}
           collapsed={false}
           onToggleCollapse={() => toggleSection('order')}
         />

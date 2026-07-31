@@ -590,7 +590,7 @@ export function OperationsPage() {
 
         {/* ===================== TAB CONTENT ===================== */}
         <div className="fv-ops__content">
-          {tab === 'details' && <VoyageDetailsTab recap={recap} set={set} />}
+          {tab === 'details' && <VoyageDetailsTab recap={recap} voyage={voyage} pnl={pnl} />}
           {tab === 'pnl' && <PnlTab recap={recap} set={set} pnl={pnl} />}
           {tab === 'etarob' && <EtaRobTab recap={recap} />}
           {tab === 'stowage' && <StowageTab recap={recap} />}
@@ -754,21 +754,136 @@ function RecapTopBar({ recap, voyage, pnl }: { recap: Recap; voyage: Voyage; pnl
   );
 }
 
-function VoyageDetailsTab({ recap, set }: { recap: Recap; set: (k: keyof Recap, v: string) => void }) {
+function VoyageDetailsTab({ recap, voyage, pnl }: { recap: Recap; voyage: Voyage; pnl: Pnl }) {
+  const cpSpeed = voyage.cpSpeed || 12;
+  const totalDist = Math.round(cpSpeed * 24 * pnl.days);
+  const greatCircle = Math.round(totalDist * 0.975);
+
+  const strip: { label: string; value: string; status?: boolean }[] = [
+    { label: 'Fixture No.', value: voyage.id },
+    { label: 'Vessel', value: recap.vesselName || voyage.vessel },
+    { label: 'Vessel Type', value: voyage.vesselType || '—' },
+    { label: 'DWT', value: voyage.dwt || '—' },
+    { label: 'Load Port', value: recap.loadPort || voyage.portFrom || '—' },
+    { label: 'Discharge Port', value: recap.dischargePort || voyage.portTo || '—' },
+    { label: 'ETD', value: voyage.etdDisplay || '—' },
+    { label: 'ETA', value: voyage.eta || '—' },
+    { label: 'Status', value: voyage.status || 'On Voyage', status: true },
+  ];
+
+  const milestones = buildMilestones(recap, voyage);
+
   return (
-    <div className="fv-ops__recap-groups">
-      {RECAP_GROUPS.map((g) => (
-        <div className="fv-ops__recap-group" key={g.title}>
-          <div className="fv-ops__recap-group-head">
-            <i className={`fas ${g.icon}`} aria-hidden="true" /> {g.title}
+    <div className="fv-ops__vd">
+      {/* Summary strip */}
+      <div className="fv-ops__vd-strip">
+        {strip.map((s) => (
+          <div className="fv-ops__vd-cell" key={s.label}>
+            <span className="fv-ops__vd-cell-label">{s.label}</span>
+            {s.status ? (
+              <span className="fv-ops__vd-status">{s.value}</span>
+            ) : (
+              <span className="fv-ops__vd-cell-value">{s.value}</span>
+            )}
           </div>
-          {g.fields.map((f) => (
-            <RecapField key={f.key} label={f.label} value={recap[f.key]} onChange={(v) => set(f.key, v)} accent={f.accent} />
+        ))}
+      </div>
+
+      <div className="fv-ops__vd-main">
+        {/* Voyage Information — read-only summary sourced from Recap & CP */}
+        <Card
+          title="Voyage Information"
+          icon="fa-circle-info"
+          right={<span className="fv-ops__vd-source"><i className="fas fa-file-contract" aria-hidden="true" /> From Terms Recap &amp; Charter Party</span>}
+        >
+          <div className="fv-ops__vd-info">
+            {RECAP_GROUPS.map((g) => (
+              <div className="fv-ops__sumgroup" key={g.title}>
+                <div className="fv-ops__sumgroup-head">
+                  <i className={`fas ${g.icon}`} aria-hidden="true" /> {g.title}
+                </div>
+                <dl className="fv-ops__sumlist">
+                  {g.fields.map((f) => {
+                    const v = String(recap[f.key] ?? '').trim();
+                    return (
+                      <div className={`fv-ops__sumrow${f.accent ? ' fv-ops__sumrow--accent' : ''}`} key={f.key}>
+                        <dt>{f.label}</dt>
+                        <dd className={v ? undefined : 'fv-ops__sumrow-empty'}>{v || '—'}</dd>
+                      </div>
+                    );
+                  })}
+                </dl>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        {/* Voyage Route — schematic + plan figures */}
+        <Card title="Voyage Route" icon="fa-route">
+          <div className="fv-ops__route">
+            <div className="fv-ops__route-node">
+              <span className="fv-ops__route-dot fv-ops__route-dot--start" />
+              <div className="fv-ops__route-text">
+                <b>{recap.loadPort || voyage.portFrom || 'Load Port'}</b>
+                <small>Load · ETD {voyage.etdDisplay || '—'}</small>
+              </div>
+            </div>
+            <div className="fv-ops__route-track">
+              <span className="fv-ops__route-track-line" />
+              <i className="fas fa-ship" aria-hidden="true" />
+            </div>
+            <div className="fv-ops__route-node">
+              <span className="fv-ops__route-dot fv-ops__route-dot--end" />
+              <div className="fv-ops__route-text">
+                <b>{recap.dischargePort || voyage.portTo || 'Discharge Port'}</b>
+                <small>Discharge · ETA {voyage.eta || '—'}</small>
+              </div>
+            </div>
+          </div>
+          <div className="fv-ops__route-stats">
+            <div><span>Great Circle</span><b>{fmt(greatCircle, 0)} NM</b></div>
+            <div><span>Total Distance</span><b>{fmt(totalDist, 0)} NM</b></div>
+            <div><span>Est. Duration</span><b>{fmt(pnl.days, 1)} days</b></div>
+            <div><span>Avg Speed (Plan)</span><b>{fmt(cpSpeed, 1)} kn</b></div>
+          </div>
+        </Card>
+      </div>
+
+      {/* Milestones timeline */}
+      <Card title="Milestones" icon="fa-flag-checkered">
+        <div className="fv-ops__milestones">
+          {milestones.map((m) => (
+            <div className={`fv-ops__ms fv-ops__ms--${m.state}`} key={m.label}>
+              <span className="fv-ops__ms-dot"><i className={`fas ${m.icon}`} aria-hidden="true" /></span>
+              <span className="fv-ops__ms-label">{m.label}</span>
+              <span className="fv-ops__ms-date">{m.date}</span>
+            </div>
           ))}
         </div>
-      ))}
+      </Card>
     </div>
   );
+}
+
+/** Build the voyage milestone timeline, marking the active stage from the voyage status. */
+function buildMilestones(recap: Recap, voyage: Voyage): { label: string; date: string; icon: string; state: 'done' | 'current' | 'todo' }[] {
+  const stages = [
+    { label: 'Fixed', date: recap.cpDate || '—', icon: 'fa-file-signature' },
+    { label: 'NOR', date: recap.norAtLoadPort || '—', icon: 'fa-flag' },
+    { label: 'ETD', date: voyage.etdDisplay || recap.deliveryDateTime || '—', icon: 'fa-arrow-up-from-bracket' },
+    { label: 'At Sea', date: voyage.lastNoon || '—', icon: 'fa-water' },
+    { label: 'ETA', date: voyage.eta || '—', icon: 'fa-anchor' },
+    { label: 'Discharge', date: recap.redeliveryDateTime || '—', icon: 'fa-arrow-down-to-bracket' },
+    { label: 'Completion', date: recap.redeliveryDateTime || '—', icon: 'fa-circle-check' },
+  ];
+  const status = (voyage.status || '').toLowerCase();
+  let active = 3; // default: At Sea
+  if (status.includes('load')) active = 1;
+  else if (status.includes('port') || status.includes('berth')) active = 2;
+  else if (status.includes('sea') || status.includes('voyage') || status.includes('transit')) active = 3;
+  else if (status.includes('disch')) active = 5;
+  else if (status.includes('complete') || status.includes('redeliver')) active = 6;
+  return stages.map((s, i) => ({ ...s, state: i < active ? 'done' : i === active ? 'current' : 'todo' }));
 }
 
 /* ------------------------------------------------------------ Live P&L tab */

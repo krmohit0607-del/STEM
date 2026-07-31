@@ -452,7 +452,7 @@ export function InterimDashboardPage() {
   const selectedVoyage = useSelectedVoyage();
   const vessel = selectedVoyage ? voyageToVesselInfo(selectedVoyage) : STUB_VESSEL;
 
-  // The active leg follows the leg picked in the top header (STEM row) dropdown.
+  // The active leg follows the leg picked in the top header (ODAS row) dropdown.
   const legs = useMemo(
     () => (selectedVoyage ? buildView(selectedVoyage).legs : []),
     [selectedVoyage],

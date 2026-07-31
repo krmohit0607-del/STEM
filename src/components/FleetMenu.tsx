@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { VOYAGES, type Voyage } from '../data/voyages';
@@ -8,6 +8,29 @@ import {
   useSelectedVoyageId,
   clearSelectedVoyageId,
 } from '../data/selectedVoyage';
+import {
+  BUNKER_TABS,
+  BUNKER_TYPE_FILTERS,
+  STATUS_TONE,
+  bucketOf,
+  matchesTypeFilter,
+  useBunkerRequirements,
+  useSelectedBunkerId,
+  writeSelectedBunkerId,
+  clearSelectedBunkerId,
+} from '../data/bunker';
+import {
+  ACCOUNT_TABS,
+  ACCOUNT_TYPE_FILTERS,
+  bucketOfTxn,
+  matchesAccountType,
+  isOverdue,
+  useAccountTxns,
+  useSelectedAccountVessel,
+  writeSelectedAccountVessel,
+} from '../data/accounts';
+import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, useHandedOver, useModuleLifecycles, moduleLifecycleOf } from '../data/workflow';
+import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
 import { AppFooterControls } from './AppFooterControls';
 
 /**
@@ -35,7 +58,7 @@ const MODULES = [
  * optimization) is the Performance module; Chartering hosts the voyage
  * estimation. The rest are placeholders for future roles/access.
  */
-const ACTIVE_MODULES = new Set(['Performance', 'Chartering', 'Operations']);
+const ACTIVE_MODULES = new Set(['Performance', 'Chartering', 'Operations', 'Bunker', 'Postfix', 'Accounts']);
 
 type Lifecycle = 'active' | 'complete' | 'closed';
 
@@ -63,7 +86,7 @@ const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
 };
 
 /** Status tabs per module: the same three buckets are labelled differently. */
-const MODULE_STATUSES: Record<string, { key: Lifecycle; label: string }[]> = {
+const MODULE_STATUSES: Record<string, { key: string; label: string }[]> = {
   Performance: [
     { key: 'active', label: 'Active' },
     { key: 'complete', label: 'Complete' },
@@ -75,15 +98,22 @@ const MODULE_STATUSES: Record<string, { key: Lifecycle; label: string }[]> = {
     { key: 'closed', label: 'Cancelled' },
   ],
   Operations: [
-    { key: 'active', label: 'On Voyage' },
+    { key: 'active', label: 'Active' },
     { key: 'complete', label: 'Completed' },
     { key: 'closed', label: 'Closed' },
   ],
+  Postfix: [
+    { key: 'active', label: 'Active' },
+    { key: 'complete', label: 'Completed' },
+    { key: 'closed', label: 'Closed' },
+  ],
+  Bunker: BUNKER_TABS.map((b) => ({ key: b.key, label: b.label })),
+  Accounts: ACCOUNT_TABS.map((b) => ({ key: b.key, label: b.label })),
 };
 
-function statusLabel(module: string, key: Lifecycle): string {
+function statusLabel(module: string, key: string): string {
   const list = MODULE_STATUSES[module] ?? MODULE_STATUSES.Performance;
-  return list.find((s) => s.key === key)?.label ?? LIFECYCLE_LABEL[key];
+  return list.find((s) => s.key === key)?.label ?? LIFECYCLE_LABEL[key as Lifecycle] ?? key;
 }
 
 /**
@@ -98,6 +128,15 @@ function charterTypeOf(v: Voyage): string {
 }
 
 const COLLAPSE_KEY = 'fv.fleetMenu.collapsed';
+
+/** Compact USD formatter for the Accounts vessel list. */
+function usdAbbr(n: number): string {
+  const a = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  if (a >= 1e6) return `${sign}$${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `${sign}$${(a / 1e3).toFixed(0)}K`;
+  return `${sign}$${a.toFixed(0)}`;
+}
 
 function readCollapsed(): boolean {
   try {
@@ -114,30 +153,80 @@ export function FleetMenu() {
     return v === key ? fallback : v;
   };
   const navigate = useNavigate();
+  const location = useLocation();
   const selectedId = useSelectedVoyageId();
+  const selectedBunkerId = useSelectedBunkerId();
+  const bunkerAll = useBunkerRequirements();
+  const accountAll = useAccountTxns();
+  const selectedAccountVessel = useSelectedAccountVessel();
+  const estStatuses = useEstimationStatuses();
+  const estFixTypes = useEstimationFixTypes();
+  const handedOver = useHandedOver();
 
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
   const [module, setModule] = useState<string>('Performance');
   const [pic, setPic] = useState('All');
   const [voyageType, setVoyageType] = useState('All');
-  const [status, setStatus] = useState<Lifecycle>('active');
+  const [status, setStatus] = useState<string>('active');
   const [query, setQuery] = useState('');
+
+  const isBunker = module === 'Bunker';
+  const isAccounts = module === 'Accounts';
+  const isChartering = module === 'Chartering';
+  const isOperations = module === 'Operations';
+
+  // Keep the sidebar module in sync with the active route (deep links / dropdown).
+  useEffect(() => {
+    const p = location.pathname;
+    const routed = p.startsWith('/bunker') ? 'Bunker' : p.startsWith('/operations') ? 'Operations' : p.startsWith('/chartering') ? 'Chartering' : p.startsWith('/postfix') ? 'Postfix' : p.startsWith('/accounts') ? 'Accounts' : null;
+    if (routed && routed !== module) {
+      setModule(routed);
+      setStatus((MODULE_STATUSES[routed] ?? MODULE_STATUSES.Performance)[0].key);
+      setVoyageType('All');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
 
   const pics = useMemo(
     () => ['All', ...Array.from(new Set(VOYAGES.map((v) => v.pic))).sort()],
     [],
   );
   const types = useMemo(
-    () => ['All', ...Array.from(new Set(VOYAGES.map((v) => v.service))).sort()],
-    [],
+    () =>
+      isBunker
+        ? [...BUNKER_TYPE_FILTERS]
+        : isAccounts
+          ? [...ACCOUNT_TYPE_FILTERS]
+          : isChartering
+            ? ['All', ...FIX_TYPE_FILTER_OPTIONS]
+            : isOperations
+              ? ['All', ...FIX_TYPE_FILTER_OPTIONS, 'At Sea', 'At Port']
+              : ['All', ...Array.from(new Set(VOYAGES.map((v) => v.service))).sort()],
+    [isBunker, isAccounts, isChartering, isOperations],
   );
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Chartering buckets by estimate status; Operations/Performance show handed-over voyages as Active.
+    const bucketFor = (v: Voyage): Lifecycle => {
+      if (module === 'Chartering') return charteringBucket(v.id, estStatuses, lifecycleOf(v));
+      if ((module === 'Operations' || module === 'Performance') && handedOver.includes(v.id)) return 'active';
+      return lifecycleOf(v);
+    };
     return VOYAGES.filter((v) => {
       if (pic !== 'All' && v.pic !== pic) return false;
-      if (voyageType !== 'All' && v.service !== voyageType) return false;
-      if (lifecycleOf(v) !== status) return false;
+      if (voyageType !== 'All') {
+        if (voyageType === 'At Sea' || voyageType === 'At Port') {
+          if (v.status !== voyageType) return false;
+        } else if (isChartering || isOperations) {
+          // Chartering / Operations filter by the estimate's Fix Type.
+          const rowType = estFixTypes[v.id] ?? charterTypeOf(v);
+          if (rowType !== voyageType) return false;
+        } else if (v.service !== voyageType) {
+          return false;
+        }
+      }
+      if (bucketFor(v) !== status) return false;
       if (
         q &&
         !`${v.vessel} ${v.id} ${v.portFrom} ${v.portTo}`.toLowerCase().includes(q)
@@ -145,7 +234,46 @@ export function FleetMenu() {
         return false;
       return true;
     });
-  }, [pic, voyageType, status, query]);
+  }, [module, isChartering, isOperations, pic, voyageType, status, query, estStatuses, estFixTypes, handedOver]);
+
+  // Bucket shown on each voyage row's badge (mirrors the filter above).
+  const rowBucket = (v: Voyage): Lifecycle => {
+    if (module === 'Chartering') return charteringBucket(v.id, estStatuses, lifecycleOf(v));
+    if ((module === 'Operations' || module === 'Performance') && handedOver.includes(v.id)) return 'active';
+    return lifecycleOf(v);
+  };
+
+  // Bunker requirements filtered by the coarse status tab + the "Type" fine filter.
+  const bunkerRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return bunkerAll.filter((r) => {
+      if (bucketOf(r) !== status) return false;
+      if (!matchesTypeFilter(r, voyageType)) return false;
+      if (q && !`${r.vessel} ${r.id} ${r.route} ${r.bunkerPort} ${r.supplier ?? ''}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [bunkerAll, status, voyageType, query]);
+
+  // Accounts: aggregate the ledger per vessel for the current bucket + type filter.
+  const accountRows = useMemo(() => {
+    const map = new Map<string, { vessel: string; reference: string; payable: number; receivable: number; overdue: number; approvals: number; count: number }>();
+    for (const tx of accountAll) {
+      if (bucketOfTxn(tx) !== status) continue;
+      if (!matchesAccountType(tx, voyageType)) continue;
+      const e = map.get(tx.vessel) ?? { vessel: tx.vessel, reference: tx.reference, payable: 0, receivable: 0, overdue: 0, approvals: 0, count: 0 };
+      if (tx.kind === 'Payable') e.payable += tx.amount; else e.receivable += tx.amount;
+      if (isOverdue(tx)) e.overdue += 1;
+      if (tx.approval === 'Pending') e.approvals += 1;
+      e.count += 1;
+      e.reference = tx.reference;
+      map.set(tx.vessel, e);
+    }
+    const q = query.trim().toLowerCase();
+    let out = Array.from(map.values()).map((e) => ({ ...e, net: e.receivable - e.payable }));
+    if (q) out = out.filter((r) => `${r.vessel} ${r.reference}`.toLowerCase().includes(q));
+    out.sort((a, b) => b.payable + b.receivable - (a.payable + a.receivable));
+    return out;
+  }, [accountAll, status, voyageType, query]);
 
   const toggleCollapsed = () => {
     setCollapsed((c) => {
@@ -160,7 +288,7 @@ export function FleetMenu() {
   };
 
   const moduleRoute = (m: string) =>
-    m === 'Chartering' ? '/chartering' : m === 'Operations' ? '/operations' : '/voyage';
+    m === 'Chartering' ? '/chartering' : m === 'Operations' ? '/operations' : m === 'Bunker' ? '/bunker' : m === 'Postfix' ? '/postfix' : m === 'Accounts' ? '/accounts' : '/voyage';
 
   const openVoyage = (v: Voyage) => {
     writeSelectedVoyageId(v.id);
@@ -171,7 +299,10 @@ export function FleetMenu() {
   // data only reappears once the user picks a vessel from the list.
   const changeModule = (next: string) => {
     setModule(next);
+    setStatus((MODULE_STATUSES[next] ?? MODULE_STATUSES.Performance)[0].key);
+    setVoyageType('All');
     clearSelectedVoyageId();
+    clearSelectedBunkerId();
     navigate(moduleRoute(next));
   };
 
@@ -221,21 +352,23 @@ export function FleetMenu() {
       </div>
 
       <div className="fv-fleetmenu__filters">
-        <select
-          value={pic}
-          onChange={(e) => setPic(e.target.value)}
-          aria-label={t('pic', 'PIC')}
-        >
-          {pics.map((p) => (
-            <option key={p} value={p}>
-              {p === 'All' ? t('picAll', 'PIC: All') : p}
-            </option>
-          ))}
-        </select>
+        {!isBunker && !isAccounts && (
+          <select
+            value={pic}
+            onChange={(e) => setPic(e.target.value)}
+            aria-label={t('pic', 'PIC')}
+          >
+            {pics.map((p) => (
+              <option key={p} value={p}>
+                {p === 'All' ? t('picAll', 'PIC: All') : p}
+              </option>
+            ))}
+          </select>
+        )}
         <select
           value={voyageType}
           onChange={(e) => setVoyageType(e.target.value)}
-          aria-label={t('voyageType', 'Voyage type')}
+          aria-label={t('voyageType', 'Type')}
         >
           {types.map((tp) => (
             <option key={tp} value={tp}>
@@ -265,43 +398,103 @@ export function FleetMenu() {
         <input
           type="text"
           value={query}
-          placeholder={t('searchVesselOrder', 'Search vessel / order…')}
+          placeholder={isBunker ? t('searchBunker', 'Search vessel / requirement…') : isAccounts ? t('searchAccounts', 'Search vessel / reference…') : t('searchVesselOrder', 'Search vessel / order…')}
           onChange={(e) => setQuery(e.target.value)}
           aria-label={t('searchVesselOrder', 'Search vessel / order')}
         />
       </div>
 
-      <ul className="fv-fleetmenu__list">
-        {rows.length === 0 && (
-          <li className="fv-fleetmenu__empty">{t('noVessels', 'No vessels')}</li>
-        )}
-        {rows.map((v) => (
-          <li key={v.id}>
-            <button
-              type="button"
-              className={`fv-fleetmenu__item${v.id === selectedId ? ' fv-fleetmenu__item--active' : ''}`}
-              onClick={() => openVoyage(v)}
-            >
-              <div className="fv-fleetmenu__item-top">
-                <span className="fv-fleetmenu__vessel">{v.vessel}</span>
-                <span className="fv-fleetmenu__order">{v.id}</span>
-              </div>
-              <div className="fv-fleetmenu__item-route">
-                {v.portFrom} → {v.portTo}
-              </div>
-              <div className="fv-fleetmenu__item-meta">
-                <span className="fv-fleetmenu__charter">{charterTypeOf(v)}</span>
-                {pic === 'All' && <span>· {v.pic}</span>}
-                <span
-                  className={`fv-fleetmenu__badge fv-fleetmenu__badge--${lifecycleOf(v)}`}
-                >
-                  {statusLabel(module, lifecycleOf(v))}
-                </span>
-              </div>
-            </button>
-          </li>
-        ))}
-      </ul>
+      {isBunker ? (
+        <ul className="fv-fleetmenu__list">
+          {bunkerRows.length === 0 && (
+            <li className="fv-fleetmenu__empty">{t('noRequirements', 'No requirements')}</li>
+          )}
+          {bunkerRows.map((r) => (
+            <li key={r.id}>
+              <button
+                type="button"
+                className={`fv-fleetmenu__item${r.id === selectedBunkerId ? ' fv-fleetmenu__item--active' : ''}`}
+                onClick={() => { writeSelectedBunkerId(r.id); navigate('/bunker'); }}
+              >
+                <div className="fv-fleetmenu__item-top">
+                  <span className="fv-fleetmenu__vessel">{r.vessel}</span>
+                  <span className="fv-fleetmenu__order">{r.id}</span>
+                </div>
+                <div className="fv-fleetmenu__item-route">
+                  {r.route}
+                </div>
+                <div className="fv-fleetmenu__item-meta">
+                  <span className="fv-fleetmenu__charter">{r.leg} · {r.fuelType}</span>
+                  <span className={`fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--${STATUS_TONE[r.status]}`}>
+                    {r.status}
+                  </span>
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : isAccounts ? (
+        <ul className="fv-fleetmenu__list">
+          {accountRows.length === 0 && (
+            <li className="fv-fleetmenu__empty">{t('noAccounts', 'No transactions')}</li>
+          )}
+          {accountRows.map((r) => (
+            <li key={r.vessel}>
+              <button
+                type="button"
+                className={`fv-fleetmenu__item${r.vessel === selectedAccountVessel ? ' fv-fleetmenu__item--active' : ''}`}
+                onClick={() => { writeSelectedAccountVessel(r.vessel); navigate('/accounts'); }}
+              >
+                <div className="fv-fleetmenu__item-top">
+                  <span className="fv-fleetmenu__vessel">{r.vessel}</span>
+                  <span className="fv-fleetmenu__order">{r.reference}</span>
+                </div>
+                <div className="fv-fleetmenu__item-route">
+                  Net <b className={r.net >= 0 ? 'fv-fleetmenu__pos' : 'fv-fleetmenu__neg'}>{usdAbbr(r.net)}</b>
+                  <span className="fv-fleetmenu__acct-split"> · Pay {usdAbbr(r.payable)} · Rec {usdAbbr(r.receivable)}</span>
+                </div>
+                <div className="fv-fleetmenu__item-meta">
+                  {r.overdue > 0 && <span className="fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--due" style={{ background: 'rgba(255,107,107,.16)', color: '#ff6b6b' }}>{r.overdue} overdue</span>}
+                  {r.approvals > 0 && <span className="fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--approval">{r.approvals} to approve</span>}
+                  <span className="fv-fleetmenu__acct-count">{r.count} txn</span>
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <ul className="fv-fleetmenu__list">
+          {rows.length === 0 && (
+            <li className="fv-fleetmenu__empty">{t('noVessels', 'No vessels')}</li>
+          )}
+          {rows.map((v) => (
+            <li key={v.id}>
+              <button
+                type="button"
+                className={`fv-fleetmenu__item${v.id === selectedId ? ' fv-fleetmenu__item--active' : ''}`}
+                onClick={() => openVoyage(v)}
+              >
+                <div className="fv-fleetmenu__item-top">
+                  <span className="fv-fleetmenu__vessel">{v.vessel}</span>
+                  <span className="fv-fleetmenu__order">{v.id}</span>
+                </div>
+                <div className="fv-fleetmenu__item-route">
+                  {v.portFrom} → {v.portTo}
+                </div>
+                <div className="fv-fleetmenu__item-meta">
+                  <span className="fv-fleetmenu__charter">{estFixTypes[v.id] ?? charterTypeOf(v)}</span>
+                  {pic === 'All' && <span>· {v.pic}</span>}
+                  <span
+                    className={`fv-fleetmenu__badge fv-fleetmenu__badge--${rowBucket(v)}`}
+                  >
+                    {statusLabel(module, rowBucket(v))}
+                  </span>
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className="fv-fleetmenu__footer">
         <AppFooterControls />
