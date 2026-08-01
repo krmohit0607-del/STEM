@@ -50,6 +50,23 @@ export function charteringBucket(id: string, snap: Record<string, EstStatus>, fa
   return 'active';
 }
 
+/** Colour name for an estimate status — matches the estimation header badge. */
+export function estStatusColor(status: string): string {
+  switch (status) {
+    case 'Quoted': return 'blue';
+    case 'On Subs': return 'amber';
+    case 'Fixed': return 'green';
+    case 'Cancelled': return 'red';
+    case 'Lost': return 'grey';
+    default: return 'green'; // Estimate → "Estimation"
+  }
+}
+
+/** Display label for an estimate status ('Estimate' shows as 'Estimation'). */
+export function estStatusLabel(status: string): string {
+  return status === 'Estimate' ? 'Estimation' : status;
+}
+
 /* --------------------------------------------------- estimate fix-type store */
 
 const estFixType = new Map<string, string>();
@@ -78,6 +95,23 @@ export function makeFixtureNo(seq: number, date: Date = new Date()): string {
   const yy = String(date.getFullYear()).slice(-2);
   const mm = String(date.getMonth() + 1).padStart(2, '0');
   return `${COMPANY_CODE}${yy}${mm}${String(Math.max(1, seq)).padStart(2, '0')}`;
+}
+
+/** Per-voyage fixture number, assigned when the estimate is fixed in Chartering. */
+const fixtureNos = new Map<string, string>();
+let fixtureSnapshot: Record<string, string> = {};
+const fixtureListeners = new Set<() => void>();
+export function setFixtureNumber(id: string, no: string): void {
+  if (fixtureNos.get(id) === no) return;
+  fixtureNos.set(id, no);
+  fixtureSnapshot = Object.fromEntries(fixtureNos);
+  fixtureListeners.forEach((l) => l());
+}
+export function getFixtureNumbers(): Record<string, string> {
+  return fixtureSnapshot;
+}
+export function useFixtureNumbers(): Record<string, string> {
+  return useSyncExternalStore((l) => { fixtureListeners.add(l); return () => fixtureListeners.delete(l); }, getFixtureNumbers, getFixtureNumbers);
 }
 
 /* --------------------------------------------------- operations handover store */
@@ -129,8 +163,32 @@ export function moduleLifecycleOf(snap: Record<string, Lifecycle>, m: WorkflowMo
   return snap[moduleKey(m, id)];
 }
 
-/* --------------------------------------------------- operations → postfix copy */
+/* --------------------------------------------------- charter party date (CPDD) */
 
+/** Format a date as DD.MM.YYYY for CPDD display. */
+export function formatCpdd(d: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+const cpdd = new Map<string, string>();
+let cpddSnapshot: Record<string, string> = {};
+const cpddListeners = new Set<() => void>();
+/** Set the charter-party date (CPDD) for a voyage — the day it was fixed. */
+export function setCpdd(id: string, date: string): void {
+  if (cpdd.get(id) === date) return;
+  cpdd.set(id, date);
+  cpddSnapshot = Object.fromEntries(cpdd);
+  cpddListeners.forEach((l) => l());
+}
+export function getCpdds(): Record<string, string> {
+  return cpddSnapshot;
+}
+export function useCpdds(): Record<string, string> {
+  return useSyncExternalStore((l) => { cpddListeners.add(l); return () => cpddListeners.delete(l); }, getCpdds, getCpdds);
+}
+
+/* --------------------------------------------------- operations → postfix copy */
 const postfixHanded = new Set<string>();
 let postfixSnapshot: string[] = [];
 const postfixListeners = new Set<() => void>();

@@ -1,14 +1,23 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import type { Voyage } from '../data/voyages';
-import { VOYAGES } from '../data/voyages';
-import { useWorldPorts } from '../data/ports';
+import { VOYAGES, makeBlankVoyage } from '../data/voyages';
+import { useWorldPorts, resolveWorldPort } from '../data/ports';
 import { accountNames } from '../data/clients';
 import { VesselSearchInput } from './VesselSearchInput';
-import { setEstimationStatus, setEstimationFixType, makeFixtureNo, handoverToOperations, addNotification, useHandedOver } from '../data/workflow';
-import { FUEL_TYPE_OPTIONS } from './voyage/types';
+import { EstimationRouteMap } from './EstimationRouteMap';
+import { generateSeaRoute } from '../data/seaRoute';
+import { upsertSavedEstimate, getSavedEstimate, setSavedEstimateStatus, nextEstimateNo } from '../data/savedEstimates';
+import { VESSEL_TEMPLATES, type VesselTemplate } from '../data/vesselTemplates';
+import { setEstimationStatus, setEstimationFixType, makeFixtureNo, setFixtureNumber, handoverToOperations, addNotification, useHandedOver, setCpdd, useCpdds, estStatusLabel } from '../data/workflow';
+import {
+  defaultQtyUnitForVessel,
+  defaultFreightUnit,
+  useEstimationOptions,
+} from '../data/estimationOptions';
 import { NoVesselSelected } from './NoVesselSelected';
 
 /**
@@ -35,7 +44,7 @@ import { NoVesselSelected } from './NoVesselSelected';
 /* ------------------------------------------------------------------ types */
 
 type EstStatus = 'Estimate' | 'Quoted' | 'On Subs' | 'Fixed' | 'Cancelled' | 'Lost';
-type LegType = 'Delivery' | 'Ballast' | 'Bunker' | 'Laden' | 'Canal Transit' | 'Discharging' | 'Redelivery';
+type LegType = string;
 
 interface VesselParticular {
   name: string;
@@ -88,6 +97,7 @@ interface Cargo {
   quantity: number;
   unit: string;
   frt: number;
+  frtUnit: string;
   term: string;
   aCommPct: number;
   brkgPct: number;
@@ -110,6 +120,8 @@ interface PortRow {
   dem: number;
   des: number;
   portCharge: number;
+  laytimeTerm: string;
+  rateUnit: string;
 }
 
 interface Commercial {
@@ -135,9 +147,14 @@ interface Commercial {
 }
 
 interface Canals {
-  suez: boolean;
-  panama: boolean;
-  kiel: boolean;
+  list: string[];
+}
+
+/** Ad-hoc operation expense line with an admin-defined type. */
+interface ExpenseLine {
+  id: string;
+  type: string;
+  amount: number;
 }
 
 interface EstimateInputs {
@@ -148,11 +165,19 @@ interface EstimateInputs {
   commercial: Commercial;
   canals: Canals;
   startDate: string;
+  currency: string;
+  laytimeTerms: string;
+  ecaRoute: string;
+  remark: string;
+  expenses: ExpenseLine[];
 }
 
 interface LegCalc {
   sea: number;
   eca: number;
+  work: number;
+  dem: number;
+  des: number;
   arrival: string;
   departure: string;
 }
@@ -201,23 +226,64 @@ interface EstimateResult {
   perLeg: LegCalc[];
 }
 
-interface Snapshot {
+/** A comparison scenario: same estimate with a vessel or cargo override. */
+type CompareBasis = 'vessel' | 'cargo';
+interface Scenario {
   id: string;
   name: string;
-  result: EstimateResult;
+  basis: CompareBasis;
+  // vessel overrides
+  ballastSpeed: number;
+  ladenSpeed: number;
+  foBallast: number;
+  foLaden: number;
+  dailyHire: number;
+  hAddCommPct: number;
+  // cargo overrides
+  qty: number;
+  rate: number;
+  aCommPct: number;
+  brkgPct: number;
+  frtTaxPct: number;
+}
+
+/** Compute the estimate result for a scenario by cloning inputs + applying its override. */
+function scenarioResult(base: EstimateInputs, sc: Scenario): EstimateResult {
+  const i: EstimateInputs = JSON.parse(JSON.stringify(base));
+  if (sc.basis === 'vessel') {
+    i.perf.speedMode = 'Full';
+    i.perf.full = { ballast: sc.ballastSpeed, laden: sc.ladenSpeed };
+    i.perf.mainNormal = { ...i.perf.mainNormal, ballast: sc.foBallast, laden: sc.foLaden };
+    i.ports = i.ports.map((p) => ({
+      ...p,
+      speed:
+        p.type === 'Ballast' || p.type === 'Delivery' || p.type === 'Redelivery'
+          ? sc.ballastSpeed
+          : sc.ladenSpeed,
+    }));
+    i.commercial = { ...i.commercial, dailyHire: sc.dailyHire, hAddCommPct: sc.hAddCommPct };
+  } else {
+    i.cargoes = i.cargoes.map((c, idx) =>
+      idx === 0
+        ? { ...c, quantity: sc.qty, frt: sc.rate, aCommPct: sc.aCommPct, brkgPct: sc.brkgPct, frtTaxPct: sc.frtTaxPct }
+        : c,
+    );
+  }
+  return computeEstimate(i);
 }
 
 /* -------------------------------------------------------------- constants */
 
 const STATUS_META: Record<EstStatus, { color: string }> = {
-  Estimate: { color: 'slate' },
+  Estimate: { color: 'green' },
   Quoted: { color: 'blue' },
   'On Subs': { color: 'amber' },
   Fixed: { color: 'green' },
   Cancelled: { color: 'red' },
   Lost: { color: 'grey' },
 };
-const LEG_TYPES: LegType[] = ['Delivery', 'Ballast', 'Bunker', 'Laden', 'Canal Transit', 'Discharging', 'Redelivery'];
+// Port-type dropdown values are derived from the admin options store inside the
+// component. 'Ballast' / 'Laden' drive the sea-day (empty vs loaded) classification.
 
 /* Fixture type = how the vessel is taken in — how it is employed out. */
 type InKind = 'TCIN' | 'TCTIN' | 'VIN' | 'OWN';
@@ -259,8 +325,14 @@ function num(v: string): number {
 function fmt(n: number, dp = 1): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }
+/** Currency symbols for money display; ACTIVE_CURRENCY is set from the estimate. */
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: '$', EUR: '€', GBP: '£', SGD: 'S$', AED: 'AED ', INR: '₹', JPY: '¥', CNY: 'CN¥',
+};
+let ACTIVE_CURRENCY = 'USD';
 function money(n: number): string {
-  return `${n < 0 ? '-' : ''}$${fmt(Math.abs(n), 0)}`;
+  const sym = CURRENCY_SYMBOLS[ACTIVE_CURRENCY] ?? '$';
+  return `${n < 0 ? '-' : ''}${sym}${fmt(Math.abs(n), 0)}`;
 }
 function addDays(date: Date, days: number): Date {
   return new Date(date.getTime() + days * 86_400_000);
@@ -269,11 +341,117 @@ function fmtDate(d: Date): string {
   const pad = (x: number) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+// CPDD "DD.MM.YYYY" -> ISO "YYYY-MM-DD" for the date input.
+function cpddToIso(cpdd: string): string {
+  const [d, m, y] = cpdd.split('.');
+  return d && m && y ? `${y}-${m}-${d}` : new Date().toISOString().slice(0, 10);
+}
 function uid(p: string): string {
   return `${p}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Great-circle distance between two lat/lon points, in nautical miles. */
+function haversineNm(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+  const R = 3440.065; // Earth radius in nm
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+/** Total length of a sea-route polyline, in nautical miles. */
+function routeDistanceNm(pts: { lat: number; lon: number }[]): number {
+  let d = 0;
+  for (let i = 1; i < pts.length; i += 1) d += haversineNm(pts[i - 1], pts[i]);
+  return d;
+}
+
+/** Centered modal used by the estimation header tools (Loadable Qty / Result Plus / Remark). */
+function ToolModal({
+  title,
+  onClose,
+  wide,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  wide?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="fv-ce__modal-overlay" role="presentation" onClick={onClose}>
+      <div
+        className={`fv-ce__modal${wide ? ' fv-ce__modal--wide' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="fv-ce__modal-head">
+          <h5>{title}</h5>
+          <button type="button" className="fv-ce__modal-close" onClick={onClose} aria-label="Close">
+            <i className="fas fa-xmark" aria-hidden="true" />
+          </button>
+        </header>
+        <div className="fv-ce__modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------------------------------------------- estimate engine */
+
+/** Normalise a port name (strip "<Country>" / "(code)") for cargo↔port matching. */
+function cleanPortName(s: string): string {
+  return s.split('<')[0].split('(')[0].trim().toLowerCase();
+}
+
+/**
+ * Cargo quantity handled at each port row, in rotation order. Each cargo's
+ * load/discharge quantity is assigned to the next matching port that hasn't
+ * been used yet (so multiple same-named berths each take a cargo), falling
+ * back to the last matching port when they're all used.
+ */
+function portHandledQty(ports: PortRow[], cargoes: Cargo[]): Record<string, number> {
+  const handled: Record<string, number> = {};
+  const loadUsed = new Set<string>();
+  const dischUsed = new Set<string>();
+  const add = (id: string, q: number) => { handled[id] = (handled[id] ?? 0) + q; };
+  const match = (a: string, b: string) => {
+    const x = cleanPortName(a);
+    return x !== '' && x === cleanPortName(b);
+  };
+  const pick = (target: string, used: Set<string>): PortRow | undefined => {
+    const fresh = ports.find((p) => match(p.port, target) && !used.has(p.id));
+    if (fresh) return fresh;
+    for (let k = ports.length - 1; k >= 0; k -= 1) if (match(ports[k].port, target)) return ports[k];
+    return undefined;
+  };
+  for (const c of cargoes) {
+    if (c.quantity <= 0) continue;
+    if (c.loadPort) {
+      const p = pick(c.loadPort, loadUsed);
+      if (p) { loadUsed.add(p.id); add(p.id, c.quantity); }
+    }
+    if (c.dischPort) {
+      const p = pick(c.dischPort, dischUsed);
+      if (p) { dischUsed.add(p.id); add(p.id, c.quantity); }
+    }
+  }
+  return handled;
+}
+
+/** Working days at a port: from L/D rate + cargo handled when set, else manual. */
+function portWorkDays(p: PortRow, handledQty: number): number {
+  if (p.ldRate > 0 && handledQty > 0) {
+    const perDay = /hour/i.test(p.rateUnit) ? p.ldRate * 24 : p.ldRate;
+    if (perDay > 0) return handledQty / perDay;
+  }
+  return p.work;
+}
 
 function computeEstimate(i: EstimateInputs): EstimateResult {
   const { cargoes, ports, perf, commercial } = i;
@@ -313,14 +491,18 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
   const start = new Date(i.startDate);
   let cursor = start;
   const perLeg: LegCalc[] = [];
+  const handled = portHandledQty(ports, cargoes);
 
   for (const p of ports) {
     const spd = p.speed > 0 ? p.speed : 12;
+    // Weather margin reduces the effective speed used for the leg time.
+    const effSpeed = Math.max(0.1, spd * (1 - p.wf / 100));
     let legSea: number;
     let legEca: number;
     if (p.distance > 0) {
-      legSea = (p.distance / (spd * 24)) * (1 + p.wf / 100);
-      legEca = p.ecaDistance > 0 ? p.ecaDistance / (spd * 24) : 0;
+      legSea = p.distance / (effSpeed * 24);
+      legEca = p.ecaDistance > 0 ? p.ecaDistance / (effSpeed * 24) : 0;
+      legEca = Math.min(legEca, legSea); // ECA portion can't exceed the whole leg
     } else {
       // No distance → manual buffer days (e.g. Delivery / Redelivery margin).
       legSea = p.seaManual;
@@ -328,32 +510,51 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
     }
     const normalSea = Math.max(0, legSea - legEca);
     const isBallast = p.type === 'Ballast' || p.type === 'Delivery' || p.type === 'Redelivery';
+    // Working days: from L/D rate + cargo when a rate is set, else manual.
+    const work = portWorkDays(p, handled[p.id] ?? 0);
+
+    // Demurrage / despatch from laytime: allowed (qty ÷ rate) vs used (idle + work).
+    // p.dem holds the demurrage rate ($/day); despatch is at half rate.
+    let legDem = 0;
+    let legDes = 0;
+    const ratePerDay = /hour/i.test(p.rateUnit) ? p.ldRate * 24 : p.ldRate;
+    const qtyHandled = handled[p.id] ?? 0;
+    if (ratePerDay > 0 && qtyHandled > 0 && p.dem > 0) {
+      const allowed = qtyHandled / ratePerDay;
+      const used = p.idle + work;
+      const balance = allowed - used;
+      if (balance < 0) legDem = -balance * p.dem; // exceeded laytime → demurrage (income)
+      else legDes = balance * (p.dem / 2); // saved laytime → despatch (cost, half rate)
+    }
 
     foNormalSea += normalSea * (isBallast ? perf.mainNormal.ballast : perf.mainNormal.laden);
     foEcaSea += legEca * (isBallast ? perf.mainEca.ballast : perf.mainEca.laden);
-    foPort += p.idle * perf.mainNormal.idle + p.work * perf.mainNormal.work;
+    foPort += p.idle * perf.mainNormal.idle + work * perf.mainNormal.work;
     mgoSea += normalSea * perf.subNormal.sea;
     mgoEcaSea += legEca * perf.subEca.sea;
-    mgoPort += p.idle * perf.subNormal.idle + p.work * perf.subNormal.work;
+    mgoPort += p.idle * perf.subNormal.idle + work * perf.subNormal.work;
 
     seaDays += legSea;
     ecaDays += legEca;
     if (isBallast) ballastDays += legSea;
     else ladenDays += legSea;
     idleTotal += p.idle;
-    workTotal += p.work;
+    workTotal += work;
     distanceTotal += p.distance;
     ecaDistanceTotal += p.ecaDistance;
     portCharge += p.portCharge;
-    demTotal += p.dem;
-    desTotal += p.des;
+    demTotal += legDem;
+    desTotal += legDes;
 
     const arrival = addDays(cursor, legSea);
-    const departure = addDays(arrival, p.idle + p.work);
+    const departure = addDays(arrival, p.idle + work);
     cursor = departure;
     perLeg.push({
       sea: round(legSea, 2),
       eca: round(legEca, 2),
+      work: round(work, 2),
+      dem: round(legDem),
+      des: round(legDes),
       arrival: legSea > 0 ? fmtDate(arrival) : '—',
       departure: fmtDate(departure),
     });
@@ -390,7 +591,8 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
   const bunkerOpex = weOperate ? bunkerExpense : 0;
   const bodOpex = showBOD ? bunkerAdj : 0;
   const fixedOpex = commercial.cev + commercial.ilohc + commercial.ballastBonus + commercial.routingService + commercial.others;
-  const opExpense = fixedOpex + freightCommOpex + demDesOpex + portOpex + bunkerOpex + bodOpex;
+  const extraOpex = (i.expenses ?? []).reduce((s, e) => s + e.amount, 0);
+  const opExpense = fixedOpex + extraOpex + freightCommOpex + demDesOpex + portOpex + bunkerOpex + bodOpex;
 
   // Revenue: freight (voyage out) or net hire out (time-charter out).
   const revenue = outKind === 'VOUT' ? freight : commercial.dailyHireOut * (1 - commercial.hAddCommOutPct / 100) * voyageDays;
@@ -489,7 +691,7 @@ function solveFreightForHire(i: EstimateInputs, targetHire: number): Cargo[] {
 
 /* ------------------------------------------------------------ seed inputs */
 
-function seedInputs(voyage: Voyage | undefined): EstimateInputs {
+function seedInputs(voyage: Voyage | undefined, blank = false): EstimateInputs {
   const perf: Performance = {
     speedMode: 'Full',
     full: { ballast: 14, laden: 14 },
@@ -517,6 +719,7 @@ function seedInputs(voyage: Voyage | undefined): EstimateInputs {
     quantity,
     unit: 'MT',
     frt,
+    frtUnit: 'USD/MT',
     term: 'FIO',
     aCommPct: 3.75,
     brkgPct: 1.25,
@@ -524,16 +727,9 @@ function seedInputs(voyage: Voyage | undefined): EstimateInputs {
     linerTerm: 0,
   });
 
-  const cargoes: Cargo[] = [
-    c('5011ACCT1', 'general', 'Tianjin <China>', 'Ravenna <Italy>', 15_000, 28),
-    c('5011ACCT1', 'general', 'Rizhao <China>', 'Ravenna <Italy>', 10_000, 28),
-    c('5011ACCT1', 'general', 'Tianjin <China>', 'Rotterdam <Netherlands>', 10_000, 30),
-    c('5011ACCT2', 'steel', 'Qingdao <China>', 'Rotterdam <Netherlands>', 15_000, 35),
-  ];
-  if (voyage) {
-    cargoes[0].loadPort = voyage.portFrom || cargoes[0].loadPort;
-    cargoes[0].dischPort = voyage.portTo || cargoes[0].dischPort;
-  }
+  const cargoes: Cargo[] = blank
+    ? [c('', '', '', '', 0, 0)]
+    : [c('ACCT1', 'Iron Ore', 'Vishakhapatnam <India>', 'Qingdao <China>', 50_000, 22)];
 
   const p = (
     type: LegType,
@@ -544,7 +740,7 @@ function seedInputs(voyage: Voyage | undefined): EstimateInputs {
     ldRate: number,
     idle: number,
     work: number,
-    des: number,
+    demRate: number,
     portCharge: number,
     seaManual = 0,
   ): PortRow => ({
@@ -559,59 +755,65 @@ function seedInputs(voyage: Voyage | undefined): EstimateInputs {
     idle,
     work,
     seaManual,
-    dem: 0,
-    des,
+    dem: demRate,
+    des: 0,
     portCharge,
+    laytimeTerm: 'SHINC',
+    rateUnit: 'MT/Day',
   });
 
-  const ports: PortRow[] = [
-    p('Delivery', 'CJK (Changjiangkou) <China>', 0, 0, 14, 0, 0, 0, 0, 0),
-    p('Laden', 'Tianjin <China>', 676, 0, 14, 10_000, 0.5, 2.5, 3_000, 45_000),
-    p('Laden', 'Qingdao <China>', 463, 0, 14, 5_000, 0.5, 3.0, 2_500, 35_000),
-    p('Laden', 'Rizhao <China>', 82, 0, 14, 5_000, 0.5, 2.0, 3_000, 35_000),
-    p('Bunker', 'Singapore <Singapore>', 2_461, 0, 14, 0, 0.5, 0, 0, 3_000),
-    p('Canal Transit', 'Suez Canal (RP)', 5_047, 0, 14, 0, 0.21, 0, 0, 185_000),
-    p('Discharging', 'Ravenna <Italy>', 1_356, 0, 14, 8_000, 0.5, 3.13, 3_000, 40_000),
-    p('Discharging', 'Rotterdam <Netherlands>', 3_057, 417, 14, 10_000, 0.5, 1.0, 2_500, 20_000),
-    p('Discharging', 'Rotterdam <Netherlands>', 0, 0, 14, 5_000, 1.66, 3.0, 3_000, 20_000),
-    p('Redelivery', 'Redelivery Margin', 0, 0, 0, 0, 1.0, 0, 0, 0, 2.0),
-  ];
+  const ports: PortRow[] = blank
+    ? [
+        p('Loading', '', 0, 0, perf.full.laden, 0, 0.5, 0, 0, 0),
+        p('Discharging', '', 0, 0, perf.full.laden, 0, 0.5, 0, 0, 0),
+      ]
+    : [
+        p('Delivery', 'Chittagong <Bangladesh>', 0, 0, 14, 0, 0, 0, 0, 0),
+        p('Loading', 'Vishakhapatnam <India>', 660, 0, 14, 15_000, 0.5, 0, 18_000, 40_000),
+        p('Bunker', 'Singapore <Singapore>', 1_650, 0, 14, 0, 0.5, 0, 0, 5_000),
+        p('Discharging', 'Qingdao <China>', 2_750, 0, 14, 15_000, 0.5, 0, 20_000, 45_000),
+      ];
 
-  const commercial: Commercial = {
-    dailyHire: voyage ? Math.round(voyage.price) : 8_500,
-    hAddCommPct: 3.75,
-    dailyHireOut: voyage ? Math.round(voyage.price * 1.1) : 9_500,
-    hAddCommOutPct: 1.25,
-    ownDailyCost: 6_500,
-    freightIn: 900_000,
-    bodQty: 600,
-    bodPrice: voyage?.foCost || 400,
-    borQty: 400,
-    borPrice: (voyage?.foCost || 400) - 20,
-    cev: 3_177.9,
-    ilohc: 5_000,
-    ballastBonus: 0,
-    routingService: 0,
-    others: 0,
-    linerTerms: 0,
-    vlsfoPrice: voyage?.foCost || 320,
-    mgoPrice: voyage?.goCost || 360,
-    ulsfoPrice: 350,
-  };
+  const commercial: Commercial = blank
+    ? {
+        dailyHire: 0, hAddCommPct: 3.75, dailyHireOut: 0, hAddCommOutPct: 1.25, ownDailyCost: 0,
+        freightIn: 0, bodQty: 0, bodPrice: 0, borQty: 0, borPrice: 0, cev: 0, ilohc: 0,
+        ballastBonus: 0, routingService: 0, others: 0, linerTerms: 0,
+        vlsfoPrice: 320, mgoPrice: 360, ulsfoPrice: 360,
+      }
+    : {
+        dailyHire: voyage ? Math.round(voyage.price) : 8_500,
+        hAddCommPct: 3.75,
+        dailyHireOut: voyage ? Math.round(voyage.price * 1.1) : 9_500,
+        hAddCommOutPct: 1.25,
+        ownDailyCost: 6_500,
+        freightIn: 900_000,
+        bodQty: 600,
+        bodPrice: voyage?.foCost || 400,
+        borQty: 400,
+        borPrice: (voyage?.foCost || 400) - 20,
+        cev: 3_177.9,
+        ilohc: 5_000,
+        ballastBonus: 0,
+        routingService: 0,
+        others: 0,
+        linerTerms: 0,
+        vlsfoPrice: voyage?.foCost || 320,
+        mgoPrice: voyage?.goCost || 360,
+        // ECA fuel (ULSFO) is a premium over VLSFO, so ECA distance raises cost.
+        ulsfoPrice: (voyage?.foCost || 320) + 40,
+      };
 
-  return { fixType: 'TCIN-VOUT', perf, cargoes, ports, commercial, canals: { suez: true, panama: true, kiel: false }, startDate: '2020-08-06T16:10' };
+  return { fixType: 'TCIN-VOUT', perf, cargoes, ports, commercial, canals: { list: blank ? [] : ['Suez Canal', 'Panama Canal'] }, startDate: blank ? new Date().toISOString().slice(0, 16) : '2020-08-06T16:10', currency: 'USD', laytimeTerms: 'SHINC', ecaRoute: 'Non-Bypass ECA Route', remark: '', expenses: [] };
 }
 
-/** Vessel types grouped by segment for the Vessel Particular "Type" dropdown. */
-const VESSEL_TYPES: { group: string; types: string[] }[] = [
-  { group: 'Dry Bulk', types: ['Mini Bulker', 'Handysize', 'Handymax', 'Supramax', 'Ultramax', 'Panamax', 'Kamsarmax', 'Post-Panamax', 'Capesize', 'Newcastlemax', 'VLOC', 'Valemax'] },
-  { group: 'Tanker', types: ['Product / MR', 'LR1', 'LR2', 'Panamax Tanker', 'Aframax', 'Suezmax', 'VLCC', 'ULCC', 'Chemical Tanker', 'Bitumen Tanker', 'Shuttle Tanker'] },
-  { group: 'Gas', types: ['LNG Carrier', 'LPG Carrier', 'VLGC', 'Ethylene Carrier'] },
-  { group: 'Container', types: ['Feeder', 'Feedermax', 'Container Panamax', 'Post-Panamax Container', 'New Panamax', 'ULCV'] },
-  { group: 'Other', types: ['General Cargo', 'Multipurpose (MPP)', 'Reefer', 'Ro-Ro', 'PCTC / Car Carrier', 'Heavy Lift', 'Cement Carrier', 'Wood Chip Carrier', 'Livestock Carrier', 'OSV', 'Tug', 'Barge'] },
-];
+/** Vessel types for the Vessel Particular "Type" dropdown come from the shared
+ * options list ({@link VESSEL_TYPE_OPTIONS}). */
 
-function seedVessel(voyage: Voyage | undefined): VesselParticular {
+function seedVessel(voyage: Voyage | undefined, blank = false): VesselParticular {
+  if (blank) {
+    return { name: '', dwt: 0, draft: 0, tpc: 0, built: 0, kind: '', type: '' };
+  }
   return {
     name: voyage?.vessel || 'oriental phoenix',
     dwt: voyage ? num(voyage.dwt) : 56_811,
@@ -652,49 +854,130 @@ function Section({
 
 /* ------------------------------------------------------------ main component */
 
-export function ChateringEstimationPage() {
-  const voyage = useSelectedVoyage();
+export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
+  const [searchParams] = useSearchParams();
+  const selectedVoyage = useSelectedVoyage();
+  // "create" mode (prop or ?new=1) opens a blank estimate — no vessel required.
+  const createMode = mode === 'create' || searchParams.get('new') === '1';
+  // Opening a previously saved estimate from the sidebar (?est=<id>).
+  const estParam = searchParams.get('est');
+  const savedRecord = useMemo(() => (estParam ? getSavedEstimate(estParam) : undefined), [estParam]);
+  const blankVoyage = useMemo(() => makeBlankVoyage(), []);
+  // A saved estimate (or a brand-new one) works off a blank voyage base; the
+  // saved snapshot then overrides the seeded values.
+  const voyage = createMode || estParam ? blankVoyage : selectedVoyage;
 
-  const [inputs, setInputs] = useState<EstimateInputs>(() => seedInputs(voyage));
-  const [vessel, setVessel] = useState<VesselParticular>(() => seedVessel(voyage));
-  const [status, setStatus] = useState<EstStatus>('Estimate');
+  const [inputs, setInputs] = useState<EstimateInputs>(() => {
+    const snap = savedRecord?.data as { inputs?: EstimateInputs } | undefined;
+    return snap?.inputs ?? seedInputs(voyage, createMode);
+  });
+  const [vessel, setVessel] = useState<VesselParticular>(() => {
+    const snap = savedRecord?.data as { vessel?: VesselParticular } | undefined;
+    return snap?.vessel ?? seedVessel(voyage, createMode);
+  });
+  const [status, setStatus] = useState<EstStatus>((savedRecord?.status as EstStatus) ?? 'Estimate');
   const [locked, setLocked] = useState(false);
   const [fixtureNo, setFixtureNo] = useState<string | null>(null);
   const [lastModified, setLastModified] = useState('2020-08-06 17:11');
   const [compareOpen, setCompareOpen] = useState(false);
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
-  const [snapshotName, setSnapshotName] = useState('');
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [linkHF, setLinkHF] = useState(false);
+  const [hireBasis, setHireBasis] = useState('Time Charter');
+  const [canalsOpen, setCanalsOpen] = useState(false);
+  const canalsRef = useRef<HTMLDivElement | null>(null);
+  const [gettingDist, setGettingDist] = useState(false);
+  // Header tool popups (Loadable Qty / Result Plus / Remark).
+  const [lqOpen, setLqOpen] = useState(false);
+  const [tplOpen, setTplOpen] = useState(false);
+  // Mark-Fixed CP-date picker.
+  const [fixOpen, setFixOpen] = useState(false);
+  const [cpDate, setCpDate] = useState('');
+  const [lq, setLq] = useState({
+    summerDwt: 0,
+    densityAtPort: 1.025,
+    lightship: 0,
+    point: '',
+    vlsfo: 0,
+    mgo: 0,
+    bw: 0,
+    fw: 150,
+    constants: 500,
+  });
   const handedOver = useHandedOver();
   const isSent = voyage ? handedOver.includes(voyage.id) : false;
+  const cpdd = useCpdds()[voyage?.id ?? ''];
+  const opts = useEstimationOptions();
   const worldPorts = useWorldPorts();
   const portOptions = useMemo(() => worldPorts.slice(0, 4000).map((p) => p.label), [worldPorts]);
   const vesselOptions = useMemo(() => Array.from(new Set(VOYAGES.map((v) => v.vessel))).sort(), []);
   // Account options come from Settings → Account Details.
   const accountOptions = useMemo(() => accountNames(), []);
 
-  const estNo = useMemo(() => `EST-${voyage?.id ?? '0000'}`, [voyage?.id]);
+  // Stable estimate number generated once for a brand-new estimate.
+  const [createEstNo] = useState(() => nextEstimateNo());
+  const estNo = useMemo(() => {
+    if (savedRecord?.estNo) return savedRecord.estNo;
+    // A brand-new estimate works off a throwaway `new-<timestamp>` voyage id, so
+    // give it a proper sequential number instead of exposing that internal id.
+    if (createMode) return createEstNo;
+    return `EST-${voyage?.id ?? '0000'}`;
+  }, [savedRecord?.estNo, createMode, createEstNo, voyage?.id]);
+  // Stable id for the saved-estimate record. A brand-new (create-mode) estimate
+  // gets a fresh id so re-saving updates the same record; an existing voyage
+  // reuses its voyage id.
+  const [estimateId] = useState(() =>
+    savedRecord?.id ?? (createMode ? `est-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` : (voyage?.id ?? `est-${Date.now()}`)),
+  );
 
   // Publish the estimate status so the Chartering sidebar buckets it correctly.
   useEffect(() => {
     if (voyage) setEstimationStatus(voyage.id, status);
   }, [voyage?.id, status]);
 
+  // Keep the saved-estimate record's status in sync so the sidebar badge (e.g.
+  // "On Subs") updates immediately when the status changes.
+  useEffect(() => {
+    setSavedEstimateStatus(estimateId, status);
+  }, [estimateId, status]);
+
   // Publish the selected fix type so the sidebar shows it against the vessel.
   useEffect(() => {
     if (voyage) setEstimationFixType(voyage.id, inputs.fixType);
   }, [voyage?.id, inputs.fixType]);
 
+  // Close the canals dropdown on outside click.
   useEffect(() => {
-    setInputs(seedInputs(voyage));
-    setVessel(seedVessel(voyage));
-    setStatus('Estimate');
+    if (!canalsOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (canalsRef.current && !canalsRef.current.contains(e.target as Node)) setCanalsOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [canalsOpen]);
+
+  // Close the Loadable Quantity pop-up on Escape.
+  useEffect(() => {
+    if (!lqOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLqOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [lqOpen]);
+
+  useEffect(() => {
+    const snap = savedRecord?.data as { inputs?: EstimateInputs; vessel?: VesselParticular } | undefined;
+    setInputs(snap?.inputs ?? seedInputs(voyage, createMode));
+    setVessel(snap?.vessel ?? seedVessel(voyage, createMode));
+    setStatus((savedRecord?.status as EstStatus) ?? 'Estimate');
     setLocked(false);
     setFixtureNo(null);
-    setSnapshots([]);
-  }, [voyage?.id]);
+    setScenarios([]);
+  }, [voyage?.id, estParam]);
 
   const result = useMemo(() => computeEstimate(inputs), [inputs]);
+  // Cargo handled per port (drives L/D-rate working days shown read-only).
+  const handledQty = useMemo(() => portHandledQty(inputs.ports, inputs.cargoes), [inputs.ports, inputs.cargoes]);
 
   // Keep Hire/Day synced to the break-even hire (voyage-out fixtures only).
   useEffect(() => {
@@ -706,16 +989,18 @@ export function ChateringEstimationPage() {
   }, [linkHF, locked, result, inputs.fixType, inputs.commercial.hAddCommPct, inputs.commercial.dailyHire]);
 
   const compareOptions = useMemo(
-    () => [{ id: 'current', name: 'Current', result }, ...snapshots.map((s) => ({ id: s.id, name: s.name, result: s.result }))],
-    [result, snapshots],
+    () => [{ id: 'current', name: 'Current', result }, ...scenarios.map((s) => ({ id: s.id, name: s.name, result: scenarioResult(inputs, s) }))],
+    [result, scenarios, inputs],
   );
   const best = useMemo(() => {
     const r = compareOptions.map((o) => o.result);
+    const resultDay = (x: EstimateResult) => (x.voyageDays > 0 ? x.profit / x.voyageDays : 0);
     return {
       profit: Math.max(...r.map((x) => x.profit)),
       cost: Math.min(...r.map((x) => x.totalExpense)),
       tce: Math.max(...r.map((x) => x.tce)),
       days: Math.min(...r.map((x) => x.voyageDays)),
+      resultDay: Math.max(...r.map(resultDay)),
     };
   }, [compareOptions]);
   const cargoTotals = useMemo(() => {
@@ -757,10 +1042,15 @@ export function ChateringEstimationPage() {
     patch({
       cargoes: [
         ...inputs.cargoes,
-        { id: uid('cg'), account: '', name: '', loadPort: '', dischPort: '', quantity: 0, unit: 'MT', frt: 0, term: 'FIO', aCommPct: 3.75, brkgPct: 1.25, frtTaxPct: 0, linerTerm: 0 },
+        { id: uid('cg'), account: '', name: '', loadPort: '', dischPort: '', quantity: 0, unit: defaultQtyUnitForVessel(vessel.type), frt: 0, frtUnit: defaultFreightUnit(defaultQtyUnitForVessel(vessel.type)), term: 'FIO', aCommPct: 3.75, brkgPct: 1.25, frtTaxPct: 0, linerTerm: 0 },
       ],
     });
   const removeCargo = (id: string) => patch({ cargoes: inputs.cargoes.filter((c) => c.id !== id) });
+
+  // Ad-hoc operation expenses (type dropdown + amount).
+  const addExpense = () => patch({ expenses: [...inputs.expenses, { id: uid('ex'), type: opts.expenseTypes[0] ?? 'Other', amount: 0 }] });
+  const updateExpense = (id: string, p: Partial<ExpenseLine>) => patch({ expenses: inputs.expenses.map((e) => (e.id === id ? { ...e, ...p } : e)) });
+  const removeExpense = (id: string) => patch({ expenses: inputs.expenses.filter((e) => e.id !== id) });
 
   const updatePort = (id: string, p: Partial<PortRow>) =>
     patch({ ports: inputs.ports.map((r) => (r.id === id ? { ...r, ...p } : r)) });
@@ -768,11 +1058,50 @@ export function ChateringEstimationPage() {
     patch({
       ports: [
         ...inputs.ports,
-        { id: uid('pr'), type: 'Discharging', port: '', distance: 0, ecaDistance: 0, wf: 5, speed: inputs.perf.full.laden, ldRate: 0, idle: 0.5, work: 0, seaManual: 0, dem: 0, des: 0, portCharge: 0 },
+        { id: uid('pr'), type: 'Discharging', port: '', distance: 0, ecaDistance: 0, wf: 5, speed: resolveSpeedSet(inputs.perf, inputs.perf.speedMode).laden, ldRate: 0, idle: 0.5, work: 0, seaManual: 0, dem: 15_000, des: 0, portCharge: 0, laytimeTerm: 'SHINC', rateUnit: 'MT/Day' },
       ],
     });
   const removePort = (id: string) => patch({ ports: inputs.ports.filter((r) => r.id !== id) });
-  // Reorder a leg so the rotation can be arranged in any sequence.
+
+  // Resolve a port/landmark name to coordinates for auto-distance.
+  const resolvePortCoord = (name: string): { lat: number; lon: number } | null => {
+    const raw = name.trim();
+    if (!raw) return null;
+    // The port cells store the full "Name, Country (CODE)" label, so match that first.
+    const exact = resolveWorldPort(raw, worldPorts);
+    if (exact) return { lat: exact.lat, lon: exact.lon };
+    // Fall back to a fuzzy match on just the leading name segment.
+    const v = raw.split('(')[0].split(',')[0].trim().toLowerCase();
+    if (v.length < 3) return null;
+    const p =
+      worldPorts.find((w) => w.name.toLowerCase() === v) ??
+      worldPorts.find((w) => w.name.toLowerCase().startsWith(v)) ??
+      worldPorts.find((w) => w.name.toLowerCase().includes(v));
+    return p ? { lat: p.lat, lon: p.lon } : null;
+  };
+
+  // Auto-fill each leg's distance from the water route between consecutive ports.
+  const getDistances = async () => {
+    if (locked || gettingDist) return;
+    setGettingDist(true);
+    try {
+      const updated = [...inputs.ports];
+      for (let idx = 1; idx < updated.length; idx += 1) {
+        const a = resolvePortCoord(updated[idx - 1].port);
+        const b = resolvePortCoord(updated[idx].port);
+        if (!a || !b) continue;
+        try {
+          const route = await generateSeaRoute(a, b);
+          updated[idx] = { ...updated[idx], distance: Math.round(routeDistanceNm(route)) };
+        } catch {
+          /* leave this leg's distance unchanged */
+        }
+      }
+      patch({ ports: updated });
+    } finally {
+      setGettingDist(false);
+    }
+  };
   const movePort = (id: string, dir: -1 | 1) => {
     const list = inputs.ports;
     const i = list.findIndex((r) => r.id === id);
@@ -802,32 +1131,169 @@ export function ChateringEstimationPage() {
   const removeCustomSpeed = (id: string) =>
     patchPerf({ customs: inputs.perf.customs.filter((c) => c.id !== id), speedMode: inputs.perf.speedMode === id ? 'Full' : inputs.perf.speedMode });
   const patchActiveSpeed = (p: Partial<SpeedSet>) => {
-    const mode = inputs.perf.speedMode;
-    if (mode === 'Full') patchPerf({ full: { ...inputs.perf.full, ...p } });
-    else if (mode === 'Eco') patchPerf({ eco: { ...inputs.perf.eco, ...p } });
-    else patchPerf({ customs: inputs.perf.customs.map((c) => (c.id === mode ? { ...c, ...p } : c)) });
+    if (locked) return;
+    setInputs((prev) => {
+      const mode = prev.perf.speedMode;
+      const perf: Performance =
+        mode === 'Full'
+          ? { ...prev.perf, full: { ...prev.perf.full, ...p } }
+          : mode === 'Eco'
+            ? { ...prev.perf, eco: { ...prev.perf.eco, ...p } }
+            : { ...prev.perf, customs: prev.perf.customs.map((c) => (c.id === mode ? { ...c, ...p } : c)) };
+      // Re-apply the edited speed to the port legs (ballast / laden by leg type).
+      return { ...prev, perf, ports: setLegSpeeds({ ...prev, perf }, resolveSpeedSet(perf, mode)) };
+    });
+    touch();
   };
 
   /* -------- header actions -------- */
   const newEstimate = () => {
-    setInputs(seedInputs(voyage));
+    setInputs(seedInputs(voyage, true));
+    setVessel(seedVessel(voyage, true));
     setStatus('Estimate');
     setLocked(false);
     setFixtureNo(null);
-    setSnapshots([]);
+    setScenarios([]);
   };
-  const save = () => touch();
+  // Apply a standard vessel-size template: fill the vessel particulars +
+  // performance profile, keeping the (searched) vessel name intact.
+  const applyTemplate = (tpl: VesselTemplate) => {
+    if (locked) return;
+    setVessel((prev) => ({ ...prev, dwt: tpl.dwt, draft: tpl.draft, tpc: tpl.tpc, type: tpl.type }));
+    setInputs((prev) => {
+      const perf: Performance = {
+        ...prev.perf,
+        full: { ballast: tpl.fullBallast, laden: tpl.fullLaden },
+        eco: { ballast: tpl.ecoBallast, laden: tpl.ecoLaden },
+        mainNormal: { ...prev.perf.mainNormal, ballast: tpl.mainBallast, laden: tpl.mainLaden, idle: tpl.mainIdle, work: tpl.mainWork },
+        mainEca: { ...prev.perf.mainEca, ballast: tpl.mainBallast, laden: tpl.mainLaden, idle: tpl.mainIdle, work: tpl.mainWork },
+        subNormal: { ...prev.perf.subNormal, sea: tpl.subSea, idle: tpl.subIdle, work: tpl.subWork },
+        subEca: { ...prev.perf.subEca, sea: tpl.subSea, idle: tpl.subIdle, work: tpl.subWork },
+      };
+      return { ...prev, perf, ports: setLegSpeeds({ ...prev, perf }, resolveSpeedSet(perf, prev.perf.speedMode)) };
+    });
+    touch();
+    setTplOpen(false);
+  };
+  const save = () => {
+    touch();
+    const label = vessel.name.trim() || 'New Estimate';
+    upsertSavedEstimate({
+      id: estimateId,
+      estNo,
+      vessel: label,
+      fixType: inputs.fixType,
+      status,
+      profit: result.profit,
+      tce: result.tce,
+      savedAt: new Date().toLocaleString(),
+      data: { inputs, vessel },
+    });
+    addNotification(`Estimate saved — ${label} (${money(result.profit)} profit)`, 'Chartering');
+  };
+  // Build and print a PDF report. When Compare is open with variants, the
+  // report is the comparison table; otherwise it is the single-estimate sheet.
+  const exportPdf = () => {
+    const win = window.open('', '_blank', 'width=900,height=1200');
+    if (!win) return;
+    const esc = (s: unknown) =>
+      String(s ?? '').replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m] as string));
+    const isCompare = compareOpen && scenarios.length > 0;
+    const title = isCompare ? 'Voyage Estimation — Comparison' : 'Voyage Estimation';
+    let bodyHtml = '';
+    if (isCompare) {
+      const row = (label: string, get: (r: (typeof compareOptions)[number]['result']) => number, kind: 'money' | 'num' | 'pct' = 'money') =>
+        `<tr><td>${label}</td>${compareOptions
+          .map((o) => {
+            const v = get(o.result);
+            const cell = kind === 'money' ? money(v) : kind === 'pct' ? `${fmt(v, 1)}%` : fmt(v, 2);
+            return `<td class="r">${cell}</td>`;
+          })
+          .join('')}</tr>`;
+      bodyHtml = `<table><thead><tr><th>Metric</th>${compareOptions
+        .map((o) => `<th class="r">${esc(o.name)}</th>`)
+        .join('')}</tr></thead><tbody>
+        ${row('Profit', (r) => r.profit)}
+        ${row('Revenue', (r) => r.revenue)}
+        ${row('Total Expense', (r) => r.totalExpense)}
+        ${row('TCE / Day', (r) => r.tce)}
+        ${row('Total Hire', (r) => r.totalHire)}
+        ${row('Result / Day', (r) => (r.voyageDays > 0 ? r.profit / r.voyageDays : 0))}
+        ${row('Voyage Days', (r) => r.voyageDays, 'num')}
+        ${row('Bunker', (r) => r.bunkerExpense)}
+      </tbody></table>`;
+    } else {
+      const cargoRows = inputs.cargoes
+        .map(
+          (c) =>
+            `<tr><td>${esc(c.name || '—')}</td><td>${esc(c.loadPort || '—')} → ${esc(c.dischPort || '—')}</td><td class="r">${fmt(c.quantity, 0)} ${esc(c.unit)}</td><td class="r">${fmt(c.frt, 2)} ${esc(c.frtUnit)}</td></tr>`,
+        )
+        .join('');
+      const portRows = inputs.ports
+        .map((p, idx) => {
+          const leg = result.perLeg[idx];
+          return `<tr><td>${esc(p.type)}</td><td>${esc(p.port || '—')}</td><td class="r">${fmt(p.distance, 0)}</td><td class="r">${leg ? fmt(leg.sea, 2) : '—'}</td><td class="r">${leg ? fmt(leg.work, 2) : '—'}</td></tr>`;
+        })
+        .join('');
+      bodyHtml = `
+        <div class="meta"><b>Vessel:</b> ${esc(vessel.name || '—')} &middot; <b>Type:</b> ${esc(vessel.type || '—')} &middot; <b>DWT:</b> ${fmt(vessel.dwt, 0)} &middot; <b>Fix Type:</b> ${esc(inputs.fixType)} &middot; <b>Status:</b> ${esc(status)}</div>
+        <h3>Cargo</h3>
+        <table><thead><tr><th>Cargo</th><th>Route</th><th class="r">Qty</th><th class="r">Rate</th></tr></thead><tbody>${cargoRows}</tbody></table>
+        <h3>Port Rotation</h3>
+        <table><thead><tr><th>Type</th><th>Port</th><th class="r">Distance</th><th class="r">Sea (d)</th><th class="r">Work (d)</th></tr></thead><tbody>${portRows}</tbody></table>
+        <h3>Result</h3>
+        <table><tbody>
+          <tr><td>Revenue</td><td class="r">${money(result.revenue)}</td></tr>
+          <tr><td>Operating Expense</td><td class="r">${money(result.opExpense)}</td></tr>
+          <tr><td>Bunker Expense</td><td class="r">${money(result.bunkerExpense)}</td></tr>
+          <tr><td>Total Hire</td><td class="r">${money(result.totalHire)}</td></tr>
+          <tr><td>TCE / Day</td><td class="r">${money(result.tce)}</td></tr>
+          <tr><td>Voyage Days</td><td class="r">${fmt(result.voyageDays, 2)}</td></tr>
+          <tr class="profit"><td>Profit</td><td class="r">${money(result.profit)}</td></tr>
+        </tbody></table>`;
+    }
+    win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#111;}
+      h1{font-size:18px;margin:0 0 2px;}
+      h3{font-size:13px;margin:16px 0 4px;border-bottom:1px solid #ccc;padding-bottom:2px;}
+      .meta{font-size:12px;color:#333;margin-bottom:8px;}
+      table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px;}
+      th,td{border:1px solid #ddd;padding:4px 6px;text-align:left;}
+      th{background:#f0f0f0;}
+      td.r,th.r{text-align:right;}
+      .profit td{font-weight:bold;border-top:2px solid #333;}
+    </style></head><body>
+      <h1>${esc(title)}</h1>
+      <div class="meta">${esc(vessel.name || 'New Estimate')} &middot; ${esc(estNo)} &middot; ${esc(new Date().toLocaleString())}${fixtureNo ? ` &middot; ${esc(fixtureNo)}` : ''}</div>
+      ${bodyHtml}
+    </body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 300);
+  };
   const changeStatus = (next: EstStatus) => {
     if (locked) return;
     setStatus(next);
   };
   const markFixed = () => {
     if (locked) return;
+    // Ask for the Charter Party date so a delayed fix still records the real
+    // CP date rather than today.
+    setCpDate(cpdd ? cpddToIso(cpdd) : new Date().toISOString().slice(0, 10));
+    setFixOpen(true);
+  };
+  const confirmFixed = () => {
+    if (!voyage || !cpDate) return;
     setStatus('Fixed');
+    const [y, m, d] = cpDate.split('-');
+    setCpdd(voyage.id, `${d}.${m}.${y}`);
     // Monthly fixture sequence derived deterministically from the voyage.
     const seq = (Math.abs(Math.round(voyage.seed ?? 0)) % 99) + 1;
-    setFixtureNo(makeFixtureNo(seq));
+    const fno = makeFixtureNo(seq);
+    setFixtureNo(fno);
+    setFixtureNumber(voyage.id, fno);
     setLocked(true);
+    setFixOpen(false);
   };
   // Reopen a fixed estimate for editing — un-locks the form and reverts to
   // "On Subs" so details can be changed and re-fixed.
@@ -849,16 +1315,58 @@ export function ChateringEstimationPage() {
     addNotification(`New voyage ${voyage.id} — ${voyage.vessel} fixed & sent to Operations. Please assign a PIC.`, 'Operations');
   };
 
-  /* -------- compare -------- */
-  const captureSnapshot = () => {
-    const name = snapshotName.trim() || `Option ${String.fromCharCode(65 + snapshots.length)}`;
-    setSnapshots((s) => [...s, { id: uid('sn'), name, result }]);
-    setSnapshotName('');
+  /* -------- compare scenarios -------- */
+  const baseVariant = (basis: CompareBasis, name: string): Scenario => ({
+    id: uid('sc'),
+    name,
+    basis,
+    ballastSpeed: inputs.perf.full.ballast,
+    ladenSpeed: inputs.perf.full.laden,
+    foBallast: inputs.perf.mainNormal.ballast,
+    foLaden: inputs.perf.mainNormal.laden,
+    dailyHire: inputs.commercial.dailyHire,
+    hAddCommPct: inputs.commercial.hAddCommPct,
+    qty: inputs.cargoes[0]?.quantity ?? 0,
+    rate: inputs.cargoes[0]?.frt ?? 0,
+    aCommPct: inputs.cargoes[0]?.aCommPct ?? 0,
+    brkgPct: inputs.cargoes[0]?.brkgPct ?? 0,
+    frtTaxPct: inputs.cargoes[0]?.frtTaxPct ?? 0,
+  });
+  const addVesselVariant = () => {
+    const n = scenarios.filter((s) => s.basis === 'vessel').length + 1;
+    setScenarios((s) => [...s, baseVariant('vessel', `Vessel ${n}`)]);
+    setCompareOpen(true);
   };
-  const removeSnapshot = (id: string) => setSnapshots((s) => s.filter((x) => x.id !== id));
+  const addCargoVariant = () => {
+    const n = scenarios.filter((s) => s.basis === 'cargo').length + 1;
+    setScenarios((s) => [...s, baseVariant('cargo', `Cargo ${n}`)]);
+    setCompareOpen(true);
+  };
+  const updateScenario = (id: string, p: Partial<Scenario>) =>
+    setScenarios((s) => s.map((x) => (x.id === id ? { ...x, ...p } : x)));
+  const removeScenario = (id: string) => setScenarios((s) => s.filter((x) => x.id !== id));
 
   const stat = STATUS_META[status];
-  const activeCanals = [inputs.canals.suez && 'SUEZ', inputs.canals.panama && 'PANAMA', inputs.canals.kiel && 'KIEL'].filter(Boolean).join(', ');
+  const activeCanals = inputs.canals.list.join(', ');
+  // Port-type dropdown values from the admin store (+ math-critical Ballast/Laden).
+  const legTypes = ['Ballast', 'Laden', ...opts.portTypes];
+  // Drive currency-aware money() formatting for this render.
+  ACTIVE_CURRENCY = inputs.currency;
+
+  // Loadable-quantity constraining points from the voyage (load/bunker/disch) + zone entry.
+  const lqPoints = [
+    ...inputs.ports.filter((p) => p.port && /Load|Bunker|Disch/i.test(p.type)).map((p) => `${p.type} — ${p.port}`),
+    'Summer Zone Entry',
+  ];
+  const openLq = () => {
+    setLq((s) => ({
+      ...s,
+      summerDwt: s.summerDwt || vessel.dwt,
+      lightship: s.lightship || Math.round(vessel.dwt * 0.2),
+      point: s.point || lqPoints[0] || '',
+    }));
+    setLqOpen(true);
+  };
   const speeds = resolveSpeedSet(inputs.perf, inputs.perf.speedMode);
   const fix = parseFix(inputs.fixType);
   // Fixture mode drives which sections/expenses apply.
@@ -870,6 +1378,11 @@ export function ChateringEstimationPage() {
   const numCell = (value: number, onChange: (n: number) => void, min = 66) => (
     <input className="fv-ce__cell-num" style={{ minWidth: min }} type="number" value={value} disabled={locked} onChange={(e) => onChange(num(e.target.value))} />
   );
+  // Numeric cell that sizes its width to the current value (grows / shrinks).
+  const autoNumCell = (value: number, onChange: (n: number) => void, minCh = 3.5) => {
+    const w = Math.max(minCh, String(value ?? '').length + 2.5);
+    return <input className="fv-ce__cell-num fv-ce__cell-auto" style={{ width: `${w}ch` }} type="number" value={value} disabled={locked} onChange={(e) => onChange(num(e.target.value))} />;
+  };
   const txtCell = (value: string, onChange: (v: string) => void, min = 120) => (
     <input className="fv-ce__cell-input" style={{ minWidth: min }} value={value} disabled={locked} onChange={(e) => onChange(e.target.value)} />
   );
@@ -884,11 +1397,18 @@ export function ChateringEstimationPage() {
   const accountCell = (value: string, onChange: (v: string) => void, min = 90) => (
     <input className="fv-ce__cell-input" style={{ minWidth: min }} list="fv-ce-accounts" placeholder="Select account…" value={value} disabled={locked} onChange={(e) => onChange(e.target.value)} />
   );
-  // Fuel-type select cell — same marine fuel options as the Performance module.
+  // Compact in-cell select for units / terms sourced from the options list.
+  const optCell = (value: string, onChange: (v: string) => void, options: string[], min = 62) => (
+    <select className="fv-ce__cell-select" style={{ minWidth: min }} value={value} disabled={locked} onChange={(e) => onChange(e.target.value)}>
+      {value && !options.includes(value) && <option value={value}>{value}</option>}
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+  // Fuel-grade select cell.
   const fuelCell = (value: string, onChange: (v: string) => void) => (
     <select className="fv-ce__cell-select" style={{ minWidth: 78 }} value={value} disabled={locked} onChange={(e) => onChange(e.target.value)}>
-      {value && !FUEL_TYPE_OPTIONS.includes(value) && <option value={value}>{value}</option>}
-      {FUEL_TYPE_OPTIONS.map((f) => <option key={f} value={f}>{f}</option>)}
+      {value && !opts.fuelGrades.includes(value) && <option value={value}>{value}</option>}
+      {opts.fuelGrades.map((f) => <option key={f} value={f}>{f}</option>)}
     </select>
   );
   const kvIn = (label: string, value: number, onChange: (n: number) => void, pct?: boolean) => (
@@ -913,13 +1433,51 @@ export function ChateringEstimationPage() {
       <datalist id="fv-ce-ports">{portOptions.map((o) => <option key={o} value={o} />)}</datalist>
       <datalist id="fv-ce-vessels">{vesselOptions.map((o) => <option key={o} value={o} />)}</datalist>
       <datalist id="fv-ce-accounts">{accountOptions.map((o) => <option key={o} value={o} />)}</datalist>
+      {fixOpen && (
+        <ToolModal title="Mark Fixed — Charter Party Date" onClose={() => setFixOpen(false)}>
+          <p className="fv-ce__lq-hint">Select the Charter Party (CP) date. This is recorded as the CPDD, so a fix marked a few days late still carries the correct date.</p>
+          <label className="fv-ce__lq-point">
+            <span>Charter Party Date</span>
+            <input type="date" value={cpDate} onChange={(e) => setCpDate(e.target.value)} />
+          </label>
+          <div className="fv-ce__modal-actions">
+            <button type="button" className="fv-ce__btn" onClick={() => setFixOpen(false)}>Cancel</button>
+            <button type="button" className="fv-ce__btn fv-ce__btn--green" disabled={!cpDate} onClick={confirmFixed}><i className="fas fa-anchor" /> Confirm Fixed</button>
+          </div>
+        </ToolModal>
+      )}
+      {tplOpen && (
+        <ToolModal title="Vessel Templates" wide onClose={() => setTplOpen(false)}>
+          <p className="fv-ce__lq-hint">Pick a standard vessel size to fill the Vessel Particular and performance profile (DWT, draft, TPC, speeds and fuel consumption). The vessel name is kept so you can search the actual ship.</p>
+          <div className="fv-ce__tpl-grid">
+            {VESSEL_TEMPLATES.map((tpl) => (
+              <button key={tpl.id} type="button" className="fv-ce__tpl-card" disabled={locked} onClick={() => applyTemplate(tpl)}>
+                <div className="fv-ce__tpl-head">
+                  <span className="fv-ce__tpl-name">{tpl.name}</span>
+                  <span className="fv-ce__tpl-type">{tpl.type}</span>
+                </div>
+                <div className="fv-ce__tpl-stats">
+                  <span><b>{fmt(tpl.dwt, 0)}</b> DWT</span>
+                  <span><b>{fmt(tpl.draft, 1)}</b> m draft</span>
+                  <span><b>{fmt(tpl.tpc, 0)}</b> TPC</span>
+                </div>
+                <div className="fv-ce__tpl-perf">
+                  <span>Speed {fmt(tpl.fullBallast, 1)}/{fmt(tpl.fullLaden, 1)} kn</span>
+                  <span>ME {fmt(tpl.mainBallast, 1)}/{fmt(tpl.mainLaden, 1)} MT</span>
+                  <span>AE {fmt(tpl.subSea, 1)} MT</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </ToolModal>
+      )}
       {/* ============================ TOP HEADER ============================ */}
       <header className="fv-ce__header">
         <div className="fv-ce__title-block">
           <div className="fv-ce__title-row">
             <i className="fas fa-file-signature fv-ce__title-icon" aria-hidden="true" />
             <h1>Voyage Estimation</h1>
-            <span className={`fv-ce__badge fv-ce__badge--${stat.color}`}>{status}</span>
+            <span className={`fv-ce__badge fv-ce__badge--${stat.color}`}>{estStatusLabel(status)}</span>
             {fixtureNo && (
               <span className="fv-ce__fixture">
                 <i className="fas fa-lock" aria-hidden="true" /> {fixtureNo}
@@ -932,6 +1490,7 @@ export function ChateringEstimationPage() {
             <span><b>Last Modified</b> {lastModified}</span>
             <span><b>Customer</b> {voyage.client}</span>
             <span><b>PIC</b> {voyage.pic}</span>
+            {cpdd && <span><b>CPDD</b> {cpdd}</span>}
             <span className="fv-ce__meta-status">
               <b>Fix Type</b>
               <select value={inputs.fixType} disabled={locked} onChange={(e) => patch({ fixType: e.target.value as FixType })}>
@@ -940,16 +1499,24 @@ export function ChateringEstimationPage() {
                 ))}
               </select>
             </span>
+            <span className="fv-ce__meta-status">
+              <b>Currency</b>
+              <select value={inputs.currency} disabled={locked} onChange={(e) => patch({ currency: e.target.value })}>
+                {opts.currencies.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </span>
           </div>
         </div>
 
         <div className="fv-ce__actions">
           <button type="button" className="fv-ce__btn" onClick={newEstimate}><i className="fas fa-plus" /> New</button>
-          <button type="button" className="fv-ce__btn" onClick={() => setSnapshots((s) => [...s, { id: uid('sn'), name: `Option ${String.fromCharCode(65 + s.length)}`, result }])}><i className="fas fa-clone" /> Duplicate</button>
+          <button type="button" className="fv-ce__btn" onClick={addCargoVariant}><i className="fas fa-clone" /> Duplicate</button>
           <button type="button" className={`fv-ce__btn${compareOpen ? ' fv-ce__btn--on' : ''}`} onClick={() => setCompareOpen((v) => !v)}><i className="fas fa-scale-balanced" /> Compare</button>
           <button type="button" className="fv-ce__btn fv-ce__btn--primary" onClick={save}><i className="fas fa-floppy-disk" /> Save</button>
-          <button type="button" className="fv-ce__btn"><i className="fas fa-file-lines" /> Template</button>
-          <button type="button" className="fv-ce__btn"><i className="fas fa-file-pdf" /> PDF</button>
+          <button type="button" className="fv-ce__btn" onClick={() => setTplOpen(true)}><i className="fas fa-file-lines" /> Template</button>
+          <button type="button" className="fv-ce__btn" onClick={exportPdf}><i className="fas fa-file-pdf" /> PDF</button>
           <button type="button" className="fv-ce__btn fv-ce__btn--amber" onClick={() => changeStatus('On Subs')} disabled={locked}><i className="fas fa-hourglass-half" /> On Subs</button>
           <button type="button" className="fv-ce__btn fv-ce__btn--green" onClick={markFixed} disabled={locked}><i className="fas fa-anchor" /> Mark Fixed</button>
           {status === 'Fixed' && (
@@ -971,23 +1538,54 @@ export function ChateringEstimationPage() {
           icon="fa-scale-balanced"
           right={
             <span className="fv-ce__scenario-add">
-              <input placeholder="Option name…" value={snapshotName} onChange={(e) => setSnapshotName(e.target.value)} />
-              <button type="button" className="fv-ce__chip" onClick={captureSnapshot}><i className="fas fa-camera" /> Capture Current</button>
+              <button type="button" className="fv-ce__chip" onClick={addVesselVariant}><i className="fas fa-ship" /> Vessel Variant</button>
+              <button type="button" className="fv-ce__chip" onClick={addCargoVariant}><i className="fas fa-boxes-stacked" /> Cargo Variant</button>
             </span>
           }
         >
+          {scenarios.length === 0 ? (
+            <p className="fv-ce__hint">
+              Add a <b>Vessel Variant</b> (same cargo, different vessel speed &amp; consumption) or a{' '}
+              <b>Cargo Variant</b> (same vessel, different quantity &amp; freight). Each variant is
+              calculated against the current voyage and compared side by side.
+            </p>
+          ) : (
+            <div className="fv-ce__scenarios">
+              {scenarios.map((sc) => (
+                <div key={sc.id} className={`fv-ce__scenario fv-ce__scenario--${sc.basis}`}>
+                  <span className="fv-ce__scenario-tag">{sc.basis === 'vessel' ? 'Vessel' : 'Cargo'}</span>
+                  <input className="fv-ce__scenario-name" value={sc.name} onChange={(e) => updateScenario(sc.id, { name: e.target.value })} />
+                  {sc.basis === 'vessel' ? (
+                    <>
+                      <label>Ballast Spd<input type="number" value={sc.ballastSpeed} onChange={(e) => updateScenario(sc.id, { ballastSpeed: num(e.target.value) })} /></label>
+                      <label>Laden Spd<input type="number" value={sc.ladenSpeed} onChange={(e) => updateScenario(sc.id, { ladenSpeed: num(e.target.value) })} /></label>
+                      <label>FO Ballast<input type="number" value={sc.foBallast} onChange={(e) => updateScenario(sc.id, { foBallast: num(e.target.value) })} /></label>
+                      <label>FO Laden<input type="number" value={sc.foLaden} onChange={(e) => updateScenario(sc.id, { foLaden: num(e.target.value) })} /></label>
+                      <label>Hire Rate<input type="number" value={sc.dailyHire} onChange={(e) => updateScenario(sc.id, { dailyHire: num(e.target.value) })} /></label>
+                      <label>Hire AdCom %<input type="number" value={sc.hAddCommPct} onChange={(e) => updateScenario(sc.id, { hAddCommPct: num(e.target.value) })} /></label>
+                    </>
+                  ) : (
+                    <>
+                      <label>Cargo Qty<input type="number" value={sc.qty} onChange={(e) => updateScenario(sc.id, { qty: num(e.target.value) })} /></label>
+                      <label>Freight Rate<input type="number" value={sc.rate} onChange={(e) => updateScenario(sc.id, { rate: num(e.target.value) })} /></label>
+                      <label>Add Com %<input type="number" value={sc.aCommPct} onChange={(e) => updateScenario(sc.id, { aCommPct: num(e.target.value) })} /></label>
+                      <label>Brokerage %<input type="number" value={sc.brkgPct} onChange={(e) => updateScenario(sc.id, { brkgPct: num(e.target.value) })} /></label>
+                      <label>Frt Tax %<input type="number" value={sc.frtTaxPct} onChange={(e) => updateScenario(sc.id, { frtTaxPct: num(e.target.value) })} /></label>
+                    </>
+                  )}
+                  <button type="button" className="fv-ce__icon-btn" onClick={() => removeScenario(sc.id)} title="Remove variant"><i className="fas fa-xmark" /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          {scenarios.length > 0 && (
           <div className="fv-ce__tablewrap">
             <table className="fv-ce__compare-table">
               <thead>
                 <tr>
                   <th>Metric</th>
                   {compareOptions.map((o) => (
-                    <th key={o.id}>
-                      {o.name}
-                      {o.id !== 'current' && (
-                        <button type="button" className="fv-ce__icon-btn" onClick={() => removeSnapshot(o.id)} title="Remove"><i className="fas fa-xmark" /></button>
-                      )}
-                    </th>
+                    <th key={o.id}>{o.name}</th>
                   ))}
                 </tr>
               </thead>
@@ -997,8 +1595,9 @@ export function ChateringEstimationPage() {
                   ['Revenue', (r: EstimateResult) => r.revenue, () => false],
                   ['Expenses', (r: EstimateResult) => r.totalExpense, (r: EstimateResult) => r.totalExpense === best.cost],
                   ['TCE / Day', (r: EstimateResult) => r.tce, (r: EstimateResult) => r.tce === best.tce],
-                  ['Voyage Days', (r: EstimateResult) => r.voyageDays, (r: EstimateResult) => r.voyageDays === best.days],
                   ['Total Hire', (r: EstimateResult) => r.totalHire, () => false],
+                  ['Result / Day', (r: EstimateResult) => (r.voyageDays > 0 ? r.profit / r.voyageDays : 0), (r: EstimateResult) => (r.voyageDays > 0 ? r.profit / r.voyageDays : 0) === best.resultDay],
+                  ['Voyage Days', (r: EstimateResult) => r.voyageDays, (r: EstimateResult) => r.voyageDays === best.days],
                   ['Bunker', (r: EstimateResult) => r.bunkerExpense, () => false],
                   ['Profit %', (r: EstimateResult) => r.profitPct, () => false],
                 ] as [string, (r: EstimateResult) => number, (r: EstimateResult) => boolean][]).map(([label, get, isBest]) => (
@@ -1014,7 +1613,8 @@ export function ChateringEstimationPage() {
               </tbody>
             </table>
           </div>
-          <p className="fv-ce__hint">Capture the current estimate as an option, adjust vessel / cargo / speed / freight, then compare. Green cells mark the best profit, lowest cost, highest TCE and fastest voyage.</p>
+          )}
+          {scenarios.length > 0 && <p className="fv-ce__hint">Green cells mark the best profit, lowest cost, highest TCE and fastest voyage across the current estimate and all variants.</p>}
         </Section>
       )}
 
@@ -1045,48 +1645,30 @@ export function ChateringEstimationPage() {
         }
       >
         <div className="fv-ce__vp">
-          <div className="fv-ce__tablewrap">
-            <table className="fv-ce__table fv-ce__table--vp">
-              <thead>
-                <tr>
-                  <th>MV</th>
-                  <th className="fv-ce__r">DWT</th>
-                  <th className="fv-ce__r">Draft (M)</th>
-                  <th className="fv-ce__r">TPC</th>
-                  <th className="fv-ce__r">Built</th>
-                  <th>Kind</th>
-                  <th>Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>{vesselCell(vessel.name, (v) => setVessel((s) => ({ ...s, name: v })), 150)}</td>
-                  <td className="fv-ce__r">{numCell(vessel.dwt, (n) => setVessel((s) => ({ ...s, dwt: n })), 80)}</td>
-                  <td className="fv-ce__r">{numCell(vessel.draft, (n) => setVessel((s) => ({ ...s, draft: n })), 60)}</td>
-                  <td className="fv-ce__r">{numCell(vessel.tpc, (n) => setVessel((s) => ({ ...s, tpc: n })), 56)}</td>
-                  <td className="fv-ce__r">{numCell(vessel.built, (n) => setVessel((s) => ({ ...s, built: n })), 60)}</td>
-                  <td>{txtCell(vessel.kind, (v) => setVessel((s) => ({ ...s, kind: v })), 70)}</td>
-                  <td>
-                    <select
-                      className="fv-ce__cell-select"
-                      value={vessel.type}
-                      disabled={locked}
-                      onChange={(e) => setVessel((s) => ({ ...s, type: e.target.value }))}
-                    >
-                      {vessel.type && !VESSEL_TYPES.some((g) => g.types.includes(vessel.type)) && <option value={vessel.type}>{vessel.type}</option>}
-                      {VESSEL_TYPES.map((g) => (
-                        <optgroup key={g.group} label={g.group}>
-                          {g.types.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
-                        </optgroup>
-                      ))}
-                    </select>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div className="fv-ce__vp-fields">
+            <label className="fv-ce__vp-field"><span>Vessel Name</span>{vesselCell(vessel.name, (v) => setVessel((s) => ({ ...s, name: v })), 150)}</label>
+            <label className="fv-ce__vp-field"><span>DWT</span>{numCell(vessel.dwt, (n) => setVessel((s) => ({ ...s, dwt: n })), 80)}</label>
+            <label className="fv-ce__vp-field"><span>Draft (M)</span>{numCell(vessel.draft, (n) => setVessel((s) => ({ ...s, draft: n })), 60)}</label>
+            <label className="fv-ce__vp-field"><span>TPC</span>{numCell(vessel.tpc, (n) => setVessel((s) => ({ ...s, tpc: n })), 56)}</label>
+            <label className="fv-ce__vp-field"><span>Built</span>{numCell(vessel.built, (n) => setVessel((s) => ({ ...s, built: n })), 60)}</label>
+            <label className="fv-ce__vp-field">
+              <span>Type</span>
+              <select
+                className="fv-ce__cell-select"
+                value={vessel.type}
+                disabled={locked}
+                onChange={(e) => setVessel((s) => ({ ...s, type: e.target.value }))}
+              >
+                {vessel.type && !opts.vesselTypes.includes(vessel.type) && <option value={vessel.type}>{vessel.type}</option>}
+                {opts.vesselTypes.map((tp) => (
+                  <option key={tp} value={tp}>{tp}</option>
+                ))}
+              </select>
+            </label>
           </div>
 
-          <div className="fv-ce__vp-speed">
+          <div className="fv-ce__vp-right">
+            <div className="fv-ce__vp-speed">
             <div className="fv-ce__vp-modes">
               <label className={`fv-ce__radio${inputs.perf.speedMode === 'Full' ? ' fv-ce__radio--on' : ''}`}>
                 <input type="radio" name="speedMode" checked={inputs.perf.speedMode === 'Full'} disabled={locked} onChange={() => setSpeedMode('Full')} /> Full
@@ -1123,6 +1705,7 @@ export function ChateringEstimationPage() {
             </table>
           </div>
 
+          <div className="fv-ce__vp-cons">
           <div className="fv-ce__tablewrap">
             <table className="fv-ce__table fv-ce__table--mini">
               <thead>
@@ -1185,6 +1768,8 @@ export function ChateringEstimationPage() {
               </tbody>
             </table>
           </div>
+          </div>
+          </div>
         </div>
       </Section>
 
@@ -1195,8 +1780,54 @@ export function ChateringEstimationPage() {
         icon="fa-boxes-stacked"
         right={
           <div className="fv-ce__port-head">
-            <button type="button" className="fv-ce__chip"><i className="fas fa-calculator" /> Loadable Quantity Calculator</button>
-            <button type="button" className="fv-ce__chip"><i className="fas fa-chart-simple" /> Frt. Simulator</button>
+            <div className="fv-ce__tool">
+              <button type="button" className={`fv-ce__chip${lqOpen ? ' fv-ce__chip--on' : ''}`} onClick={() => (lqOpen ? setLqOpen(false) : openLq())}>
+                <i className="fas fa-calculator" /> Loadable Quantity
+              </button>
+              {lqOpen && (() => {
+                const summerDisp = lq.summerDwt + lq.lightship;
+                const dispPort = summerDisp * (lq.densityAtPort / 1.025);
+                const dwtPort = dispPort - lq.lightship;
+                const deductions = lq.vlsfo + lq.mgo + lq.bw + lq.fw + lq.constants;
+                const maxCargo = Math.max(0, dwtPort - deductions);
+                const setL = (k: keyof typeof lq, v: number | string) => setLq((s) => ({ ...s, [k]: v }));
+                return (
+                  <ToolModal title="Loadable Quantity Calculator" wide onClose={() => setLqOpen(false)}>
+                    <label className="fv-ce__lq-point">
+                      <span>Constraining Point</span>
+                      <select value={lq.point} onChange={(e) => setL('point', e.target.value)}>
+                        {lqPoints.map((pt) => <option key={pt} value={pt}>{pt}</option>)}
+                      </select>
+                    </label>
+                    <p className="fv-ce__lq-hint">Max cargo is limited by the load line at this point using the bunker/water ROB expected there. Switch the point to find the binding one (least cargo).</p>
+                    <div className="fv-ce__lq-grid">
+                      <label><span>Summer DWT (MT)</span><input type="number" value={lq.summerDwt} onChange={(e) => setL('summerDwt', num(e.target.value))} /></label>
+                      <label><span>Density at Port</span><input type="number" step="0.001" value={lq.densityAtPort} onChange={(e) => setL('densityAtPort', num(e.target.value))} /></label>
+                      <label><span>Lightship (MT)</span><input type="number" value={lq.lightship} onChange={(e) => setL('lightship', num(e.target.value))} /></label>
+                    </div>
+                    <div className="fv-ce__lq-calc">
+                      <div><span>Summer Displacement</span><b>{fmt(summerDisp, 0)}</b></div>
+                      <div><span>Displacement in Port Density</span><b>{fmt(dispPort, 0)}</b></div>
+                      <div><span>DWT at Port</span><b>{fmt(dwtPort, 0)}</b></div>
+                    </div>
+                    <h6 className="fv-ce__lq-sub">ROB &amp; Constants at Point (MT)</h6>
+                    <div className="fv-ce__lq-grid">
+                      <label><span>VLSFO</span><input type="number" value={lq.vlsfo} onChange={(e) => setL('vlsfo', num(e.target.value))} /></label>
+                      <label><span>MGO</span><input type="number" value={lq.mgo} onChange={(e) => setL('mgo', num(e.target.value))} /></label>
+                      <label><span>Ballast Water (BW)</span><input type="number" value={lq.bw} onChange={(e) => setL('bw', num(e.target.value))} /></label>
+                      <label><span>Fresh Water (FW)</span><input type="number" value={lq.fw} onChange={(e) => setL('fw', num(e.target.value))} /></label>
+                      <label><span>Constants (CONST)</span><input type="number" value={lq.constants} onChange={(e) => setL('constants', num(e.target.value))} /></label>
+                    </div>
+                    <div className="fv-ce__tool-result"><span>Max Loadable Cargo</span><b>{fmt(maxCargo, 0)} MT</b></div>
+                    {inputs.cargoes.length > 0 && (
+                      <button type="button" className="fv-ce__chip fv-ce__chip--on" disabled={locked} onClick={() => { updateCargo(inputs.cargoes[0].id, { quantity: Math.round(maxCargo) }); setLqOpen(false); }}>
+                        Use for Cargo #1
+                      </button>
+                    )}
+                  </ToolModal>
+                );
+              })()}
+            </div>
             <button type="button" className="fv-ce__chip" onClick={addCargo} disabled={locked}><i className="fas fa-plus" /> Add Cargo</button>
           </div>
         }
@@ -1229,14 +1860,14 @@ export function ChateringEstimationPage() {
                   <td>{txtCell(c.name, (v) => updateCargo(c.id, { name: v }), 100)}</td>
                   <td>{portCell(c.loadPort, (v) => updateCargo(c.id, { loadPort: v }), 150)}</td>
                   <td>{portCell(c.dischPort, (v) => updateCargo(c.id, { dischPort: v }), 150)}</td>
-                  <td className="fv-ce__r fv-ce__qty">{numCell(c.quantity, (n) => updateCargo(c.id, { quantity: n }), 76)}<span className="fv-ce__unit">{c.unit}</span></td>
-                  <td className="fv-ce__r">{numCell(c.frt, (n) => updateCargo(c.id, { frt: n }), 56)}</td>
-                  <td>{txtCell(c.term, (v) => updateCargo(c.id, { term: v }), 54)}</td>
+                  <td className="fv-ce__r fv-ce__qty">{autoNumCell(c.quantity, (n) => updateCargo(c.id, { quantity: n }))}{optCell(c.unit, (v) => updateCargo(c.id, { unit: v }), opts.qtyUnits, 56)}</td>
+                  <td className="fv-ce__r">{autoNumCell(c.frt, (n) => updateCargo(c.id, { frt: n }))}{optCell(c.frtUnit, (v) => updateCargo(c.id, { frtUnit: v }), opts.freightUnits, 78)}</td>
+                  <td>{optCell(c.term, (v) => updateCargo(c.id, { term: v }), opts.freightTerms, 72)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(c.quantity * c.frt)}</td>
-                  <td className="fv-ce__r">{numCell(c.aCommPct, (n) => updateCargo(c.id, { aCommPct: n }), 54)}<span className="fv-ce__unit">%</span></td>
-                  <td className="fv-ce__r">{numCell(c.brkgPct, (n) => updateCargo(c.id, { brkgPct: n }), 52)}<span className="fv-ce__unit">%</span></td>
-                  <td className="fv-ce__r">{numCell(c.frtTaxPct, (n) => updateCargo(c.id, { frtTaxPct: n }), 52)}<span className="fv-ce__unit">%</span></td>
-                  <td className="fv-ce__r">{numCell(c.linerTerm, (n) => updateCargo(c.id, { linerTerm: n }), 66)}</td>
+                  <td className="fv-ce__r">{autoNumCell(c.aCommPct, (n) => updateCargo(c.id, { aCommPct: n }))}<span className="fv-ce__unit">%</span></td>
+                  <td className="fv-ce__r">{autoNumCell(c.brkgPct, (n) => updateCargo(c.id, { brkgPct: n }))}<span className="fv-ce__unit">%</span></td>
+                  <td className="fv-ce__r">{autoNumCell(c.frtTaxPct, (n) => updateCargo(c.id, { frtTaxPct: n }))}<span className="fv-ce__unit">%</span></td>
+                  <td className="fv-ce__r">{autoNumCell(c.linerTerm, (n) => updateCargo(c.id, { linerTerm: n }))}</td>
                   <td>
                     {inputs.cargoes.length > 1 && (
                       <button type="button" className="fv-ce__icon-btn" onClick={() => removeCargo(c.id)} disabled={locked} title="Remove cargo">
@@ -1272,10 +1903,56 @@ export function ChateringEstimationPage() {
         icon="fa-route"
         right={
           <div className="fv-ce__port-head">
-            <label className="fv-ce__check"><input type="checkbox" checked={inputs.canals.suez} disabled={locked} onChange={(e) => patch({ canals: { ...inputs.canals, suez: e.target.checked } })} /> SUEZ</label>
-            <label className="fv-ce__check"><input type="checkbox" checked={inputs.canals.panama} disabled={locked} onChange={(e) => patch({ canals: { ...inputs.canals, panama: e.target.checked } })} /> PANAMA</label>
-            <label className="fv-ce__check"><input type="checkbox" checked={inputs.canals.kiel} disabled={locked} onChange={(e) => patch({ canals: { ...inputs.canals, kiel: e.target.checked } })} /> KIEL</label>
+            <label className="fv-ce__hire-basis" title="ECA / distance route">
+              <span>Route</span>
+              <select className="fv-ce__cell-select" value={inputs.ecaRoute} disabled={locked} onChange={(e) => patch({ ecaRoute: e.target.value })}>
+                {opts.ecaRoutes.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </label>
+            <div className="fv-ce__canal-dd" ref={canalsRef}>
+              <button
+                type="button"
+                className="fv-ce__chip"
+                aria-haspopup="menu"
+                aria-expanded={canalsOpen}
+                onClick={() => setCanalsOpen((v) => !v)}
+                title="Canals — select all that apply"
+              >
+                <i className="fas fa-water" aria-hidden="true" /> Canals
+                {inputs.canals.list.length > 0 && <span className="fv-ce__canal-badge">{inputs.canals.list.length}</span>}
+                <i className="fas fa-chevron-down" aria-hidden="true" />
+              </button>
+              {canalsOpen && (
+                <div className="fv-ce__canal-menu" role="menu">
+                  {opts.canals.map((cn) => {
+                    const on = inputs.canals.list.includes(cn);
+                    return (
+                      <label key={cn} className={`fv-ce__check${on ? ' fv-ce__check--on' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          disabled={locked}
+                          onChange={(e) =>
+                            patch({
+                              canals: {
+                                list: e.target.checked
+                                  ? [...inputs.canals.list, cn]
+                                  : inputs.canals.list.filter((x) => x !== cn),
+                              },
+                            })
+                          }
+                        />{' '}
+                        {cn}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
             <button type="button" className="fv-ce__chip" onClick={addPort} disabled={locked}><i className="fas fa-plus" /> Add Port</button>
+            <button type="button" className="fv-ce__chip" onClick={getDistances} disabled={locked || gettingDist} title="Auto-fill leg distances from the sea route">
+              <i className={`fas ${gettingDist ? 'fa-spinner fa-spin' : 'fa-ruler'}`} /> {gettingDist ? 'Calculating…' : 'Get Distance'}
+            </button>
           </div>
         }
       >
@@ -1295,9 +1972,11 @@ export function ChateringEstimationPage() {
                 <th className="fv-ce__r">Spd</th>
                 <th className="fv-ce__r">Sea</th>
                 <th className="fv-ce__r">L / D Rate</th>
-                <th className="fv-ce__r" colSpan={2}>Port (I / W)</th>
-                <th className="fv-ce__r">Dem</th>
-                <th className="fv-ce__r">Des</th>
+                <th>Laytime</th>
+                <th className="fv-ce__r">I (Days)</th>
+                <th className="fv-ce__r">W (Days)</th>
+                <th className="fv-ce__r">Dem $/d</th>
+                <th className="fv-ce__r">Dem / Des</th>
                 <th className="fv-ce__r">Port Charge</th>
                 <th>Arrival</th>
                 <th>Departure</th>
@@ -1313,25 +1992,34 @@ export function ChateringEstimationPage() {
                     <td className="fv-ce__num">{idx + 1}</td>
                     <td>
                       <select className="fv-ce__cell-select" value={p.type} disabled={locked} onChange={(e) => updatePort(p.id, { type: e.target.value as LegType })}>
-                        {LEG_TYPES.map((t) => (
+                        {legTypes.map((t) => (
                           <option key={t} value={t}>
                             {t}
                           </option>
                         ))}
                       </select>
                     </td>
-                    <td>{portCell(p.port, (v) => updatePort(p.id, { port: v }))}</td>
-                    <td className="fv-ce__r">{numCell(p.distance, (n) => updatePort(p.id, { distance: n }), 60)}</td>
-                    <td className="fv-ce__r">{numCell(p.ecaDistance, (n) => updatePort(p.id, { ecaDistance: n }), 50)}</td>
-                    <td className="fv-ce__r">{numCell(p.wf, (n) => updatePort(p.id, { wf: n }), 44)}</td>
-                    <td className="fv-ce__r">{numCell(p.speed, (n) => updatePort(p.id, { speed: n }), 48)}</td>
-                    <td className="fv-ce__r">{manualSea ? numCell(p.seaManual, (n) => updatePort(p.id, { seaManual: n }), 48) : <span className="fv-ce__calc">{leg ? fmt(leg.sea, 2) : '—'}</span>}</td>
-                    <td className="fv-ce__r">{numCell(p.ldRate, (n) => updatePort(p.id, { ldRate: n }), 74)}</td>
-                    <td className="fv-ce__r">{numCell(p.idle, (n) => updatePort(p.id, { idle: n }), 44)}</td>
-                    <td className="fv-ce__r">{numCell(p.work, (n) => updatePort(p.id, { work: n }), 44)}</td>
-                    <td className="fv-ce__r">{numCell(p.dem, (n) => updatePort(p.id, { dem: n }))}</td>
-                    <td className="fv-ce__r">{numCell(p.des, (n) => updatePort(p.id, { des: n }))}</td>
-                    <td className="fv-ce__r">{numCell(p.portCharge, (n) => updatePort(p.id, { portCharge: n }), 80)}</td>
+                    <td className="fv-ce__port-name-cell">{portCell(p.port, (v) => updatePort(p.id, { port: v }))}</td>
+                    <td className="fv-ce__r">{autoNumCell(p.distance, (n) => updatePort(p.id, { distance: n }))}</td>
+                    <td className="fv-ce__r">{autoNumCell(p.ecaDistance, (n) => updatePort(p.id, { ecaDistance: n }))}</td>
+                    <td className="fv-ce__r">{autoNumCell(p.wf, (n) => updatePort(p.id, { wf: n }))}</td>
+                    <td className="fv-ce__r">{p.speed > 0 ? <span className="fv-ce__calc" title="Vessel-particular speed after weather margin">{fmt(p.speed * (1 - p.wf / 100), 1)}</span> : <span className="fv-ce__calc">—</span>}</td>
+                    <td className="fv-ce__r">{manualSea ? autoNumCell(p.seaManual, (n) => updatePort(p.id, { seaManual: n })) : <span className="fv-ce__calc">{leg ? fmt(leg.sea, 2) : '—'}</span>}</td>
+                    <td className="fv-ce__r">{autoNumCell(p.ldRate, (n) => updatePort(p.id, { ldRate: n }))}{optCell(p.rateUnit, (v) => updatePort(p.id, { rateUnit: v }), opts.rateUnits, 80)}</td>
+                    <td>{optCell(p.laytimeTerm, (v) => updatePort(p.id, { laytimeTerm: v }), opts.laytimeTerms, 96)}</td>
+                    <td className="fv-ce__r">{autoNumCell(p.idle, (n) => updatePort(p.id, { idle: n }))}</td>
+                    <td className="fv-ce__r">
+                      {p.ldRate > 0 && (handledQty[p.id] ?? 0) > 0
+                        ? <span className="fv-ce__calc" title="From L/D rate × cargo handled">{fmt(leg ? leg.work : portWorkDays(p, handledQty[p.id] ?? 0), 2)}</span>
+                        : autoNumCell(p.work, (n) => updatePort(p.id, { work: n }))}
+                    </td>
+                    <td className="fv-ce__r">{autoNumCell(p.dem, (n) => updatePort(p.id, { dem: n }))}</td>
+                    <td className="fv-ce__r">
+                      {leg && (leg.dem > 0 || leg.des > 0)
+                        ? <span className={`fv-ce__calc ${leg.dem > 0 ? 'fv-ce__pos' : 'fv-ce__neg'}`} title={leg.dem > 0 ? 'Demurrage (income)' : 'Despatch (cost)'}>{leg.dem > 0 ? `+${fmt(leg.dem)}` : `-${fmt(leg.des)}`}</span>
+                        : <span className="fv-ce__calc">—</span>}
+                    </td>
+                    <td className="fv-ce__r">{autoNumCell(p.portCharge, (n) => updatePort(p.id, { portCharge: n }))}</td>
                     <td className="fv-ce__calc">{leg?.arrival ?? '—'}</td>
                     <td className="fv-ce__calc">{leg?.departure ?? '—'}</td>
                     <td>
@@ -1361,10 +2049,11 @@ export function ChateringEstimationPage() {
                 <td colSpan={2} />
                 <td className="fv-ce__r">{fmt(result.seaDays, 2)}</td>
                 <td />
+                <td />
                 <td className="fv-ce__r">{fmt(result.idleTotal, 2)}</td>
                 <td className="fv-ce__r">{fmt(result.workTotal, 2)}</td>
-                <td className="fv-ce__r">{fmt(result.demTotal)}</td>
-                <td className="fv-ce__r">{fmt(result.desTotal)}</td>
+                <td />
+                <td className="fv-ce__r">{money(result.demTotal - result.desTotal)}</td>
                 <td className="fv-ce__r">{fmt(result.portCharge)}</td>
                 <td>{result.startStr}</td>
                 <td>{result.endStr}</td>
@@ -1374,9 +2063,6 @@ export function ChateringEstimationPage() {
           </table>
         </div>
         <div className="fv-ce__port-foot">
-          <button type="button" className="fv-ce__chip">Get Distance (F9)</button>
-          <button type="button" className="fv-ce__chip">To Distance (F10)</button>
-          <button type="button" className="fv-ce__chip">To Operation</button>
           <span className="fv-ce__port-foot-right">
             <span className="fv-ce__chip fv-ce__chip--on">Port Local</span>
             <span className="fv-ce__chip">PC Time</span>
@@ -1408,6 +2094,24 @@ export function ChateringEstimationPage() {
               {kvIn('Others', inputs.commercial.others, (n) => patchComm({ others: n }))}
             </ul>
           </div>
+          <div className="fv-ce__exp">
+            <div className="fv-ce__exp-head">
+              <span>Additional Expenses</span>
+              <button type="button" className="fv-ce__chip" onClick={addExpense} disabled={locked}><i className="fas fa-plus" /> Add</button>
+            </div>
+            {inputs.expenses.map((e) => (
+              <div key={e.id} className="fv-ce__exp-row">
+                <select className="fv-ce__cell-select" value={e.type} disabled={locked} onChange={(ev) => updateExpense(e.id, { type: ev.target.value })}>
+                  {e.type && !opts.expenseTypes.includes(e.type) && <option value={e.type}>{e.type}</option>}
+                  {opts.expenseTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <input type="number" className="fv-ce__cell-num" value={e.amount} disabled={locked} onChange={(ev) => updateExpense(e.id, { amount: num(ev.target.value) })} />
+                {!locked && (
+                  <button type="button" className="fv-ce__icon-btn" onClick={() => removeExpense(e.id)} title="Remove expense"><i className="fas fa-xmark" /></button>
+                )}
+              </div>
+            ))}
+          </div>
           <div className="fv-ce__kv-line fv-ce__kv-line--sub">
             <span>Total Operation Expense</span>
             <span className="fv-ce__kv-out">{money(result.opExpense)}</span>
@@ -1418,13 +2122,6 @@ export function ChateringEstimationPage() {
         <Section
           title="Bunker Expense"
           icon="fa-gas-pump"
-          right={
-            <div className="fv-ce__port-head">
-              <span className="fv-ce__chip fv-ce__chip--on"><i className="fas fa-list" /> Bunker Index</span>
-              <span className="fv-ce__chip">Recent</span>
-              <span className="fv-ce__chip"><i className="fas fa-gas-pump" /> Bunker Simulator</span>
-            </div>
-          }
         >
           <div className="fv-ce__tablewrap">
             <table className="fv-ce__table">
@@ -1438,20 +2135,20 @@ export function ChateringEstimationPage() {
               </thead>
               <tbody>
                 <tr>
-                  <td>VLSFO</td>
-                  <td className="fv-ce__r">{numCell(inputs.commercial.vlsfoPrice, (n) => patchComm({ vlsfoPrice: n }), 70)}</td>
+                  <td>{inputs.perf.mainNormal.type}</td>
+                  <td className="fv-ce__r">{autoNumCell(inputs.commercial.vlsfoPrice, (n) => patchComm({ vlsfoPrice: n }))}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.vlsfoCons)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.vlsfoExp)}</td>
                 </tr>
                 <tr>
-                  <td>MGO</td>
-                  <td className="fv-ce__r">{numCell(inputs.commercial.mgoPrice, (n) => patchComm({ mgoPrice: n }), 70)}</td>
+                  <td>{inputs.perf.subNormal.type}</td>
+                  <td className="fv-ce__r">{autoNumCell(inputs.commercial.mgoPrice, (n) => patchComm({ mgoPrice: n }))}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.mgoCons)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.mgoExp)}</td>
                 </tr>
                 <tr>
-                  <td>ULSFO</td>
-                  <td className="fv-ce__r">{numCell(inputs.commercial.ulsfoPrice, (n) => patchComm({ ulsfoPrice: n }), 70)}</td>
+                  <td>{inputs.perf.mainEca.type} <span className="fv-ce__unit">(ECA)</span></td>
+                  <td className="fv-ce__r">{autoNumCell(inputs.commercial.ulsfoPrice, (n) => patchComm({ ulsfoPrice: n }))}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.ulsfoCons)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.ulsfoExp)}</td>
                 </tr>
@@ -1525,6 +2222,12 @@ export function ChateringEstimationPage() {
           icon="fa-chart-line"
           right={
             <div className="fv-ce__port-head">
+              <label className="fv-ce__hire-basis" title="Hire basis">
+                <span>Hire Basis</span>
+                <select className="fv-ce__cell-select" value={hireBasis} disabled={locked} onChange={(e) => setHireBasis(e.target.value)}>
+                  {opts.hireBasis.map((h) => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </label>
               {fix.outKind === 'VOUT' && (
                 <button
                   type="button"
@@ -1535,9 +2238,6 @@ export function ChateringEstimationPage() {
                   <i className={`fas ${linkHF ? 'fa-link' : 'fa-link-slash'}`} /> Frt ⇄ Hire
                 </button>
               )}
-              <span className="fv-ce__chip"><i className="fas fa-plus" /> Result Plus</span>
-              <span className="fv-ce__chip"><i className="fas fa-chart-line" /> Analyzer</span>
-              <span className="fv-ce__chip"><i className="fas fa-note-sticky" /> Remark</span>
             </div>
           }
         >
@@ -1551,8 +2251,10 @@ export function ChateringEstimationPage() {
               {isTC(fix.inKind) && kvIn('H.In Add Comm.', inputs.commercial.hAddCommPct, (n) => patchComm({ hAddCommPct: n }), true)}
               {fix.outKind !== 'VOUT' && kvIn(`Hire Out / Day (${fix.outKind})`, inputs.commercial.dailyHireOut, (n) => patchComm({ dailyHireOut: n }))}
               {fix.outKind !== 'VOUT' && kvIn('H.Out Add Comm.', inputs.commercial.hAddCommOutPct, (n) => patchComm({ hAddCommOutPct: n }), true)}
-              {kvOut(isRelet ? 'Freight In' : 'Net Hire', money(result.totalHire))}
-              {kvOut('C / Base (TCE)', money(result.tce))}
+              {kvOut(isRelet ? 'Freight In' : 'Net Hire (Total)', money(result.totalHire))}
+              {!isRelet && fix.inKind !== 'OWN' && kvOut('Net Hire / Day', money(result.voyageDays > 0 ? result.totalHire / result.voyageDays : 0))}
+              {kvOut('C / Base (TCE / Day)', money(result.tce))}
+              {kvOut('Result / Day', money(result.voyageDays > 0 ? result.profit / result.voyageDays : 0))}
             </ul>
             <ul className="fv-ce__kv-list">
               {kvOut(fix.outKind === 'VOUT' ? 'Revenue (Freight)' : 'Revenue (Hire Out)', money(result.revenue))}
@@ -1564,10 +2266,26 @@ export function ChateringEstimationPage() {
           </div>
           <div className={`fv-ce__kv-line fv-ce__kv-line--profit${result.profit < 0 ? ' fv-ce__kv-line--loss' : ''}`}>
             <span>PROFIT (USD)</span>
-            <span className="fv-ce__kv-out">{money(result.profit)} · {fmt(result.profitPct)}%</span>
+            <span className="fv-ce__kv-out">{money(result.profit)}</span>
           </div>
         </Section>
       </div>
+
+      {/* ===================== VOYAGE MAP & REMARK ===================== */}
+      <Section title="Voyage Map & Remark" icon="fa-map-location-dot">
+        <div className="fv-ce__map-row">
+          <EstimationRouteMap ports={inputs.ports.map((p) => ({ type: p.type, port: p.port }))} canals={inputs.canals.list} />
+          <div className="fv-ce__map-remark">
+            <label className="fv-ce__map-remark-label">Remark</label>
+            <textarea
+              value={inputs.remark}
+              disabled={locked}
+              placeholder="Notes for this estimate (assumptions, subs, chartering comments)…"
+              onChange={(e) => patch({ remark: e.target.value })}
+            />
+          </div>
+        </div>
+      </Section>
     </div>
   );
 }

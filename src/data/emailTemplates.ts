@@ -3,7 +3,35 @@
  *
  * Sourced from the operations "Templates" document. Placeholders in
  * [square brackets] or XX form are filled in by the operator when composing.
+ *
+ * Voyage-aware auto tokens use double braces, e.g. {{vessel}} / {{portTo}}.
+ * These are substituted with the selected voyage's live data when composing
+ * from the header "Generate Comms" dialog (see {@link applyVoyageTokens}).
  */
+
+import type { Voyage } from './voyages';
+import { VOYAGES } from './voyages';
+import { ACCOUNT_TYPES, SERVICE_PROVIDER_TYPES, loadClients } from './clients';
+
+/**
+ * A recipient type kept in a template's To / CC field. One of:
+ * - 'Account' — the voyage's account / charterer
+ * - 'Vessel'  — the vessel (master)
+ * - a service-provider type sourced from the Service Provider Details.
+ */
+export type EmailRecipientType = string;
+export const EMAIL_RECIPIENT_TYPES: EmailRecipientType[] = [
+  'Account',
+  'Vessel',
+  ...SERVICE_PROVIDER_TYPES,
+];
+
+/** A file attached to a template (stored inline as a base64 data URL). */
+export interface EmailAttachment {
+  name: string;
+  type: string;
+  dataUrl: string;
+}
 
 export interface EmailTemplate {
   id: string;
@@ -13,11 +41,21 @@ export interface EmailTemplate {
   subCategory?: string;
   /** Sub-sub category — empty string means "None". */
   subSubCategory?: string;
+  /** Recipient types kept in the "To" field (Account / Vessel / service-provider type). */
+  to?: EmailRecipientType[];
+  /** Recipient types to keep in copy (CC). */
+  cc?: EmailRecipientType[];
+  /** Files sent as attachments when composing from this template. */
+  attachments?: EmailAttachment[];
   title: string;
+  /** Email subject line (supports {{tokens}}); falls back to vessel + title. */
+  subject?: string;
+  /** Email body — HTML (rich text). Legacy templates may hold plain text. */
   body: string;
 }
 
 export const EMAIL_TEMPLATE_CATEGORIES = [
+  'Voyage Ops',
   'Deferrals',
   'Monitoring & Suggestions',
   'Navwarning',
@@ -38,6 +76,41 @@ export const EMAIL_SUB_CATEGORIES: string[] = [];
 export const EMAIL_SUB_SUB_CATEGORIES: string[] = [];
 
 export const EMAIL_TEMPLATES: EmailTemplate[] = [
+  // --- Voyage Ops (voyage-aware examples using {{tokens}}) -------------------
+  {
+    id: 'voy-noon-request',
+    category: 'Voyage Ops',
+    subCategory: 'Reports',
+    subSubCategory: 'Noon Report',
+    to: ['Vessel'],
+    title: 'Noon Report Request',
+    subject: '{{vessel}} — Noon Report Request (Voyage {{voyageNo}})',
+    body:
+      'Dear Master,\n\nGood day from ODAS routing desk.\n\nKindly send today\u2019s noon report for {{vessel}} (IMO {{imo}}) on voyage {{voyageNo}} from {{portFrom}} to {{portTo}}.\n\nCurrent ETA {{portTo}}: {{eta}}.\n\nBest regards,\nODAS Operations',
+  },
+  {
+    id: 'voy-eta-update',
+    category: 'Voyage Ops',
+    subCategory: 'Charterer Updates',
+    subSubCategory: 'ETA Update',
+    to: ['Account'],
+    title: 'ETA Update to Charterer',
+    subject: '{{vessel}} — ETA {{portTo}}: {{eta}}',
+    body:
+      'Dear Charterer,\n\nPlease find the latest voyage update for {{vessel}} ({{vesselType}}, {{dwt}}).\n\nRoute: {{route}}\nCurrent ETA {{portTo}}: {{eta}}\nLast noon report: {{lastNoon}}\n\nWe will continue to keep you advised.\n\nRegards,\n{{pic}}\nODAS Operations',
+  },
+  {
+    id: 'voy-agent-appointment',
+    category: 'Voyage Ops',
+    subCategory: 'Agency',
+    subSubCategory: 'Appointment',
+    to: ['Account'],
+    title: 'Agent / Service Appointment',
+    subject: '{{vessel}} — Appointment at {{portTo}} (Voyage {{voyageNo}})',
+    body:
+      'Dear Sirs,\n\nWe confirm the appointment for {{vessel}} (IMO {{imo}}) calling {{portTo}} on voyage {{voyageNo}}.\n\nETA {{portTo}}: {{eta}}\n\nKindly acknowledge and advise berthing prospects.\n\nBest regards,\n{{pic}}\nODAS Operations',
+  },
+
   // --- Deferrals -------------------------------------------------------------
   {
     id: 'defer-blowers',
@@ -326,11 +399,17 @@ export function loadEmailTemplates(): EmailTemplate[] {
     if (!raw) return [...EMAIL_TEMPLATES];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every(isEmailTemplate)) {
-      return (parsed as EmailTemplate[]).map((t) => ({
-        ...t,
-        subCategory: t.subCategory ?? '',
-        subSubCategory: t.subSubCategory ?? '',
-      }));
+      return (parsed as EmailTemplate[]).map((t) => {
+        // Migrate legacy single `recipient` → `to[]`, and 'Master' → 'Vessel'.
+        const legacyRecipient = (t as { recipient?: string }).recipient;
+        return {
+          ...t,
+          subCategory: t.subCategory ?? '',
+          subSubCategory: t.subSubCategory ?? '',
+          to: normalizeRecipientList(t.to ?? (legacyRecipient ? [legacyRecipient] : [])),
+          cc: normalizeRecipientList(t.cc ?? []),
+        };
+      });
     }
   } catch {
     /* fall back to defaults */
@@ -358,6 +437,170 @@ export function resetEmailTemplates(): EmailTemplate[] {
 export function newTemplateId(): string {
   return `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
+
+// --- Voyage auto-tokens ------------------------------------------------------
+// Templates can embed {{token}} placeholders that are replaced with the
+// selected voyage's live data when composing. To add a new token, extend both
+// EMAIL_TOKENS (for the reference list shown to admins) and the map inside
+// applyVoyageTokens below.
+
+/** Reference list of the auto tokens available in template bodies / titles. */
+export const EMAIL_TOKENS: { token: string; label: string }[] = [
+  { token: '{{vessel}}', label: 'Vessel name' },
+  { token: '{{imo}}', label: 'IMO number' },
+  { token: '{{voyageNo}}', label: 'Voyage / order no.' },
+  { token: '{{vesselType}}', label: 'Vessel type' },
+  { token: '{{flag}}', label: 'Flag' },
+  { token: '{{dwt}}', label: 'Deadweight (DWT)' },
+  { token: '{{client}}', label: 'Account / charterer' },
+  { token: '{{pic}}', label: 'PIC (person in charge)' },
+  { token: '{{portFrom}}', label: 'Departure port' },
+  { token: '{{portTo}}', label: 'Arrival port' },
+  { token: '{{route}}', label: 'Route (from → to)' },
+  { token: '{{eta}}', label: 'ETA' },
+  { token: '{{etd}}', label: 'ETD' },
+  { token: '{{lastNoon}}', label: 'Last noon report time' },
+  { token: '{{today}}', label: "Today's date" },
+];
+
+/** Replace {{token}} placeholders in `text` with the voyage's live values. */
+export function applyVoyageTokens(text: string, voyage?: Voyage): string {
+  const today = new Date().toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const map: Record<string, string> = {
+    vessel: voyage?.vessel ?? '',
+    imo: voyage?.imo ?? '',
+    voyageNo: voyage?.id ?? '',
+    vesselType: voyage?.vesselType ?? '',
+    flag: voyage?.flag ?? '',
+    dwt: voyage?.dwt ?? '',
+    client: voyage?.client ?? '',
+    pic: voyage?.pic ?? '',
+    portFrom: voyage?.portFrom ?? '',
+    portTo: voyage?.portTo ?? '',
+    route: voyage ? `${voyage.portFrom} → ${voyage.portTo}` : '',
+    eta: voyage?.eta ?? '',
+    etd: voyage?.etdDisplay ?? '',
+    lastNoon: voyage?.lastNoon ?? '',
+    today,
+  };
+  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (whole, key: string) =>
+    key in map ? map[key] : whole,
+  );
+}
+
+/** Resolve the email for a recipient type from the voyage + directory data. */
+export function resolveRecipientEmail(
+  type: EmailRecipientType | undefined,
+  voyage: Voyage | undefined,
+): string {
+  if (!voyage || !type) return '';
+  if (type === 'Account') return voyage.clientEmail ?? '';
+  if (type === 'Vessel' || type === 'Master') {
+    const slug = voyage.vessel
+      .toLowerCase()
+      .replace(/^m[.\s]*v[.\s]+/, '')
+      .replace(/[^a-z0-9]+/g, '');
+    return slug ? `${slug}@vessel.email` : '';
+  }
+  if (type === 'Service Provider') {
+    const p = loadClients().find((c) => c.kind === 'Service Provider' && c.email);
+    return p?.email ?? '';
+  }
+  // Otherwise it is an account / service-provider category — match it in the directory.
+  const match = loadClients().find((c) => c.email && c.category === type);
+  return match?.email ?? '';
+}
+
+/** Resolve a comma-joined recipient line from a list of recipient types. */
+export function resolveRecipientsLine(
+  types: EmailRecipientType[] | undefined,
+  voyage: Voyage | undefined,
+): string {
+  if (!types || types.length === 0 || !voyage) return '';
+  const emails = types.map((t) => resolveRecipientEmail(t, voyage)).filter(Boolean);
+  return Array.from(new Set(emails)).join(', ');
+}
+
+/** A named group of recipient types shown in the To / CC dropdowns. */
+export interface RecipientTypeGroup {
+  group: string;
+  types: EmailRecipientType[];
+}
+
+/**
+ * Build the To / CC recipient-type options. Standard account / service-provider
+ * types are always listed, unioned with any custom categories found in the
+ * directory so newly added entries appear automatically.
+ */
+export function getRecipientTypeOptions(): RecipientTypeGroup[] {
+  const clients = loadClients();
+  const distinct = (kind: 'Account' | 'Service Provider') =>
+    clients
+      .filter((c) => c.kind === kind && c.category && c.category.trim())
+      .map((c) => c.category.trim());
+  const accounts = Array.from(new Set([...ACCOUNT_TYPES, ...distinct('Account')])).sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const providers = Array.from(
+    new Set([...SERVICE_PROVIDER_TYPES, ...distinct('Service Provider')]),
+  ).sort((a, b) => a.localeCompare(b));
+  return [
+    { group: 'Accounts', types: ['Account', ...accounts] },
+    { group: 'Vessel', types: ['Vessel'] },
+    { group: 'Service Providers', types: providers },
+  ];
+}
+
+
+/** Normalise a stored recipient-type list (drop blanks, map legacy 'Master'). */
+function normalizeRecipientList(list: unknown): EmailRecipientType[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+    .map((x) => (x === 'Master' ? 'Vessel' : x));
+}
+
+// --- Rich-text / plain-text helpers -----------------------------------------
+// Bodies are stored as HTML going forward; legacy seed bodies are plain text.
+
+/** True when a string already contains HTML markup. */
+export function looksLikeHtml(s: string): boolean {
+  return /<\/?[a-z][\s\S]*>/i.test(s);
+}
+
+/** Escape plain text and turn newlines into <br> for the rich editor. */
+export function plainToHtml(text: string): string {
+  const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return esc.replace(/\n/g, '<br>');
+}
+
+/** Return an HTML representation of a body (plain-text bodies are converted). */
+export function ensureHtml(body: string): string {
+  return looksLikeHtml(body) ? body : plainToHtml(body);
+}
+
+/** Flatten HTML to plain text (for mailto bodies and clipboard). */
+export function htmlToPlain(html: string): string {
+  if (!looksLikeHtml(html)) return html;
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  div.querySelectorAll('br').forEach((br) => br.replaceWith('\n'));
+  div.querySelectorAll('p, div, li').forEach((el) => el.append('\n'));
+  return (div.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Resolve the subject line for a template, applying voyage tokens. */
+export function resolveSubject(tpl: EmailTemplate, voyage: Voyage | undefined): string {
+  const raw = (tpl.subject ?? '').trim() || tpl.title;
+  return applyVoyageTokens(raw, voyage).trim();
+}
+
+/** Representative voyage used to preview templates in the admin editor. */
+export const SAMPLE_VOYAGE: Voyage | undefined = VOYAGES[0];
 
 function isEmailTemplate(v: unknown): v is EmailTemplate {
   return (

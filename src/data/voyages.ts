@@ -598,3 +598,18 @@ export function getVoyageById(id: string | null | undefined): Voyage | undefined
 
 /** Convenience: the default voyage shown when nothing is selected yet. */
 export const DEFAULT_VOYAGE = VOYAGES[0];
+
+/** A blank voyage for "create new" screens (Estimation / Operations). */
+export function makeBlankVoyage(): Voyage {
+  return {
+    id: `new-${Date.now()}`,
+    priority: 'LOW',
+    dueLt: 0, dueUtc: 0, remaining: '', vessel: '', pic: '', client: '', service: '', status: '',
+    portFrom: '', portTo: '', eta: '', lastNoon: '', wx: '', int: '', eov: '', opt: '', openTasks: 0,
+    tags: '', aiAlert: '', health: 0, handoverNote: '', open: '',
+    imo: '', vesselType: '', flag: '', dwt: '', built: 0, loa: '', beam: '', enginePower: '',
+    clientEmail: '', price: 0, pricingBasis: '', ecdisModel: '', interimPort: '', etdDisplay: '',
+    etdIso: '', routeRef: '', cpSpeed: 0, cpCons: 0, instSpeed: 0, instCons: 0, costPerDay: 0,
+    foCost: 0, goCost: 0, euaCost: 0, seed: 0,
+  };
+}

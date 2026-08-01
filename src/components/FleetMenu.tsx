@@ -29,7 +29,8 @@ import {
   useSelectedAccountVessel,
   writeSelectedAccountVessel,
 } from '../data/accounts';
-import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, useHandedOver, useModuleLifecycles, moduleLifecycleOf } from '../data/workflow';
+import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, estStatusColor, estStatusLabel, useHandedOver, useModuleLifecycles, moduleLifecycleOf, usePostfixHanded, useFixtureNumbers } from '../data/workflow';
+import { useSavedEstimates } from '../data/savedEstimates';
 import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
 import { AppFooterControls } from './AppFooterControls';
 
@@ -122,9 +123,8 @@ function statusLabel(module: string, key: string): string {
  * field yet, so it is derived deterministically for display; swap for the real
  * field when available.
  */
-const CHARTER_TYPES = ['TCIN', 'TCO', 'VOY', 'COA', 'SPOT'];
 function charterTypeOf(v: Voyage): string {
-  return CHARTER_TYPES[Math.abs(Math.round(v.seed ?? 0)) % CHARTER_TYPES.length];
+  return FIX_TYPE_FILTER_OPTIONS[Math.abs(Math.round(v.seed ?? 0)) % FIX_TYPE_FILTER_OPTIONS.length];
 }
 
 const COLLAPSE_KEY = 'fv.fleetMenu.collapsed';
@@ -162,7 +162,10 @@ export function FleetMenu() {
   const estStatuses = useEstimationStatuses();
   const estFixTypes = useEstimationFixTypes();
   const handedOver = useHandedOver();
-
+  const moduleLifecycles = useModuleLifecycles();
+  const postfixHanded = usePostfixHanded();
+  const fixtureNos = useFixtureNumbers();
+  const savedEstimates = useSavedEstimates();
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
   const [module, setModule] = useState<string>('Performance');
   const [pic, setPic] = useState('All');
@@ -207,10 +210,19 @@ export function FleetMenu() {
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    // Chartering buckets by estimate status; Operations/Performance show handed-over voyages as Active.
+    // Chartering buckets by estimate status; Operations/Postfix honour a manual
+    // override, else derive; handed-over voyages default to Active.
     const bucketFor = (v: Voyage): Lifecycle => {
       if (module === 'Chartering') return charteringBucket(v.id, estStatuses, lifecycleOf(v));
-      if ((module === 'Operations' || module === 'Performance') && handedOver.includes(v.id)) return 'active';
+      if (module === 'Operations') {
+        return moduleLifecycleOf(moduleLifecycles, 'Operations', v.id)
+          ?? (handedOver.includes(v.id) ? 'active' : lifecycleOf(v));
+      }
+      if (module === 'Postfix') {
+        return moduleLifecycleOf(moduleLifecycles, 'Postfix', v.id)
+          ?? (postfixHanded.includes(v.id) ? 'active' : lifecycleOf(v));
+      }
+      if (module === 'Performance' && handedOver.includes(v.id)) return 'active';
       return lifecycleOf(v);
     };
     return VOYAGES.filter((v) => {
@@ -234,12 +246,41 @@ export function FleetMenu() {
         return false;
       return true;
     });
-  }, [module, isChartering, isOperations, pic, voyageType, status, query, estStatuses, estFixTypes, handedOver]);
+  }, [module, isChartering, isOperations, pic, voyageType, status, query, estStatuses, estFixTypes, handedOver, moduleLifecycles, postfixHanded]);
+
+  // Saved estimates (from the estimation page's Save button) surface at the top
+  // of the Chartering list. Their status maps onto the same three buckets.
+  const savedRows = useMemo(() => {
+    if (!isChartering) return [];
+    const q = query.trim().toLowerCase();
+    const bucket = (s: string): Lifecycle => {
+      const l = s.toLowerCase();
+      if (l.includes('fixed')) return 'complete';
+      if (l.includes('cancel')) return 'closed';
+      return 'active';
+    };
+    return savedEstimates.filter((s) => {
+      if (bucket(s.status) !== status) return false;
+      if (voyageType !== 'All' && s.fixType !== voyageType) return false;
+      if (q && !`${s.vessel} ${s.estNo} ${s.fixType}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [isChartering, savedEstimates, status, voyageType, query]);
+
+  const activeEstId = new URLSearchParams(location.search).get('est');
 
   // Bucket shown on each voyage row's badge (mirrors the filter above).
   const rowBucket = (v: Voyage): Lifecycle => {
     if (module === 'Chartering') return charteringBucket(v.id, estStatuses, lifecycleOf(v));
-    if ((module === 'Operations' || module === 'Performance') && handedOver.includes(v.id)) return 'active';
+    if (module === 'Operations') {
+      return moduleLifecycleOf(moduleLifecycles, 'Operations', v.id)
+        ?? (handedOver.includes(v.id) ? 'active' : lifecycleOf(v));
+    }
+    if (module === 'Postfix') {
+      return moduleLifecycleOf(moduleLifecycles, 'Postfix', v.id)
+        ?? (postfixHanded.includes(v.id) ? 'active' : lifecycleOf(v));
+    }
+    if (module === 'Performance' && handedOver.includes(v.id)) return 'active';
     return lifecycleOf(v);
   };
 
@@ -293,6 +334,11 @@ export function FleetMenu() {
   const openVoyage = (v: Voyage) => {
     writeSelectedVoyageId(v.id);
     navigate(moduleRoute(module));
+  };
+
+  const openSavedEstimate = (id: string) => {
+    clearSelectedVoyageId();
+    navigate(`/chartering?est=${encodeURIComponent(id)}`);
   };
 
   // Switching module clears the active vessel so the details area starts blank;
@@ -464,9 +510,33 @@ export function FleetMenu() {
         </ul>
       ) : (
         <ul className="fv-fleetmenu__list">
-          {rows.length === 0 && (
+          {rows.length === 0 && savedRows.length === 0 && (
             <li className="fv-fleetmenu__empty">{t('noVessels', 'No vessels')}</li>
           )}
+          {savedRows.map((s) => (
+            <li key={s.id}>
+              <button
+                type="button"
+                className={`fv-fleetmenu__item${s.id === activeEstId ? ' fv-fleetmenu__item--active' : ''}`}
+                onClick={() => openSavedEstimate(s.id)}
+              >
+                <div className="fv-fleetmenu__item-top">
+                  <span className="fv-fleetmenu__vessel">{s.vessel}</span>
+                  <span className="fv-fleetmenu__order">{s.estNo}</span>
+                </div>
+                <div className="fv-fleetmenu__item-route">
+                  Profit <b className={s.profit >= 0 ? 'fv-fleetmenu__pos' : 'fv-fleetmenu__neg'}>{usdAbbr(s.profit)}</b>
+                  <span className="fv-fleetmenu__acct-split"> · TCE {usdAbbr(s.tce)}/d</span>
+                </div>
+                <div className="fv-fleetmenu__item-meta">
+                  <span className="fv-fleetmenu__charter">{s.fixType}</span>
+                  <span className={`fv-fleetmenu__badge fv-fleetmenu__badge--${estStatusColor(s.status)}`}>
+                    {estStatusLabel(s.status)}
+                  </span>
+                </div>
+              </button>
+            </li>
+          ))}
           {rows.map((v) => (
             <li key={v.id}>
               <button
@@ -476,7 +546,7 @@ export function FleetMenu() {
               >
                 <div className="fv-fleetmenu__item-top">
                   <span className="fv-fleetmenu__vessel">{v.vessel}</span>
-                  <span className="fv-fleetmenu__order">{v.id}</span>
+                  <span className="fv-fleetmenu__order">{fixtureNos[v.id] ?? v.id}</span>
                 </div>
                 <div className="fv-fleetmenu__item-route">
                   {v.portFrom} → {v.portTo}
@@ -487,7 +557,7 @@ export function FleetMenu() {
                   <span
                     className={`fv-fleetmenu__badge fv-fleetmenu__badge--${rowBucket(v)}`}
                   >
-                    {statusLabel(module, rowBucket(v))}
+                    {isOperations ? v.status : statusLabel(module, rowBucket(v))}
                   </span>
                 </div>
               </button>

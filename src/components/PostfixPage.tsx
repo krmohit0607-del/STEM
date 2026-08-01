@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useCpdds } from '../data/workflow';
+import { WorkflowStatusSelect } from './WorkflowStatusSelect';
 import type { Voyage } from '../data/voyages';
 import { NoVesselSelected } from './NoVesselSelected';
 import { addPayable } from '../data/accounts';
@@ -167,6 +169,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
 
 export function PostfixPage() {
   const voyage = useSelectedVoyage();
+  const cpdds = useCpdds();
   const [tab, setTab] = useState<TabId>('summary');
   const [rail, setRail] = useState<RailPanel>('summary');
   const [sent, setSent] = useState<Set<string>>(new Set());
@@ -202,9 +205,12 @@ export function PostfixPage() {
             <i className="fas fa-file-signature" aria-hidden="true" />
             <div>
               <h1>{voyage.vessel} · Voyage Settlement</h1>
-              <span className="fv-ops__recap-sub">{voyage.id} · IMO {voyage.imo} · {b.load} → {b.disch} · Charterer: {voyage.client}</span>
+              <span className="fv-ops__recap-sub">{voyage.id} · IMO {voyage.imo} · {b.load} → {b.disch} · {voyage.client}{cpdds[voyage.id] ? ` / CPDD ${cpdds[voyage.id]}` : ''}</span>
             </div>
             <span className="fv-ops__recap-badge">Settlement In Progress</span>
+            <div className="fv-pf__topbar-status">
+              <WorkflowStatusSelect module="Postfix" voyageId={voyage.id} />
+            </div>
           </div>
         </div>
 

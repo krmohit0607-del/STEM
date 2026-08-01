@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useNotifications } from '../data/workflow';
+import { useSelectedVoyage } from '../data/selectedVoyage';
+import { GenerateCommsModal } from './GenerateCommsModal';
 
 /**
  * Universal top navigation bar (shared across all modules).
@@ -13,19 +15,14 @@ import { useNotifications } from '../data/workflow';
  * only the brand and the app-level actions.
  */
 
-function todoHandler(label: string) {
-  return () => {
-    // eslint-disable-next-line no-console
-    console.warn(`[FleetView WebApp] '${label}' not ported yet — see MIGRATION.md.`);
-  };
-}
-
 export function TopNav() {
   const l = useL();
   const navigate = useNavigate();
   const notifications = useNotifications();
+  const selectedVoyage = useSelectedVoyage();
   const [notifOpen, setNotifOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [commsOpen, setCommsOpen] = useState(false);
   const notifRef = useRef<HTMLDivElement | null>(null);
   const createRef = useRef<HTMLDivElement | null>(null);
   const t = (key: string, fallback: string) => {
@@ -44,7 +41,9 @@ export function TopNav() {
 
   const startCreate = (type: 'estimation' | 'operations' | 'performance') => {
     setCreateOpen(false);
-    navigate(`/voyage/new?type=${type}`);
+    if (type === 'estimation') navigate('/chartering?new=1');
+    else if (type === 'operations') navigate('/operations?new=1');
+    else navigate('/voyage/new?type=performance');
   };
 
   useEffect(() => {
@@ -98,9 +97,9 @@ export function TopNav() {
         <button
           type="button"
           className="fv-topnav__icon-button"
-          title={t('sendSystemEmail', 'Send system email')}
-          aria-label={t('sendSystemEmail', 'Send system email')}
-          onClick={todoHandler('System email dialog')}
+          title={t('sendSystemEmail', 'Generate comms')}
+          aria-label={t('sendSystemEmail', 'Generate comms')}
+          onClick={() => setCommsOpen(true)}
         >
           <i className="fas fa-envelope" aria-hidden="true" />
         </button>
@@ -135,6 +134,7 @@ export function TopNav() {
           )}
         </div>
       </div>
+      {commsOpen && <GenerateCommsModal voyage={selectedVoyage} onClose={() => setCommsOpen(false)} />}
     </div>
   );
 }
