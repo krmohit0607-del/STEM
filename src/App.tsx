@@ -10,6 +10,7 @@ import { RobCalculationPage } from './components/RobCalculationPage';
 import { VoyageEstimationPage } from './components/VoyageEstimationPage';
 import { ChateringEstimationPage } from './components/ChateringEstimationPage';
 import { OperationsPage } from './components/OperationsPage';
+import { EmissionsPage } from './components/EmissionsPage';
 import { BunkerManagementPage } from './components/BunkerManagementPage';
 import { AccountsPage } from './components/AccountsPage';
 import { PostfixPage } from './components/PostfixPage';
@@ -137,6 +138,14 @@ export function App() {
               element={
                 <Layout showModuleChrome={false}>
                   <PostfixPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/emissions"
+              element={
+                <Layout showModuleChrome={false}>
+                  <EmissionsPage />
                 </Layout>
               }
             />

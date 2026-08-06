@@ -50,6 +50,7 @@ const MODULES = [
   'Operations',
   'Bunker',
   'Postfix',
+  'Emissions',
   'Performance',
   'Accounts',
 ];
@@ -59,7 +60,7 @@ const MODULES = [
  * optimization) is the Performance module; Chartering hosts the voyage
  * estimation. The rest are placeholders for future roles/access.
  */
-const ACTIVE_MODULES = new Set(['Performance', 'Chartering', 'Operations', 'Bunker', 'Postfix', 'Accounts']);
+const ACTIVE_MODULES = new Set(['Performance', 'Chartering', 'Operations', 'Bunker', 'Postfix', 'Emissions', 'Accounts']);
 
 type Lifecycle = 'active' | 'complete' | 'closed';
 
@@ -104,6 +105,11 @@ const MODULE_STATUSES: Record<string, { key: string; label: string }[]> = {
     { key: 'closed', label: 'Closed' },
   ],
   Postfix: [
+    { key: 'active', label: 'Active' },
+    { key: 'complete', label: 'Completed' },
+    { key: 'closed', label: 'Closed' },
+  ],
+  Emissions: [
     { key: 'active', label: 'Active' },
     { key: 'complete', label: 'Completed' },
     { key: 'closed', label: 'Closed' },
@@ -181,7 +187,7 @@ export function FleetMenu() {
   // Keep the sidebar module in sync with the active route (deep links / dropdown).
   useEffect(() => {
     const p = location.pathname;
-    const routed = p.startsWith('/bunker') ? 'Bunker' : p.startsWith('/operations') ? 'Operations' : p.startsWith('/chartering') ? 'Chartering' : p.startsWith('/postfix') ? 'Postfix' : p.startsWith('/accounts') ? 'Accounts' : null;
+    const routed = p.startsWith('/bunker') ? 'Bunker' : p.startsWith('/operations') ? 'Operations' : p.startsWith('/chartering') ? 'Chartering' : p.startsWith('/postfix') ? 'Postfix' : p.startsWith('/emissions') ? 'Emissions' : p.startsWith('/accounts') ? 'Accounts' : null;
     if (routed && routed !== module) {
       setModule(routed);
       setStatus((MODULE_STATUSES[routed] ?? MODULE_STATUSES.Performance)[0].key);
@@ -329,7 +335,7 @@ export function FleetMenu() {
   };
 
   const moduleRoute = (m: string) =>
-    m === 'Chartering' ? '/chartering' : m === 'Operations' ? '/operations' : m === 'Bunker' ? '/bunker' : m === 'Postfix' ? '/postfix' : m === 'Accounts' ? '/accounts' : '/voyage';
+    m === 'Chartering' ? '/chartering' : m === 'Operations' ? '/operations' : m === 'Bunker' ? '/bunker' : m === 'Postfix' ? '/postfix' : m === 'Emissions' ? '/emissions' : m === 'Accounts' ? '/accounts' : '/voyage';
 
   const openVoyage = (v: Voyage) => {
     writeSelectedVoyageId(v.id);

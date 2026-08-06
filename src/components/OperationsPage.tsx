@@ -7,11 +7,16 @@ import type { Voyage } from '../data/voyages';
 import { makeBlankVoyage } from '../data/voyages';
 import { addNotification, copyLaytimeToPostfix, useCpdds, useFixtureNumbers } from '../data/workflow';
 import { loadClients, saveClients, SERVICE_PROVIDER_TYPES } from '../data/clients';
+import { addBunkerRequirement } from '../data/bunker';
 import { loadVessels, saveVessels } from '../data/vessels';
 import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
 import { NoVesselSelected } from './NoVesselSelected';
 import { WorkflowStatusSelect } from './WorkflowStatusSelect';
 import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
+import { LAYTIME_TERMS_OPTIONS, PORT_TYPE_OPTIONS } from '../data/estimationOptions';
+import { EtaCalculation, RobCalculation } from './EtaRobCalculation';
+import { VoyageEstimation } from './VoyageEstimation';
+import { WeatherMargins } from './WeatherMargins';
 
 /**
  * Operations module — the voyage-operations workspace for a fixed vessel.
@@ -28,9 +33,9 @@ import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
 
 /* ------------------------------------------------------------------ types */
 
-type TabId = 'details' | 'pnl' | 'etarob' | 'stowage' | 'hire' | 'freight' | 'costs' | 'reports';
+type TabId = 'details' | 'pnl' | 'etarob' | 'stowage' | 'hire' | 'freight' | 'reports' | 'costs';
 
-interface Recap {
+export interface Recap {
   vesselName: string;
   vesselEmail: string;
   voyageFixType: string;
@@ -92,6 +97,10 @@ interface Recap {
   // --- CP performance warranty (speed & consumption) ----------------------
   cpSpeed: string;
   cpCons: string;
+  // --- observed voyage performance (Live P&L → Update Actuals) -------------
+  actualSpeed?: string;      // observed avg speed (kn) — recomputes voyage days
+  actualFoPerDay?: string;   // observed FO cons (MT/day)
+  actualDoPerDay?: string;   // observed DO cons (MT/day)
   // --- units (redesigned Voyage Details) ---------------------------------
   hireCurrency: string;
   freightCurrency: string;
@@ -122,6 +131,12 @@ interface Recap {
   freightLaytime?: FreightLaytimeData;
   // --- Independent duplicated hire installments (kept out of the live schedule) --
   hireDuplicates?: HireDuplicate[];
+  // --- Estimated voyage cash flow (Voyage Details tab) --------------------
+  cashflow?: CashflowData;
+  // --- Vessel reports (Vessel Reports tab) -------------------------------
+  vesselReports?: VesselReport[];
+  // --- EU ETS allowance records (Freight & Laytime tab) ------------------
+  eua?: EuaData;
 }
 
 /** One deadweight/cargo-intake calculation column (a port or load-line zone). */
@@ -197,6 +212,7 @@ interface EtaLeg {
   from: string;
   to: string;
   kind: 'sea' | 'port';
+  type?: string;           // leg type (Ballast / Laden / Loading / Discharging / …)
   distNonEca: string;
   distEca: string;
   speed: string;
@@ -261,6 +277,7 @@ interface LaytimePort {
   id: string;
   name: string;
   op: 'Load' | 'Discharge';
+  accountName?: string;    // account the laytime is prepared in favour of
   cargo: string;
   quantity: string;        // MT worked at this port
   rate: string;            // load/disch rate mt/day
@@ -271,6 +288,8 @@ interface LaytimePort {
   commenced: string;       // laytime commenced dd-mm-yyyy HH:MM
   completed: string;       // laytime completed dd-mm-yyyy HH:MM
   reversible: boolean;     // reversible laytime
+  calcMethod?: 'counting' | 'deduction'; // time-counting (default) or deduction method
+  onceOnDemurrage?: boolean;             // once on demurrage, always on demurrage (all time counts)
   demurrageRate: string;   // USD / day
   despatchRate: string;    // USD / day
   events: LaytimeEvent[];
@@ -294,6 +313,10 @@ interface FreightInvoice {
   loadPortDA: string;
   dischPortDA: string;
   includeDemurrage: boolean;   // fold demurrage/despatch into a final freight invoice
+  // Manual overrides (blank = fall back to the voyage recap figure).
+  blQtyOverride?: string;      // cargo / B-L quantity (MT)
+  freightRateOverride?: string; // freight rate per MT
+  adcomOverride?: string;      // address commission (%)
 }
 
 interface FreightLaytimeData {
@@ -301,8 +324,40 @@ interface FreightLaytimeData {
   laytimes: LaytimePort[];
 }
 
+/** One inward (receivable) or outward (payable) line in the voyage cash flow. */
+interface CashflowRow { id: string; date: string; label: string; amount: string }
+interface CashflowData { receivables: CashflowRow[]; payables: CashflowRow[] }
+
+/** EU ETS allowance (EUA) records — per-leg emission calc + a bought/used ledger. */
+interface EuaLeg { id: string; from: string; to: string; fuel: string; cons: string; emissionFactor: string; phasePct: string }
+interface EuaLedgerRow { id: string; date: string; type: string; qty: string; rate: string }
+interface EuaData { phaseInPct: string; legs: EuaLeg[]; ledger: EuaLedgerRow[] }
+
+/** One vessel report row (SBE / noon / EOSP / shifting / bunker etc.). */
+interface VesselReport {
+  id: string;
+  type: string;          // report type
+  shiftSub: string;      // shifting sub-type (used when type is a shifting report)
+  dtUtc: string;         // date-time UTC (dd-mm-yyyy HH:MM)
+  dtLt: string;          // date-time local time
+  duration: string;      // hours since last report
+  position: string;
+  avgSpdGps: string;     // avg speed — GPS (kn)
+  avgSpdLog: string;     // avg speed — LOG (kn)
+  distSinceLast: string; // distance sailed since last report (nm)
+  distTotal: string;     // total distance sailed (nm)
+  robFo: string;         // ROB fuel oil (MT)
+  robDo: string;         // ROB diesel oil (MT)
+  consFo: string;        // FO consumed since last report (MT)
+  consDo: string;        // DO consumed since last report (MT)
+  rpm: string;
+  mcr: string;           // % MCR
+  weather: string;       // winds / waves / currents
+  remarks: string;
+}
+
 /** Recap keys whose value is a plain string (everything except arrays). */
-type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'freightLaytime' | 'hireDuplicates'>;
+type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'freightLaytime' | 'hireDuplicates' | 'cashflow' | 'vesselReports' | 'eua'>;
 
 interface DocItem {
   id: string;
@@ -361,21 +416,21 @@ function buildItineraryLegs(
   delivery: string, load: string, disch: string, redelivery: string,
   d: { speed: string; wf: string; seaV: string; seaM: string; portV: string; portM: string; tz: string },
 ): EtaLeg[] {
-  const sea = (from: string, to: string): EtaLeg => ({ from, to, kind: 'sea', distNonEca: '0', distEca: '0', speed: d.speed, wf: d.wf, portDays: '', consVlsfo: d.seaV, consMgo: d.seaM, supVlsfo: '', supMgo: '', tz: d.tz });
-  const port = (p: string): EtaLeg => ({ from: p, to: p, kind: 'port', distNonEca: '0', distEca: '0', speed: '', wf: '', portDays: '1', consVlsfo: d.portV, consMgo: d.portM, supVlsfo: '', supMgo: '', tz: d.tz });
+  const sea = (from: string, to: string, type = 'Laden'): EtaLeg => ({ from, to, kind: 'sea', type, distNonEca: '0', distEca: '0', speed: d.speed, wf: d.wf, portDays: '', consVlsfo: d.seaV, consMgo: d.seaM, supVlsfo: '', supMgo: '', tz: d.tz });
+  const port = (p: string, type = 'Loading'): EtaLeg => ({ from: p, to: p, kind: 'port', type, distNonEca: '0', distEca: '0', speed: '', wf: '', portDays: '1', consVlsfo: d.portV, consMgo: d.portM, supVlsfo: '', supMgo: '', tz: d.tz });
   const loadPorts = splitPorts(load);
   const dischPorts = splitPorts(disch);
   const firstLoad = loadPorts[0] || load || delivery;
   const legs: EtaLeg[] = [];
-  legs.push(sea(`Delivery — ${delivery || firstLoad}`, firstLoad));
+  legs.push(sea(`Delivery — ${delivery || firstLoad}`, firstLoad, 'Ballast'));
   loadPorts.forEach((lp, idx) => {
     if (idx > 0) legs.push(sea(loadPorts[idx - 1], lp));
-    legs.push(port(lp));
+    legs.push(port(lp, 'Loading'));
   });
   let prev = loadPorts[loadPorts.length - 1] || firstLoad;
   dischPorts.forEach((dp) => {
     legs.push(sea(prev, dp));
-    legs.push(port(dp));
+    legs.push(port(dp, 'Discharging'));
     prev = dp;
   });
   legs.push(sea(prev, `Redelivery — ${redelivery || prev}`));
@@ -439,7 +494,7 @@ function etaEndRob(plan: EtaPlan): { v: number; m: number } {
   return { v: last ? last.robV : num(plan.startRobVlsfo), m: last ? last.robM : num(plan.startRobMgo) };
 }
 
-function seedRecap(voyage: Voyage | undefined): Recap {
+export function seedRecap(voyage: Voyage | undefined): Recap {
   return {
     vesselName: voyage?.vessel || 'AP JADRAN',
     vesselEmail: '',
@@ -617,18 +672,40 @@ interface Pnl {
   tce: number;
 }
 
+/** Total sea distance (nm) and port days from the itinerary legs. */
+function itineraryTotals(plan: EtaPlan): { distance: number; portDays: number } {
+  let distance = 0;
+  let portDays = 0;
+  plan.legs.forEach((l) => {
+    if (l.kind === 'sea') distance += num(l.distNonEca) + num(l.distEca);
+    else portDays += num(l.portDays);
+  });
+  return { distance, portDays };
+}
+
 function computePnl(r: Recap): Pnl {
-  const days = daysBetween(parseDMY(r.deliveryDateTime), parseDMY(r.redeliveryDateTime));
+  // Observed speed (when entered) drives voyage days from the itinerary distance; else delivery→redelivery.
+  const spd = num(r.actualSpeed ?? '');
+  let days: number;
+  if (spd > 0) {
+    const { distance, portDays } = itineraryTotals(r.etaPlan);
+    days = (distance > 0 ? distance / (spd * 24) : 0) + portDays;
+  } else {
+    days = daysBetween(parseDMY(r.deliveryDateTime), parseDMY(r.redeliveryDateTime));
+  }
   const qty = num(r.finalQtyLoaded);
   const freight = num(r.freightPerMt) * qty;
   const demDespatch = num(r.demDespatch);
   const miscIncome = num(r.miscIncome);
   const revenue = freight + demDespatch + miscIncome;
 
-  const foCons = num(r.foCons);
+  // Observed daily cons (when entered) drives total burn over the voyage days; else manual totals.
+  const foPerDay = num(r.actualFoPerDay ?? '');
+  const doPerDay = num(r.actualDoPerDay ?? '');
+  const foCons = foPerDay > 0 ? foPerDay * days : num(r.foCons);
   const foPrice = num(r.foPrice);
   const foExp = foCons * foPrice;
-  const doCons = num(r.doCons);
+  const doCons = doPerDay > 0 ? doPerDay * days : num(r.doCons);
   const doPrice = num(r.doPrice);
   const doExp = doCons * doPrice;
   const bunkerCost = foExp + doExp;
@@ -1037,12 +1114,12 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
         <div className="fv-ops__content">
           {tab === 'details' && <VoyageDetailsTab recap={recap} setRecap={setRecap} voyage={voyage} status={opsStatus} />}
           {tab === 'pnl' && <PnlTab recap={recap} set={set} setRecap={setRecap} pnl={pnl} estPnl={estPnl} />}
-          {tab === 'etarob' && <EtaRobTab recap={recap} setRecap={setRecap} />}
+          {tab === 'etarob' && <EtaRobTab recap={recap} setRecap={setRecap} voyage={voyage} />}
           {tab === 'stowage' && <StowageTab recap={recap} setRecap={setRecap} />}
           {tab === 'hire' && <HireTab recap={recap} setRecap={setRecap} pnl={pnl} />}
           {tab === 'freight' && <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} />}
-          {tab === 'costs' && <CostsTab pnl={pnl} />}
-          {tab === 'reports' && <ReportsTab voyage={voyage} />}
+          {tab === 'costs' && <CostsTab />}
+          {tab === 'reports' && <ReportsTab recap={recap} setRecap={setRecap} voyage={voyage} />}
         </div>
       </div>
 
@@ -1127,6 +1204,18 @@ const OPS_DESPATCH_TERMS = ['Same as Demurrage', 'Half Despatch WTS', 'HDWTS', '
 const OPS_VOYAGE_STATUSES = ['At Sea', 'At Port', 'At Berth', 'At Anchorage', 'Loading', 'Discharging', 'On Voyage', 'Ballast', 'Idle', 'Completed'];
 // Bunker fuel grades (defaults mirror the Chartering estimation fuels).
 const OPS_FUEL_GRADES = ['VLSFO', 'ULSFO', 'HSFO', 'LSMGO', 'MGO', 'MDO', 'LNG', 'Methanol'];
+// Itinerary leg types (mirrors the Chartering port-rotation Type column).
+const OPS_LEG_TYPES = ['Ballast', 'Laden', 'LoadLine Change', ...PORT_TYPE_OPTIONS];
+// Vessel report types (Vessel Reports tab).
+const OPS_REPORT_TYPES = [
+  'SBE', 'FWE', 'COSP (Departure)', 'NOON - SEA', 'NOON - PORT', 'EOSP (Arrival)',
+  'NOON - ANCHOR', 'BUNKER', 'SHIFTING REPORT', 'SPEED CHANGE', 'FUEL CHANGE',
+  'STOP', 'RESUME', 'DEVIATION',
+];
+// Shifting-report sub-types (shown when the report type is a shifting report).
+const OPS_SHIFTING_SUBTYPES = [
+  'Anchorage to Another Anchorage', 'Anchorage to Berth', 'Berth to Berth', 'Berth to Anchorage',
+];
 
 /** Text field with a label (edit mode) — used across the Voyage Details cards. */
 function VdField({ label, value, onChange, placeholder, accent, num }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; accent?: boolean; num?: boolean }) {
@@ -1544,6 +1633,9 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
         </Card>
       </div>
 
+      {/* Estimated voyage cash flow */}
+      <VoyageCashflowCard recap={recap} setRecap={setRecap} />
+
       {/* Timeline */}
       <Card title="Timeline" icon="fa-timeline">
         <div className="fv-ops__milestones">
@@ -1877,11 +1969,10 @@ function PnlTab({ recap, set, setRecap, pnl, estPnl }: { recap: Recap; set: (k: 
               </>
             )}
           </Card>
-        </div>
-      </div>
 
-      {/* Editable actuals — shared recap keys, so edits sync to Voyage Details too */}
-      <Card title="Update Actuals" icon="fa-pen-to-square">
+          {/* Editable actuals — shared recap keys, so edits sync to Voyage Details too */}
+          <Card title="Update Actuals" icon="fa-pen-to-square">
+        <div className="fv-ops__pnl-actuals">
         <p className="fv-ops__hint fv-ops__pnl-actuals-note">
           <i className="fas fa-link" aria-hidden="true" /> Values entered here update the same fields everywhere in the voyage (Voyage Details, recap &amp; reports). The Actual column and variances refresh live.
         </p>
@@ -1909,23 +2000,31 @@ function PnlTab({ recap, set, setRecap, pnl, estPnl }: { recap: Recap; set: (k: 
         </div>
 
         <div className="fv-ops__vd-sub">
-          <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunkers Consumed</div>
+          <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunkers &amp; Performance</div>
           <div className="fv-ops__vd-fields">
+            <VdField label="Actual Speed (kn)" value={recap.actualSpeed ?? ''} onChange={(v) => set('actualSpeed', v)} placeholder={`CP ${recap.cpSpeed || '—'}`} num />
+            <VdField label="FO Cons (MT/day)" value={recap.actualFoPerDay ?? ''} onChange={(v) => set('actualFoPerDay', v)} num />
+            <VdField label="DO Cons (MT/day)" value={recap.actualDoPerDay ?? ''} onChange={(v) => set('actualDoPerDay', v)} num />
             <VdField label="FO Cons (MT)" value={recap.foCons} onChange={(v) => set('foCons', v)} num />
             <VdField label="FO Price / MT" value={recap.foPrice} onChange={(v) => set('foPrice', v)} num />
             <VdField label="DO Cons (MT)" value={recap.doCons} onChange={(v) => set('doCons', v)} num />
             <VdField label="DO Price / MT" value={recap.doPrice} onChange={(v) => set('doPrice', v)} num />
           </div>
+          <p className="fv-ops__hint"><i className="fas fa-link" aria-hidden="true" /> Observed speed recomputes voyage days from the itinerary (Σ sea legs ÷ speed) + port days — hire &amp; TCE update live. Daily cons (MT/day) recomputes total FO/DO burnt; leave blank to use the delivery → redelivery dates and the total MT figures.</p>
         </div>
-      </Card>
+        </div>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }
 
 /* ------------------------------------------------------------ ETA & ROB tab */
 
-function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
+function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage }) {
   const plan = recap.etaPlan;
+  const [bunkerOpen, setBunkerOpen] = useState(false);
   const setPlan = (patch: Partial<EtaPlan>) => setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, ...patch } }));
   const setPerf = (patch: Partial<EtaPerf>) => setPlan({ perf: { ...plan.perf, ...patch } });
   const setMain = (which: 'mainNormal' | 'mainEca', patch: Partial<EtaMainCons>) => setPerf({ [which]: { ...plan.perf[which], ...patch } } as Partial<EtaPerf>);
@@ -1955,6 +2054,7 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
       const d = legDefaults(p.perf);
       const leg: EtaLeg = {
         from: last?.to ?? '', to: '', kind,
+        type: kind === 'sea' ? 'Laden' : 'Loading',
         distNonEca: '0', distEca: '0',
         speed: kind === 'sea' ? d.speed : '',
         wf: kind === 'sea' ? p.weatherMargin : '',
@@ -1988,6 +2088,21 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
   const computed = projectEtaLegs(plan);
   const endV = computed.length ? computed[computed.length - 1].robV : num(plan.startRobVlsfo);
   const endM = computed.length ? computed[computed.length - 1].robM : num(plan.startRobMgo);
+
+  // Bunker-booking request: supply ports (arrival + supplied qty) drawn from the itinerary.
+  const bunkerPortOptions: BunkerReqPort[] = plan.legs.map((l, i) => {
+    const arr = computed[i]?.arr ?? null;
+    const day = (dd: Date | null) => (dd ? `${p2(dd.getDate())}-${p2(dd.getMonth() + 1)}-${dd.getFullYear()}` : '');
+    const full = (dd: Date | null) => (dd ? `${day(dd)} ${p2(dd.getHours())}:${p2(dd.getMinutes())}` : '');
+    return {
+      port: (l.kind === 'sea' ? l.to : l.from) || l.from || '',
+      eta: full(arr),
+      laycanStart: day(arr),
+      laycanEnd: day(arr ? new Date(arr.getTime() + 3 * 86_400_000) : null),
+      supV: num(l.supVlsfo),
+      supM: num(l.supMgo),
+    };
+  }).filter((o) => o.port);
 
   const arrDest = computed.length ? computed[computed.length - 1].arr : null;
   const totalDays = computed.reduce((s, c) => s + c.days, 0);
@@ -2093,6 +2208,7 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
         icon="fa-route"
         right={(
           <span className="fv-ops__eta-addbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={() => setBunkerOpen(true)} title="Raise a bunker booking request to the Bunkers department"><i className="fas fa-gas-pump" aria-hidden="true" /> Request Bunker Booking</button>
             <button type="button" className="fv-ops__btn" onClick={rebuildFromPorts} title="Rebuild legs from the voyage port rotation"><i className="fas fa-arrows-rotate" aria-hidden="true" /> From ports</button>
             <button type="button" className="fv-ops__btn" onClick={() => addLeg('sea')}><i className="fas fa-water" aria-hidden="true" /> Sea leg</button>
             <button type="button" className="fv-ops__btn" onClick={() => addLeg('port')}><i className="fas fa-anchor" aria-hidden="true" /> Port stay</button>
@@ -2108,6 +2224,7 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
         <div className="fv-ops__eta-scroll">
           <table className="fv-ops__eta">
             <colgroup>
+              <col className="fv-ops__eta-c-type" />
               <col className="fv-ops__eta-c-port" />
               <col className="fv-ops__eta-c-port" />
               <col className="fv-ops__eta-c-num" />
@@ -2132,6 +2249,7 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
             </colgroup>
             <thead>
               <tr>
+                <th rowSpan={2}>Type</th>
                 <th rowSpan={2}>From</th>
                 <th rowSpan={2}>To</th>
                 <th colSpan={2}>Distance (nm)</th>
@@ -2164,7 +2282,7 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
             </thead>
             <tbody>
               <tr className="fv-ops__eta-delivery">
-                <td colSpan={18}>Bunkers on Delivery</td>
+                <td colSpan={19}>Bunkers on Delivery</td>
                 <td className="fv-ops__r fv-ops__eta-rob">{fmt(num(plan.startRobVlsfo))}</td>
                 <td className="fv-ops__r fv-ops__eta-rob">{fmt(num(plan.startRobMgo))}</td>
                 <td />
@@ -2173,6 +2291,12 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
                 const c = computed[i];
                 return (
                   <tr key={i} className={l.kind === 'port' ? 'fv-ops__eta-port' : undefined}>
+                    <td>
+                      <select className="fv-ops__eta-sel" value={l.type ?? (l.kind === 'sea' ? 'Laden' : 'Loading')} onChange={(e) => setLeg(i, { type: e.target.value })}>
+                        {l.type && !OPS_LEG_TYPES.includes(l.type) && <option value={l.type}>{l.type}</option>}
+                        {OPS_LEG_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </td>
                     <td>{nIn(l.from, (v) => setLeg(i, { from: v }), 'fv-ops__eta-in--wide')}</td>
                     <td>{nIn(l.to, (v) => setLeg(i, { to: v }), 'fv-ops__eta-in--wide')}</td>
                     <td className="fv-ops__r">{l.kind === 'sea' ? nIn(l.distNonEca, (v) => setLeg(i, { distNonEca: v })) : '—'}</td>
@@ -2200,7 +2324,7 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
             </tbody>
             <tfoot>
               <tr className="fv-ops__row-sub">
-                <td colSpan={7}>Totals</td>
+                <td colSpan={8}>Totals</td>
                 <td className="fv-ops__r">{fmt(totalDays, 2)}</td>
                 <td colSpan={6} />
                 <td className="fv-ops__r">{fmt(totalUsedV, 2)}</td>
@@ -2220,11 +2344,119 @@ function EtaRobTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetSt
 
       {/* Bunker details (same box as Voyage Details — BOD, 5% margins, CP price) */}
       <BunkersCard recap={recap} setRecap={setRecap} />
+      {bunkerOpen && <BunkerRequestModal recap={recap} voyage={voyage} ports={bunkerPortOptions} onClose={() => setBunkerOpen(false)} />}
     </div>
   );
 }
 
 /* ------------------------------------------------------------ Stowage tab */
+
+/** One itinerary port option for the bunker-booking request (arrival + supplied qty). */
+interface BunkerReqPort { port: string; eta: string; laycanStart: string; laycanEnd: string; supV: number; supM: number }
+
+/** Request bunker booking — seeded from the itinerary supply columns; submits to the Bunkers dept. */
+function BunkerRequestModal({ recap, voyage, ports, onClose }: {
+  recap: Recap; voyage: Voyage; ports: BunkerReqPort[]; onClose: () => void;
+}) {
+  const defIdx = Math.max(0, ports.findIndex((o) => o.supV + o.supM > 0));
+  const base = ports[defIdx] ?? { port: recap.dischargePort, eta: '', laycanStart: '', laycanEnd: '', supV: 0, supM: 0 };
+  const [idx, setIdx] = useState(defIdx);
+  const [port, setPort] = useState(base.port);
+  const [eta, setEta] = useState(base.eta);
+  const [laycanStart, setLaycanStart] = useState(base.laycanStart);
+  const [laycanEnd, setLaycanEnd] = useState(base.laycanEnd);
+  const [lines, setLines] = useState<{ fuel: string; qty: string }[]>([
+    { fuel: 'VLSFO', qty: base.supV ? String(base.supV) : '' },
+    { fuel: 'LSMGO', qty: base.supM ? String(base.supM) : '' },
+  ]);
+  const [note, setNote] = useState('');
+  const [done, setDone] = useState(false);
+
+  const applyPort = (i: number) => {
+    const o = ports[i];
+    if (!o) return;
+    setIdx(i); setPort(o.port); setEta(o.eta); setLaycanStart(o.laycanStart); setLaycanEnd(o.laycanEnd);
+    setLines([{ fuel: 'VLSFO', qty: o.supV ? String(o.supV) : '' }, { fuel: 'LSMGO', qty: o.supM ? String(o.supM) : '' }]);
+  };
+  const setLine = (i: number, patch: Partial<{ fuel: string; qty: string }>) => setLines(lines.map((l, k) => (k === i ? { ...l, ...patch } : l)));
+  const addLine = () => setLines([...lines, { fuel: 'VLSFO', qty: '' }]);
+  const delLine = (i: number) => setLines(lines.filter((_, k) => k !== i));
+
+  const active = lines.filter((l) => num(l.qty) > 0);
+  const valid = port.trim() !== '' && active.length > 0;
+  const submit = () => {
+    active.forEach((l) => addBunkerRequirement({
+      vessel: recap.vesselName, imo: voyage.imo, loadPort: recap.loadPort, dischargePort: recap.dischargePort,
+      bunkerPort: port, eta, requiredOn: laycanStart, fuelType: l.fuel, quantity: num(l.qty),
+      ownerInstructions: note || undefined,
+    }));
+    const summary = active.map((l) => `${l.fuel} ${fmt(num(l.qty), 0)} MT`).join(' + ');
+    addNotification(`New bunker request — ${recap.vesselName} @ ${port} (${summary}), ETA ${eta || '—'}`, 'Bunker');
+    setDone(true);
+  };
+
+  return (
+    <div className="fv-ops__modal-overlay" onClick={onClose}>
+      <div className="fv-ops__soa" style={{ width: 'min(660px, 100%)' }} onClick={(e) => e.stopPropagation()}>
+        <div className="fv-ops__soa-head">
+          <div>
+            <h2>Request Bunker Booking</h2>
+            <span className="fv-ops__soa-sub">{recap.vesselName} · IMO {voyage.imo || '—'} · to Bunkers Department</span>
+          </div>
+          <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
+          </div>
+        </div>
+        <div className="fv-ops__soa-body">
+          {done ? (
+            <div className="fv-ops__bnkreq-done">
+              <i className="fas fa-circle-check" aria-hidden="true" />
+              <p>Bunker request sent to the Bunkers department. It now appears in the Bunker module as <b>Pending RFQ</b>.</p>
+              <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={onClose}>Done</button>
+            </div>
+          ) : (
+            <>
+              <div className="fv-ops__vd-fields">
+                <label className="fv-ops__vd-field">
+                  <span>Port of Supply</span>
+                  <select className="fv-ops__vd-in" value={idx} onChange={(e) => applyPort(Number(e.target.value))}>
+                    {ports.length === 0 && <option value={-1}>—</option>}
+                    {ports.map((o, i) => <option key={i} value={i}>{o.port}{o.supV + o.supM > 0 ? ' · supply planned' : ''}</option>)}
+                  </select>
+                </label>
+                <label className="fv-ops__vd-field"><span>Port (edit)</span><input className="fv-ops__vd-in" value={port} onChange={(e) => setPort(e.target.value)} /></label>
+                <label className="fv-ops__vd-field"><span>ETA at Port</span><input className="fv-ops__vd-in" value={eta} onChange={(e) => setEta(e.target.value)} placeholder="dd-mm-yyyy HH:MM" /></label>
+                <label className="fv-ops__vd-field"><span>Laycan Start</span><input className="fv-ops__vd-in" value={laycanStart} onChange={(e) => setLaycanStart(e.target.value)} placeholder="dd-mm-yyyy" /></label>
+                <label className="fv-ops__vd-field"><span>Laycan End</span><input className="fv-ops__vd-in" value={laycanEnd} onChange={(e) => setLaycanEnd(e.target.value)} placeholder="dd-mm-yyyy" /></label>
+              </div>
+              <div className="fv-ops__vd-sub-head fv-ops__bnkreq-fuelhd"><i className="fas fa-gas-pump" aria-hidden="true" /> Fuel &amp; Quantity
+                <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addLine}><i className="fas fa-plus" aria-hidden="true" /> Fuel</button>
+              </div>
+              <table className="fv-ops__table">
+                <thead><tr><th>Fuel Type</th><th className="fv-ops__r">Quantity (MT)</th><th aria-label="Remove" /></tr></thead>
+                <tbody>
+                  {lines.map((l, i) => (
+                    <tr key={i}>
+                      <td><select className="fv-ops__eta-sel" value={l.fuel} onChange={(e) => setLine(i, { fuel: e.target.value })}>{OPS_FUEL_GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></td>
+                      <td className="fv-ops__r"><input className="fv-ops__eta-in" value={l.qty} placeholder="0" onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
+                      <td className="fv-ops__r">{lines.length > 1 && <button type="button" className="fv-ops__bnk-rm" aria-label="Remove fuel" onClick={() => delLine(i)}><i className="fas fa-xmark" aria-hidden="true" /></button>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <label className="fv-ops__vd-field fv-ops__bnkreq-note"><span>Instructions / Note</span><input className="fv-ops__vd-in" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional message to the bunkers team" /></label>
+              <div className="fv-ops__laytime-actions">
+                <button type="button" className="fv-ops__btn" onClick={onClose}>Cancel</button>
+                <button type="button" className="fv-ops__btn fv-ops__btn--primary" disabled={!valid} onClick={submit}><i className="fas fa-paper-plane" aria-hidden="true" /> Submit Request</button>
+              </div>
+              <p className="fv-ops__hint">Quantities default to the itinerary <b>Supply</b> columns and ETA to the projected arrival for the selected port — all editable. Submitting raises a Pending-RFQ requirement in the Bunkers module and notifies the department.</p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
   const st = recap.stowage;
@@ -3530,6 +3762,170 @@ function ordinal(n: number): string {
   return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`;
 }
 
+/** Build the estimated voyage cash flow (receivables + payables) from the recap figures. */
+function seedCashflow(recap: Recap): CashflowData {
+  const pnl = computePnl(recap);
+  const receivables: CashflowRow[] = [
+    { id: uid('cfr'), date: '', label: `Freight (${recap.charterers || 'Charterers'})`, amount: String(Math.round(pnl.freight)) },
+  ];
+  if (pnl.demDespatch > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Demurrage', amount: String(Math.round(pnl.demDespatch)) });
+  if (pnl.miscIncome > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Misc Income', amount: String(Math.round(pnl.miscIncome)) });
+
+  const payables: CashflowRow[] = [];
+  const hd = num(recap.hirePerDay);
+  const dedPct = num(recap.adcom) + num(recap.brokerage);
+  const first = Math.max(1, num(recap.firstHirePeriodDays) || 15);
+  const every = Math.max(1, num(recap.hireEveryDays) || 15);
+  let covered = 0;
+  let n = 1;
+  while (covered < pnl.days - 0.01 && n <= 60) {
+    const d = Math.min(n === 1 ? first : every, pnl.days - covered);
+    payables.push({ id: uid('cfp'), date: '', label: `${ordinal(n)} Hire`, amount: String(Math.round(hd * d * (1 - dedPct / 100))) });
+    covered += d;
+    n += 1;
+  }
+  if (pnl.portLoad > 0) payables.push({ id: uid('cfp'), date: '', label: 'Load Port DA', amount: String(Math.round(pnl.portLoad)) });
+  if (pnl.portDisch > 0) payables.push({ id: uid('cfp'), date: '', label: 'Disch Port DA', amount: String(Math.round(pnl.portDisch)) });
+  if (pnl.bunkerCost > 0) payables.push({ id: uid('cfp'), date: '', label: 'Bunker Payment', amount: String(Math.round(pnl.bunkerCost)) });
+  if (pnl.cveTotal > 0) payables.push({ id: uid('cfp'), date: '', label: 'C.V.E.', amount: String(Math.round(pnl.cveTotal)) });
+  if (pnl.ilohc > 0) payables.push({ id: uid('cfp'), date: '', label: 'ILOHC', amount: String(Math.round(pnl.ilohc)) });
+  if (pnl.otherCost > 0) payables.push({ id: uid('cfp'), date: '', label: 'Other Cost', amount: String(Math.round(pnl.otherCost)) });
+  return { receivables, payables };
+}
+
+/** Estimated voyage cash-flow card — inward (receivables) vs outward (payables), with Excel / PDF export. */
+function VoyageCashflowCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
+  const stored = recap.cashflow;
+  const valid = !!stored && Array.isArray(stored.receivables) && Array.isArray(stored.payables);
+  const cf = valid ? (stored as CashflowData) : seedCashflow(recap);
+
+  useEffect(() => {
+    if (!valid) setRecap((r) => ({ ...r, cashflow: seedCashflow(r) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid]);
+
+  const setCF = (patch: Partial<CashflowData>) => setRecap((r) => ({ ...r, cashflow: { ...(r.cashflow ?? seedCashflow(r)), ...patch } }));
+  const setRow = (side: 'receivables' | 'payables', id: string, patch: Partial<CashflowRow>) =>
+    setCF({ [side]: cf[side].map((x) => (x.id === id ? { ...x, ...patch } : x)) } as Partial<CashflowData>);
+  const addRow = (side: 'receivables' | 'payables') =>
+    setCF({ [side]: [...cf[side], { id: uid(side === 'receivables' ? 'cfr' : 'cfp'), date: '', label: '', amount: '' }] } as Partial<CashflowData>);
+  const delRow = (side: 'receivables' | 'payables', id: string) =>
+    setCF({ [side]: cf[side].filter((x) => x.id !== id) } as Partial<CashflowData>);
+  const reseed = () => setRecap((r) => ({ ...r, cashflow: seedCashflow(r) }));
+
+  const totalIn = cf.receivables.reduce((s, x) => s + num(x.amount), 0);
+  const totalOut = cf.payables.reduce((s, x) => s + num(x.amount), 0);
+  const net = totalIn - totalOut;
+  const rowCount = Math.max(cf.receivables.length, cf.payables.length);
+
+  const cell = (val: string, on: (v: string) => void, ph?: string, right?: boolean) => (
+    <input className={`fv-ops__vd-in${right ? ' fv-ops__r' : ''}`} value={val} placeholder={ph} inputMode={right ? 'decimal' : undefined} onChange={(e) => on(e.target.value)} />
+  );
+
+  const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const bodyHtml = () => Array.from({ length: rowCount }).map((_, i) => {
+    const a = cf.receivables[i]; const b = cf.payables[i];
+    return `<tr><td>${esc(a?.date ?? '')}</td><td>${esc(a?.label ?? '')}</td><td class="r">${a ? esc(a.amount) : ''}</td><td>${esc(b?.date ?? '')}</td><td>${esc(b?.label ?? '')}</td><td class="r">${b ? esc(b.amount) : ''}</td></tr>`;
+  }).join('');
+  const headHtml = `<tr><th colspan="6">ESTIMATED CASH FLOW FOR THE VOYAGE — ${esc(recap.vesselName)}</th></tr>
+    <tr><th>DATE</th><th>RECEIVABLES</th><th class="r">AMOUNT (USD)</th><th>DATE</th><th>PAYABLES</th><th class="r">AMOUNT (USD)</th></tr>`;
+  const footHtml = `<tr><td></td><td><b>TOTAL RECEIVABLES</b></td><td class="r"><b>${Math.round(totalIn)}</b></td><td></td><td><b>TOTAL PAYABLES</b></td><td class="r"><b>${Math.round(totalOut)}</b></td></tr>
+    <tr><td colspan="5"><b>NET CASH FLOW</b></td><td class="r"><b>${Math.round(net)}</b></td></tr>`;
+
+  const exportExcel = () => {
+    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>
+      <table border="1"><thead>${headHtml}</thead><tbody>${bodyHtml()}</tbody><tfoot>${footHtml}</tfoot></table></body></html>`;
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Cashflow_${(recap.vesselName || 'voyage').replace(/\s+/g, '_')}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportPdf = () => {
+    const w = window.open('', '_blank', 'width=1000,height=800');
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Cash Flow — ${esc(recap.vesselName)}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
+      h1{font-size:15px;margin:0 0 2px}.sub{color:#555;margin:0 0 12px;font-size:11px}
+      table{border-collapse:collapse;width:100%}
+      th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
+      th.r,td.r{text-align:right}tfoot td{background:#f2f2f2}
+      thead tr:first-child th{background:#f7caa5;text-align:center}
+    </style></head><body>
+      <p class="sub">${esc(recap.vesselName)} · Owners ${esc(recap.owners)} · CP ${esc(recap.cpDate || '—')}</p>
+      <table><thead>${headHtml}</thead><tbody>${bodyHtml()}</tbody><tfoot>${footHtml}</tfoot></table>
+      <p class="sub">*Estimated · E&amp;OE.</p></body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  return (
+    <Card
+      title="Estimated Cash Flow for the Voyage"
+      icon="fa-money-bill-transfer"
+      span2
+      right={(
+        <span className="fv-ops__frl-secbtns">
+          <button type="button" className="fv-ops__btn" onClick={() => addRow('receivables')}><i className="fas fa-plus" aria-hidden="true" /> Receivable</button>
+          <button type="button" className="fv-ops__btn" onClick={() => addRow('payables')}><i className="fas fa-plus" aria-hidden="true" /> Payable</button>
+          <button type="button" className="fv-ops__btn" onClick={reseed} title="Rebuild from voyage figures"><i className="fas fa-arrows-rotate" aria-hidden="true" /> Reset</button>
+          <button type="button" className="fv-ops__btn" onClick={exportExcel}><i className="fas fa-file-excel" aria-hidden="true" /> Excel</button>
+          <button type="button" className="fv-ops__btn" onClick={exportPdf}><i className="fas fa-file-pdf" aria-hidden="true" /> PDF</button>
+        </span>
+      )}
+    >
+      <div className="fv-ops__eta-scroll">
+        <table className="fv-ops__soa-tbl fv-ops__cf-tbl">
+          <thead>
+            <tr>
+              <th>Date</th><th>Receivables</th><th className="fv-ops__r">Amount (USD)</th>
+              <th>Date</th><th>Payables</th><th className="fv-ops__r">Amount (USD)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rowCount === 0 && <tr><td colSpan={6} className="fv-ops__vd-empty">No cash-flow lines. Use “Reset” to rebuild from the voyage figures, or add rows.</td></tr>}
+            {Array.from({ length: rowCount }).map((_, i) => {
+              const a = cf.receivables[i];
+              const b = cf.payables[i];
+              return (
+                <tr key={i}>
+                  <td>{a ? cell(a.date, (v) => setRow('receivables', a.id, { date: v }), 'dd-mm-yyyy') : null}</td>
+                  <td>{a ? cell(a.label, (v) => setRow('receivables', a.id, { label: v }), 'Description') : null}</td>
+                  <td className="fv-ops__r fv-ops__cf-amtcell">
+                    {a && <>{cell(a.amount, (v) => setRow('receivables', a.id, { amount: v }), '0', true)}<button type="button" className="fv-ops__bnk-rm" aria-label="Remove receivable" onClick={() => delRow('receivables', a.id)}><i className="fas fa-xmark" aria-hidden="true" /></button></>}
+                  </td>
+                  <td>{b ? cell(b.date, (v) => setRow('payables', b.id, { date: v }), 'dd-mm-yyyy') : null}</td>
+                  <td>{b ? cell(b.label, (v) => setRow('payables', b.id, { label: v }), 'Description') : null}</td>
+                  <td className="fv-ops__r fv-ops__cf-amtcell">
+                    {b && <>{cell(b.amount, (v) => setRow('payables', b.id, { amount: v }), '0', true)}<button type="button" className="fv-ops__bnk-rm" aria-label="Remove payable" onClick={() => delRow('payables', b.id)}><i className="fas fa-xmark" aria-hidden="true" /></button></>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="fv-ops__soa-sum">
+              <td /><td>Total Receivables</td><td className="fv-ops__r">{money(totalIn)}</td>
+              <td /><td>Total Payables</td><td className="fv-ops__r">{money(totalOut)}</td>
+            </tr>
+            <tr className={`fv-ops__soa-total ${net < 0 ? 'fv-ops__cf-net--neg' : ''}`}>
+              <td colSpan={5}>Net Cash Flow (Receivables − Payables)</td>
+              <td className={`fv-ops__r ${net < 0 ? 'fv-ops__neg' : 'fv-ops__pos'}`}>{money(net)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="fv-ops__hint">Estimated inflows &amp; outflows derived from the voyage recap (freight, hire installments, port DA, bunkers). Edit dates / amounts, add lines, then export to <b>Excel</b> or <b>PDF</b>. *E&amp;OE.</p>
+    </Card>
+  );
+}
+
 /* ------------------------------------------------------------ Freight & Laytime */
 
 /** Parse "HH:MM" into fractional hours (e.g. "13:30" → 13.5). */
@@ -3550,33 +3946,110 @@ function eventElapsedDays(ev: LaytimeEvent): number {
 }
 
 interface LaytimeResult {
-  allowed: number; used: number; balance: number;
+  allowed: number; used: number; gross: number; deductions: number; balance: number;
   onDemurrage: boolean; demurrageDays: number; despatchDays: number;
   demurrageAmt: number; despatchAmt: number;
+  demurrageStart: Date | null;
   rows: { ev: LaytimeEvent; elapsed: number; counted: number; cumulative: number }[];
 }
 
-/** Full laytime calculation for one port (allowed vs used → demurrage / despatch). */
+/** Start datetime of one statement-of-facts row (date + from-clock). */
+function eventStartDate(ev: LaytimeEvent): Date | null {
+  const d = parseDMY(ev.date);
+  if (!d) return null;
+  const clock = parseClock(ev.from);
+  return clock != null ? new Date(d.getTime() + clock * 3_600_000) : d;
+}
+
+/** Datetime at which a port's cumulative counted/used laytime reaches `target` days. */
+function laytimeReachDate(port: LaytimePort, target: number): Date | null {
+  if ((port.calcMethod ?? 'counting') === 'deduction') {
+    const start = parseDMY(port.commenced);
+    if (!start) return null;
+    const deductions = port.events.reduce((s, ev) => s + eventElapsedDays(ev) * (num(ev.pct) / 100), 0);
+    return new Date(start.getTime() + (target + deductions) * 86_400_000);
+  }
+  let prev = 0;
+  for (const ev of port.events) {
+    const counted = eventElapsedDays(ev) * (num(ev.pct) / 100);
+    if (prev + counted >= target) {
+      const pct = num(ev.pct) / 100;
+      const need = target - prev;
+      const rs = eventStartDate(ev);
+      return rs ? new Date(rs.getTime() + (pct > 0 ? need / pct : 0) * 86_400_000) : null;
+    }
+    prev += counted;
+  }
+  return null;
+}
+
+/** Full laytime calculation for one port (allowed vs used → demurrage / despatch).
+ *  Counting method: each row's time × % counts as laytime used.
+ *  Deduction method: rows are excepted periods deducted from the gross commenced→completed span. */
 function calcLaytime(port: LaytimePort): LaytimeResult {
   const qty = num(port.quantity);
   const rate = num(port.rate);
   const allowed = rate > 0 ? qty / rate : 0;
-  let used = 0;
+  const method = port.calcMethod ?? 'counting';
+  // "Once on demurrage, always on demurrage": after the allowance is used up, all subsequent time counts fully.
+  const alwaysDem = port.onceOnDemurrage === true;
+  let running = 0;
+  let onDem = false;
   const rows = port.events.map((ev) => {
     const elapsed = eventElapsedDays(ev);
-    const counted = elapsed * (num(ev.pct) / 100);
-    used += counted;
-    return { ev, elapsed, counted, cumulative: used };
+    const counted = alwaysDem && onDem ? elapsed : elapsed * (num(ev.pct) / 100);
+    running += counted;
+    if (allowed > 0 && running >= allowed) onDem = true;
+    return { ev, elapsed, counted, cumulative: running };
   });
+  let gross: number;
+  let deductions: number;
+  let used: number;
+  if (method === 'deduction') {
+    gross = daysBetween(parseDMY(port.commenced), parseDMY(port.completed));
+    deductions = running;
+    used = Math.max(0, gross - deductions);
+  } else {
+    gross = running;
+    deductions = 0;
+    used = running;
+  }
   const balance = allowed - used;
   const onDemurrage = balance < 0;
   const demurrageDays = onDemurrage ? -balance : 0;
   const despatchDays = onDemurrage ? 0 : balance;
+  const demurrageStart = onDemurrage ? laytimeReachDate(port, allowed) : null;
   return {
-    allowed, used, balance, onDemurrage, demurrageDays, despatchDays,
+    allowed, used, gross, deductions, balance, onDemurrage, demurrageDays, despatchDays,
     demurrageAmt: demurrageDays * num(port.demurrageRate),
     despatchAmt: despatchDays * num(port.despatchRate),
+    demurrageStart,
     rows,
+  };
+}
+
+/** Combined (reversible) laytime across several ports — allowances and time used are pooled. */
+function calcLaytimeCombined(ports: LaytimePort[], rateFrom: LaytimePort): Omit<LaytimeResult, 'rows'> {
+  let allowed = 0, used = 0, gross = 0, deductions = 0;
+  ports.forEach((p) => { const r = calcLaytime(p); allowed += r.allowed; used += r.used; gross += r.gross; deductions += r.deductions; });
+  const balance = allowed - used;
+  const onDemurrage = balance < 0;
+  const demurrageDays = onDemurrage ? -balance : 0;
+  const despatchDays = onDemurrage ? 0 : balance;
+  let demurrageStart: Date | null = null;
+  if (onDemurrage) {
+    let cum = 0;
+    for (const p of ports) {
+      const u = calcLaytime(p).used;
+      if (cum + u >= allowed) { demurrageStart = laytimeReachDate(p, allowed - cum); break; }
+      cum += u;
+    }
+  }
+  return {
+    allowed, used, gross, deductions, balance, onDemurrage, demurrageDays, despatchDays,
+    demurrageAmt: demurrageDays * num(rateFrom.demurrageRate),
+    despatchAmt: despatchDays * num(rateFrom.despatchRate),
+    demurrageStart,
   };
 }
 
@@ -3592,6 +4065,7 @@ function seedFreightLaytime(recap: Recap): FreightLaytimeData {
     id: uid('lay'),
     name: p.name,
     op: p.op,
+    accountName: recap.charterers,
     cargo: recap.cargoName,
     quantity: p.op === 'Load'
       ? String(Math.round(blQty))
@@ -3639,7 +4113,7 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[])
   const results = laytimes.map((p) => calcLaytime(p));
   const totalDemurrage = results.reduce((s, r) => s + r.demurrageAmt, 0);
   const totalDespatch = results.reduce((s, r) => s + r.despatchAmt, 0);
-  const adcomPct = num(recap.adcom) / 100;
+  const adcomPct = (inv.adcomOverride?.trim() ? num(inv.adcomOverride) : num(recap.adcom)) / 100;
   const lines: InvoiceLine[] = [];
   if (inv.kind === 'Demurrage') {
     laytimes.forEach((p) => {
@@ -3653,8 +4127,8 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[])
     return { lines, total };
   }
   // Freight invoice
-  const blQty = num(recap.finalQtyLoaded);
-  const frtRate = num(recap.freightPerMt);
+  const blQty = inv.blQtyOverride?.trim() ? num(inv.blQtyOverride) : num(recap.finalQtyLoaded);
+  const frtRate = inv.freightRateOverride?.trim() ? num(inv.freightRateOverride) : num(recap.freightPerMt);
   const diffRate = num(inv.freightDifferential);
   const grossFreight = blQty * frtRate;
   const diffFreight = blQty * diffRate;
@@ -3709,11 +4183,12 @@ function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, la
 /** HTML body for one laytime calculation (used by the modal and bulk PDF export). */
 function laytimePdfSection(port: LaytimePort, recap: Recap): string {
   const res = calcLaytime(port);
-  const factRows = res.rows.map(({ ev, elapsed, counted, cumulative }) => `<tr><td>${ev.date || ''}</td><td>${ev.from || ''}</td><td>${ev.to || ''}</td><td class="r">${ev.pct}</td><td class="r">${fmt(elapsed, 3)}</td><td class="r">${fmt(counted, 3)}</td><td class="r">${fmt(cumulative, 3)}</td><td>${ev.remark || ''}</td></tr>`).join('');
+  const factRows = res.rows.map(({ ev, elapsed, counted, cumulative }) => `<tr><td>${ev.date || ''}</td><td>${ev.from || ''}</td><td>${ev.to || ''}</td><td class="r">${fmt(elapsed, 3)}</td><td class="r">${ev.pct}</td><td class="r">${fmt(counted, 3)}</td><td class="r">${fmt(cumulative, 3)}</td><td>${ev.remark || ''}</td></tr>`).join('');
   return `<section>
     <h1>Laytime Calculation — ${port.name || 'Port'} (${port.op})</h1>
     <p class="sub">${recap.vesselName} · Cargo ${port.cargo} · CP ${recap.cpDate || '—'}</p>
     <div class="meta">
+      <div><span>In Favour Of:</span> ${port.accountName || '—'}</div>
       <div><span>Quantity:</span> ${fmt(num(port.quantity), 0)} MT</div>
       <div><span>Rate:</span> ${fmt(num(port.rate), 0)} mt/day</div>
       <div><span>Terms:</span> ${port.terms || '—'}</div>
@@ -3721,7 +4196,7 @@ function laytimePdfSection(port: LaytimePort, recap: Recap): string {
       <div><span>Laytime Used:</span> ${fmt(res.used, 3)} days</div>
       <div><span>${res.onDemurrage ? 'Demurrage Due:' : 'Despatch Due:'}</span> ${res.onDemurrage ? money(res.demurrageAmt) : money(res.despatchAmt)}</div>
     </div>
-    <table><thead><tr><th>Date</th><th>From</th><th>To</th><th class="r">% Count</th><th class="r">Elapsed</th><th class="r">Counted</th><th class="r">Cumulative</th><th>Remarks</th></tr></thead>
+    <table><thead><tr><th>Date</th><th>From</th><th>To</th><th class="r">Time</th><th class="r">% Count</th><th class="r">Time Used / Deducted</th><th class="r">Cumulative</th><th>Remarks</th></tr></thead>
     <tbody>${factRows}</tbody>
     <tfoot><tr><td colspan="6">Total Time Used</td><td class="r">${fmt(res.used, 3)}</td><td>days</td></tr></tfoot></table>
   </section>`;
@@ -3744,6 +4219,241 @@ function printSections(title: string, sections: string): void {
   w.focus();
   w.print();
 }
+
+/* --------------------------------------------------- EU ETS Allowances (EUA) */
+
+// Well-to-... CO2 emission factors (t-CO2 per t-fuel) per ISO 8217 fuel grade.
+const EUA_EMISSION_FACTORS: Record<string, number> = {
+  VLSFO: 3.151, LSFO: 3.151, ULSFO: 3.151, LFO: 3.151,
+  HFO: 3.114, HSFO: 3.114,
+  LSMGO: 3.206, MGO: 3.206, MDO: 3.206, DMX: 3.206,
+};
+const euaFactor = (fuel: string) => EUA_EMISSION_FACTORS[(fuel || '').trim().toUpperCase()] ?? 3.114;
+
+/** Build a starter EUA dataset from the voyage itinerary bunkers. */
+function seedEua(recap: Recap): EuaData {
+  const rows = projectEtaLegs(recap.etaPlan);
+  const totV = rows.reduce((s, c) => s + c.usedV, 0);
+  const totM = rows.reduce((s, c) => s + c.usedM, 0);
+  const from = recap.loadPort || '';
+  const to = recap.dischargePort || '';
+  return {
+    phaseInPct: '70',
+    legs: [
+      { id: uid('eua'), from, to, fuel: 'VLSFO', cons: totV.toFixed(3), emissionFactor: String(euaFactor('VLSFO')), phasePct: '50' },
+      { id: uid('eua'), from, to, fuel: 'LSMGO', cons: totM.toFixed(3), emissionFactor: String(euaFactor('LSMGO')), phasePct: '50' },
+    ],
+    ledger: [],
+  };
+}
+
+/* ------------------------------------------------------------ Emissions (EUA) */
+
+/** EU ETS allowance record — emission → EUA calculation plus a bought/used ledger. */
+export function EuaCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
+  const stored = recap.eua;
+  const valid = !!stored && Array.isArray(stored.legs) && Array.isArray(stored.ledger);
+  const base = valid ? (stored as EuaData) : seedEua(recap);
+
+  useEffect(() => {
+    if (!valid) setRecap((r) => ({ ...r, eua: seedEua(r) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid]);
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<EuaData>(base);
+  const view = editing ? draft : base;
+
+  const beginEdit = () => { setDraft(base); setEditing(true); };
+  const save = () => { setRecap((r) => ({ ...r, eua: draft })); setEditing(false); };
+  const discard = () => { setDraft(base); setEditing(false); };
+
+  const setField = (patch: Partial<EuaData>) => setDraft((d) => ({ ...d, ...patch }));
+  const setLeg = (id: string, patch: Partial<EuaLeg>) => setDraft((d) => ({ ...d, legs: d.legs.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+  const addLeg = () => setDraft((d) => ({ ...d, legs: [...d.legs, { id: uid('eua'), from: '', to: '', fuel: 'VLSFO', cons: '', emissionFactor: String(euaFactor('VLSFO')), phasePct: '50' }] }));
+  const delLeg = (id: string) => setDraft((d) => ({ ...d, legs: d.legs.filter((x) => x.id !== id) }));
+  const setLed = (id: string, patch: Partial<EuaLedgerRow>) => setDraft((d) => ({ ...d, ledger: d.ledger.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+  const addLed = () => setDraft((d) => ({ ...d, ledger: [...d.ledger, { id: uid('eual'), date: '', type: 'Bought', qty: '', rate: '' }] }));
+  const delLed = (id: string) => setDraft((d) => ({ ...d, ledger: d.ledger.filter((x) => x.id !== id) }));
+
+  const phaseIn = num(view.phaseInPct) / 100;
+  const calc = (l: EuaLeg) => {
+    const factor = num(l.emissionFactor) || euaFactor(l.fuel);
+    const co2 = num(l.cons) * factor;
+    const euas = co2 * (num(l.phasePct) / 100);
+    return { factor, co2, euas, euasPhased: euas * phaseIn };
+  };
+  const totalEuas = view.legs.reduce((s, l) => s + calc(l).euasPhased, 0);
+  const bought = view.ledger.filter((x) => /buy|bought/i.test(x.type)).reduce((s, x) => s + num(x.qty), 0);
+  const used = view.ledger.filter((x) => /use|surrender/i.test(x.type)).reduce((s, x) => s + num(x.qty), 0);
+  const cost = view.ledger.filter((x) => /buy|bought/i.test(x.type)).reduce((s, x) => s + num(x.qty) * num(x.rate), 0);
+  const balance = bought - used;
+  const shortfall = totalEuas - balance;
+
+  const nIn = (val: string, on: (v: string) => void, ph?: string) => (
+    editing ? <input className="fv-ops__eta-in" inputMode="decimal" value={val} placeholder={ph} onChange={(e) => on(e.target.value)} /> : <span className="fv-ops__vr-val">{val || '—'}</span>
+  );
+  const tIn = (val: string, on: (v: string) => void, ph?: string) => (
+    editing ? <input className="fv-ops__vd-in" value={val} placeholder={ph} onChange={(e) => on(e.target.value)} /> : <span className="fv-ops__vr-val">{val || '—'}</span>
+  );
+  const money2 = (n: number) => `€${fmt(n, 2)}`;
+
+  const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const calcTableHtml = () => {
+    const head = `<tr><th>From</th><th>To</th><th>Fuel</th><th class="r">Cons (MT)</th><th class="r">CO₂ Factor</th><th class="r">CO₂ Emission (t)</th><th class="r">% Phase</th><th class="r">EUAs</th><th class="r">EUAs @ ${esc(view.phaseInPct)}%</th></tr>`;
+    const body = view.legs.map((l) => { const c = calc(l); return `<tr><td>${esc(l.from)}</td><td>${esc(l.to)}</td><td>${esc(l.fuel)}</td><td class="r">${fmt(num(l.cons), 3)}</td><td class="r">${fmt(c.factor, 3)}</td><td class="r">${fmt(c.co2, 3)}</td><td class="r">${esc(l.phasePct)}%</td><td class="r">${fmt(c.euas, 3)}</td><td class="r">${fmt(c.euasPhased, 3)}</td></tr>`; }).join('');
+    const foot = `<tr><td colspan="8"><b>Total EUAs Applicable (to be paid)</b></td><td class="r"><b>${fmt(totalEuas, 3)}</b></td></tr>`;
+    return `<table border="1"><thead>${head}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`;
+  };
+  const ledgerTableHtml = () => {
+    const head = `<tr><th>Date</th><th>Type</th><th class="r">Qty (EUAs)</th><th class="r">Rate (€/EUA)</th><th class="r">Amount (€)</th></tr>`;
+    const body = view.ledger.map((x) => `<tr><td>${esc(x.date)}</td><td>${esc(x.type)}</td><td class="r">${fmt(num(x.qty), 3)}</td><td class="r">${fmt(num(x.rate), 2)}</td><td class="r">${fmt(num(x.qty) * num(x.rate), 2)}</td></tr>`).join('');
+    const foot = `<tr><td colspan="2"><b>Bought ${fmt(bought, 3)} · Used ${fmt(used, 3)} · Balance ${fmt(balance, 3)}</b></td><td colspan="3" class="r"><b>Cost €${fmt(cost, 2)}</b></td></tr>`;
+    return `<table border="1"><thead>${head}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`;
+  };
+  const exportExcel = () => {
+    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>
+      <h3>EU ETS Allowance (EUA) — ${esc(recap.vesselName)}</h3>${calcTableHtml()}<br/>${ledgerTableHtml()}</body></html>`;
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `EUA_${(recap.vesselName || 'voyage').replace(/\s+/g, '_')}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+  const exportPdf = () => {
+    const w = window.open('', '_blank', 'width=1000,height=800');
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>EUA — ${esc(recap.vesselName)}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:24px;font-size:11px}
+      h1{font-size:14px;margin:0 0 2px}h2{font-size:12px;margin:14px 0 4px}.sub{color:#555;margin:0 0 10px;font-size:10px}
+      table{border-collapse:collapse;width:100%;margin:4px 0}
+      th,td{border:1px solid #bbb;padding:3px 6px;text-align:left}
+      td.r,th.r{text-align:right}tfoot td{background:#f2f2f2;font-weight:700}
+    </style></head><body>
+      <h1>EU ETS Allowance (EUA) — ${esc(recap.vesselName)}</h1>
+      <p class="sub">${esc(recap.loadPort)} → ${esc(recap.dischargePort)} · Surrender phase-in ${esc(view.phaseInPct)}%</p>
+      <h2>EUA Calculation</h2>${calcTableHtml()}
+      <h2>Allowance Ledger</h2>${ledgerTableHtml()}
+      <p class="sub">*E&amp;OE.</p></body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  return (
+    <Card
+      title="EU ETS Allowances (EUA)"
+      icon="fa-leaf"
+      wide
+      right={(
+        <span className="fv-ops__frl-secbtns">
+          {!editing && <button type="button" className="fv-ops__btn" onClick={beginEdit}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>}
+          {editing && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={save}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>}
+          {editing && <button type="button" className="fv-ops__btn" onClick={discard}><i className="fas fa-rotate-left" aria-hidden="true" /> Discard</button>}
+          {editing && <button type="button" className="fv-ops__btn" onClick={addLeg}><i className="fas fa-plus" aria-hidden="true" /> Leg</button>}
+          {editing && <button type="button" className="fv-ops__btn" onClick={addLed}><i className="fas fa-plus" aria-hidden="true" /> Allowance</button>}
+          <button type="button" className="fv-ops__btn" onClick={exportExcel}><i className="fas fa-file-excel" aria-hidden="true" /> Excel</button>
+          <button type="button" className="fv-ops__btn" onClick={exportPdf}><i className="fas fa-file-pdf" aria-hidden="true" /> PDF</button>
+        </span>
+      )}
+    >
+      <div className="fv-ops__frl-voy">
+        <span><b>Surrender Phase-in %</b> {editing ? nIn(view.phaseInPct, (v) => setField({ phaseInPct: v })) : <b>{view.phaseInPct}%</b>}</span>
+        <span><b>Total EUAs to Pay:</b> {fmt(totalEuas, 3)}</span>
+        <span><b>Held (Bought − Used):</b> {fmt(balance, 3)}</span>
+        <span className={shortfall > 0 ? 'fv-ops__neg' : 'fv-ops__pos'}><b>{shortfall > 0 ? 'Shortfall:' : 'Surplus:'}</b> {fmt(Math.abs(shortfall), 3)} EUAs</span>
+      </div>
+
+      <div className="fv-ops__vd-sub-head"><i className="fas fa-smog" aria-hidden="true" /> EUA Calculation (emissions × scope × phase-in)</div>
+      <div className="fv-ops__eta-scroll">
+        <table className="fv-ops__soa-tbl fv-ops__eua-tbl">
+          <thead>
+            <tr>
+              <th>From</th><th>To</th><th>Fuel</th><th className="fv-ops__r">Cons (MT)</th><th className="fv-ops__r">CO₂ Factor</th>
+              <th className="fv-ops__r">CO₂ Emission (t)</th><th className="fv-ops__r">% Phase</th><th className="fv-ops__r">EUAs</th><th className="fv-ops__r">EUAs @ {view.phaseInPct}%</th>{editing && <th aria-label="Remove" />}
+            </tr>
+          </thead>
+          <tbody>
+            {view.legs.length === 0 && <tr><td colSpan={editing ? 10 : 9} className="fv-ops__vd-empty">No legs. {editing ? 'Use “Leg” to add one.' : ''}</td></tr>}
+            {view.legs.map((l) => {
+              const c = calc(l);
+              return (
+                <tr key={l.id}>
+                  <td>{tIn(l.from, (v) => setLeg(l.id, { from: v }), 'From')}</td>
+                  <td>{tIn(l.to, (v) => setLeg(l.id, { to: v }), 'To')}</td>
+                  <td>
+                    {editing
+                      ? <select className="fv-ops__eta-sel" value={l.fuel} onChange={(e) => setLeg(l.id, { fuel: e.target.value, emissionFactor: String(euaFactor(e.target.value)) })}>
+                          {l.fuel && !OPS_FUEL_GRADES.includes(l.fuel) && <option value={l.fuel}>{l.fuel}</option>}
+                          {OPS_FUEL_GRADES.map((f) => <option key={f} value={f}>{f}</option>)}
+                        </select>
+                      : <span className="fv-ops__vr-val">{l.fuel}</span>}
+                  </td>
+                  <td className="fv-ops__r">{nIn(l.cons, (v) => setLeg(l.id, { cons: v }))}</td>
+                  <td className="fv-ops__r">{nIn(l.emissionFactor, (v) => setLeg(l.id, { emissionFactor: v }))}</td>
+                  <td className="fv-ops__r">{fmt(c.co2, 3)}</td>
+                  <td className="fv-ops__r">
+                    {editing
+                      ? <select className="fv-ops__eta-sel" value={l.phasePct} onChange={(e) => setLeg(l.id, { phasePct: e.target.value })}><option value="50">50%</option><option value="100">100%</option></select>
+                      : <span className="fv-ops__vr-val">{l.phasePct}%</span>}
+                  </td>
+                  <td className="fv-ops__r">{fmt(c.euas, 3)}</td>
+                  <td className="fv-ops__r">{fmt(c.euasPhased, 3)}</td>
+                  {editing && <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label="Remove leg" onClick={() => delLeg(l.id)}><i className="fas fa-xmark" aria-hidden="true" /></button></td>}
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="fv-ops__soa-total">
+              <td colSpan={editing ? 9 : 8}>Total EUAs Applicable (to be paid)</td>
+              <td className="fv-ops__r">{fmt(totalEuas, 3)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div className="fv-ops__vd-sub-head"><i className="fas fa-book" aria-hidden="true" /> Allowance Ledger (bought / used &amp; rate)</div>
+      <div className="fv-ops__eta-scroll">
+        <table className="fv-ops__soa-tbl fv-ops__eua-tbl">
+          <thead>
+            <tr><th>Date</th><th>Type</th><th className="fv-ops__r">Qty (EUAs)</th><th className="fv-ops__r">Rate (€/EUA)</th><th className="fv-ops__r">Amount (€)</th>{editing && <th aria-label="Remove" />}</tr>
+          </thead>
+          <tbody>
+            {view.ledger.length === 0 && <tr><td colSpan={editing ? 6 : 5} className="fv-ops__vd-empty">No allowances recorded. {editing ? 'Use “Allowance” to add a bought / used entry.' : ''}</td></tr>}
+            {view.ledger.map((x) => (
+              <tr key={x.id}>
+                <td>{tIn(x.date, (v) => setLed(x.id, { date: v }), 'dd-mm-yyyy')}</td>
+                <td>
+                  {editing
+                    ? <select className="fv-ops__eta-sel" value={x.type} onChange={(e) => setLed(x.id, { type: e.target.value })}><option>Bought</option><option>Used</option><option>Surrendered</option></select>
+                    : <span className="fv-ops__vr-val">{x.type}</span>}
+                </td>
+                <td className="fv-ops__r">{nIn(x.qty, (v) => setLed(x.id, { qty: v }))}</td>
+                <td className="fv-ops__r">{nIn(x.rate, (v) => setLed(x.id, { rate: v }))}</td>
+                <td className="fv-ops__r">{money2(num(x.qty) * num(x.rate))}</td>
+                {editing && <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label="Remove allowance" onClick={() => delLed(x.id)}><i className="fas fa-xmark" aria-hidden="true" /></button></td>}
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="fv-ops__soa-sum">
+              <td colSpan={2}>Bought {fmt(bought, 3)} · Used {fmt(used, 3)} · Balance {fmt(balance, 3)}</td>
+              <td className="fv-ops__r" colSpan={editing ? 4 : 3}>Cost {money2(cost)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="fv-ops__hint">CO₂ Emission = Cons × factor (VLSFO/LFO 3.151 · MGO/MDO 3.206 · HFO 3.114). EUAs = CO₂ × scope % (100% intra-EU · 50% EU↔non-EU), then × the surrender phase-in % (2025 40% · 2026 70% · 2027+ 100%). Use <b>Edit</b> to adjust, add legs / allowances, then export to <b>Excel</b> or <b>PDF</b>.</p>
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------ Freight & Laytime */
 
 function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage }) {
   const stored = recap.freightLaytime;
@@ -3971,6 +4681,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
       <LaytimeModal
         key={openLaytime.id}
         port={openLaytime}
+        siblings={fl.laytimes}
         recap={recap}
         onSave={(patch) => saveLaytime(openLaytime.id, patch)}
         onDelete={() => { delLaytime(openLaytime.id); setLaytimeId(null); }}
@@ -3991,6 +4702,9 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, o
   const setD = (patch: Partial<FreightInvoice>) => setDraft((d) => ({ ...d, ...patch }));
   const view = editing ? draft : inv;
   const { lines, total } = calcInvoice(view, recap, laytimes);
+  const effBlQty = view.blQtyOverride?.trim() ? num(view.blQtyOverride) : num(recap.finalQtyLoaded);
+  const effFreight = view.freightRateOverride?.trim() ? num(view.freightRateOverride) : num(recap.freightPerMt);
+  const effAdcom = view.adcomOverride?.trim() ? num(view.adcomOverride) : num(recap.adcom);
   const today = new Date();
   const p2 = (n: number) => String(n).padStart(2, '0');
 
@@ -4090,8 +4804,19 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, o
           <div className="fv-ops__frl-voy">
             <span><b>Voyage:</b> {recap.loadPort} → {recap.dischargePort}</span>
             <span><b>Cargo:</b> {recap.cargoName}</span>
-            <span><b>B/L Qty:</b> {fmt(num(recap.finalQtyLoaded), 0)} MT</span>
-            <span><b>Freight:</b> {money(num(recap.freightPerMt))} PMT</span>
+            {editing ? (
+              <>
+                <label className="fv-ops__frl-voyed"><span>B/L Qty (MT)</span>{inp(view.blQtyOverride ?? '', (v) => setD({ blQtyOverride: v }), 96, fmt(num(recap.finalQtyLoaded), 0))}</label>
+                <label className="fv-ops__frl-voyed"><span>Freight (PMT)</span>{inp(view.freightRateOverride ?? '', (v) => setD({ freightRateOverride: v }), 84, String(num(recap.freightPerMt)))}</label>
+                <label className="fv-ops__frl-voyed"><span>Address Comm (%)</span>{inp(view.adcomOverride ?? '', (v) => setD({ adcomOverride: v }), 76, String(num(recap.adcom)))}</label>
+              </>
+            ) : (
+              <>
+                <span><b>B/L Qty:</b> {fmt(effBlQty, 0)} MT</span>
+                <span><b>Freight:</b> {money(effFreight)} PMT</span>
+                <span><b>Address Comm:</b> {fmt(effAdcom, 3)}%</span>
+              </>
+            )}
           </div>
           {view.kind === 'Freight' && editing && (
             <div className="fv-ops__frl-adj">
@@ -4103,7 +4828,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, o
               {view.freightType === 'Final' && <label className="fv-ops__frl-chk"><input type="checkbox" checked={view.includeDemurrage} onChange={(e) => setD({ includeDemurrage: e.target.checked })} /> Include demurrage / despatch</label>}
             </div>
           )}
-          <table className="fv-ops__soa-tbl">
+          <table className="fv-ops__soa-tbl fv-ops__soa-tbl--inv">
             <thead>
               <tr><th>Description</th><th className="fv-ops__r">Amount (US$)</th></tr>
             </thead>
@@ -4124,8 +4849,8 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, o
 }
 
 /** Laytime calculation editor — mirrors the SOA modal (edit / save / pdf) with a statement of facts. */
-function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
-  port: LaytimePort; recap: Recap;
+function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
+  port: LaytimePort; siblings: LaytimePort[]; recap: Recap;
   onSave: (patch: Partial<LaytimePort>) => void; onDelete: () => void; onClose: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -4133,8 +4858,15 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
   const view = editing ? draft : port;
   const setD = (patch: Partial<LaytimePort>) => setDraft((d) => ({ ...d, ...patch }));
   const res = calcLaytime(view);
+  const method = view.calcMethod ?? 'counting';
   const today = new Date();
   const p2 = (n: number) => String(n).padStart(2, '0');
+  const fmtDT2 = (d: Date | null) => (d ? `${p2(d.getDate())}-${p2(d.getMonth() + 1)}-${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}` : '—');
+  // Reversible laytime pools the allowance & time used across every reversible port (this draft substituted live).
+  const reversiblePorts = siblings.map((p) => (p.id === view.id ? view : p)).filter((p) => p.reversible);
+  const pool = view.reversible && reversiblePorts.length > 1 ? calcLaytimeCombined(reversiblePorts, view) : null;
+  // Result / demurrage figures use the combined pool when reversible, else this port alone.
+  const outcome = pool ?? res;
 
   const save = () => { onSave(draft); setEditing(false); };
   const discard = () => { setDraft(port); setEditing(false); };
@@ -4150,7 +4882,7 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
   const exportPdf = () => {
     const w = window.open('', '_blank', 'width=1000,height=1100');
     if (!w) return;
-    const factRows = res.rows.map(({ ev, elapsed, counted, cumulative }) => `<tr><td>${ev.date || ''}</td><td>${ev.from || ''}</td><td>${ev.to || ''}</td><td class="r">${ev.pct}</td><td class="r">${fmt(elapsed, 3)}</td><td class="r">${fmt(counted, 3)}</td><td class="r">${fmt(cumulative, 3)}</td><td>${ev.remark || ''}</td></tr>`).join('');
+    const factRows = res.rows.map(({ ev, elapsed, counted, cumulative }) => `<tr><td>${ev.date || ''}</td><td>${ev.from || ''}</td><td>${ev.to || ''}</td><td class="r">${fmt(elapsed, 3)}</td><td class="r">${ev.pct}</td><td class="r">${fmt(counted, 3)}</td><td class="r">${fmt(cumulative, 3)}</td><td>${ev.remark || ''}</td></tr>`).join('');
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Laytime — ${view.name} — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
       h1{font-size:16px;margin:0 0 2px}.sub{color:#555;margin:0 0 14px;font-size:11px}
@@ -4162,17 +4894,21 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
       <h1>Laytime Calculation — ${view.name} (${view.op})</h1>
       <p class="sub">${recap.vesselName} · Cargo ${view.cargo} · CP ${recap.cpDate || '—'}</p>
       <div class="meta">
+        <div><span>In Favour Of:</span> ${view.accountName || '—'}</div>
         <div><span>Quantity:</span> ${fmt(num(view.quantity), 0)} MT</div>
         <div><span>Rate:</span> ${fmt(num(view.rate), 0)} mt/day</div>
         <div><span>Terms:</span> ${view.terms || '—'}</div>
+        <div><span>Method:</span> ${method === 'deduction' ? 'Deduction' : 'Time Counting'} · ${view.reversible ? 'Reversible' : 'Non-Reversible'}${view.onceOnDemurrage ? ' · Once on Dem, Always on Dem' : ''}</div>
         <div><span>NOR Tendered:</span> ${view.norTendered || '—'}</div>
+        <div><span>Turn Time:</span> ${view.turnTimeHours || '—'} hrs</div>
         <div><span>NOR Accepted:</span> ${view.norAccepted || '—'}</div>
         <div><span>Laytime Allowed:</span> ${fmt(res.allowed, 3)} days</div>
         <div><span>Laytime Used:</span> ${fmt(res.used, 3)} days</div>
-        <div><span>${res.onDemurrage ? 'On Demurrage:' : 'Time Saved:'}</span> ${fmt(Math.abs(res.balance), 3)} days</div>
-        <div><span>${res.onDemurrage ? 'Demurrage Due:' : 'Despatch Due:'}</span> ${res.onDemurrage ? money(res.demurrageAmt) : money(res.despatchAmt)}</div>
+        <div><span>${outcome.onDemurrage ? 'On Demurrage:' : 'Time Saved:'}</span> ${fmt(Math.abs(outcome.balance), 3)} days</div>
+        <div><span>${outcome.onDemurrage ? 'Demurrage Starts:' : 'Demurrage Starts:'}</span> ${outcome.onDemurrage ? fmtDT2(outcome.demurrageStart) : '—'}</div>
+        <div><span>${outcome.onDemurrage ? 'Demurrage Due:' : 'Despatch Due:'}</span> ${outcome.onDemurrage ? money(outcome.demurrageAmt) : money(outcome.despatchAmt)}</div>
       </div>
-      <table><thead><tr><th>Date</th><th>From</th><th>To</th><th class="r">% Count</th><th class="r">Elapsed</th><th class="r">Counted</th><th class="r">Cumulative</th><th>Remarks</th></tr></thead>
+      <table><thead><tr><th>Date</th><th>From</th><th>To</th><th class="r">Time</th><th class="r">% Count</th><th class="r">Time Used / Deducted</th><th class="r">Cumulative</th><th>Remarks</th></tr></thead>
       <tbody>${factRows}</tbody>
       <tfoot><tr><td colspan="6">Total Time Used</td><td class="r">${fmt(res.used, 3)}</td><td>days</td></tr></tfoot></table>
       <p class="sub">Prepared ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()} · *E&amp;OE.</p>
@@ -4188,7 +4924,7 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
         <div className="fv-ops__soa-head">
           <div>
             <h2>Laytime — {view.name || 'New Port'}</h2>
-            <span className="fv-ops__soa-sub">{recap.vesselName} · {view.op} · {view.cargo || '—'}{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
+            <span className="fv-ops__soa-sub">{recap.vesselName} · {view.op} · {view.cargo || '—'}{view.accountName ? ` · In favour of ${view.accountName}` : ''}{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
             {!editing && <button type="button" className="fv-ops__btn" onClick={() => setEditing(true)}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>}
@@ -4203,32 +4939,60 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
           <div className="fv-ops__frl-lay">
             <div className="fv-ops__frl-layfields">
               <label>Port Name{inp(view.name, (v) => setD({ name: v }))}</label>
+              <label>In Favour Of (Account){inp(view.accountName ?? '', (v) => setD({ accountName: v }), undefined, 'Charterers / Owners')}</label>
               <label>Cargo{inp(view.cargo, (v) => setD({ cargo: v }))}</label>
               <label>Quantity (MT){inp(view.quantity, (v) => setD({ quantity: v }))}</label>
               <label>Rate (mt/day){inp(view.rate, (v) => setD({ rate: v }))}</label>
-              <label>Terms{inp(view.terms, (v) => setD({ terms: v }))}</label>
-              <label>Turn Time (hrs){inp(view.turnTimeHours, (v) => setD({ turnTimeHours: v }))}</label>
+              <label>Terms
+                <select className="fv-ops__vd-in" value={view.terms} disabled={!editing} onChange={(e) => setD({ terms: e.target.value })}>
+                  {view.terms && !LAYTIME_TERMS_OPTIONS.includes(view.terms) && <option value={view.terms}>{view.terms}</option>}
+                  {LAYTIME_TERMS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+              </label>
               <label>NOR Tendered{inp(view.norTendered, (v) => setD({ norTendered: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
+              <label>Turn Time (hrs){inp(view.turnTimeHours, (v) => setD({ turnTimeHours: v }))}</label>
               <label>NOR Accepted{inp(view.norAccepted, (v) => setD({ norAccepted: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
               <label>Laytime Commenced{inp(view.commenced, (v) => setD({ commenced: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
               <label>Laytime Completed{inp(view.completed, (v) => setD({ completed: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
               <label>Demurrage (US$/day){inp(view.demurrageRate, (v) => setD({ demurrageRate: v }))}</label>
               <label>Despatch (US$/day){inp(view.despatchRate, (v) => setD({ despatchRate: v }))}</label>
-              <label className="fv-ops__frl-chk"><input type="checkbox" checked={view.reversible} disabled={!editing} onChange={(e) => setD({ reversible: e.target.checked })} /> Reversible laytime</label>
+              <label>Calculation Method
+                <select className="fv-ops__vd-in" value={method} disabled={!editing} onChange={(e) => setD({ calcMethod: e.target.value as 'counting' | 'deduction' })}>
+                  <option value="counting">Time Counting</option>
+                  <option value="deduction">Deduction</option>
+                </select>
+              </label>
+              <label>Laytime Type
+                <select className="fv-ops__vd-in" value={view.reversible ? 'reversible' : 'non'} disabled={!editing} onChange={(e) => setD({ reversible: e.target.value === 'reversible' })}>
+                  <option value="non">Non-Reversible</option>
+                  <option value="reversible">Reversible</option>
+                </select>
+              </label>
+              <label>Demurrage Basis
+                <select className="fv-ops__vd-in" value={view.onceOnDemurrage ? 'always' : 'standard'} disabled={!editing} onChange={(e) => setD({ onceOnDemurrage: e.target.value === 'always' })}>
+                  <option value="standard">Standard (exceptions apply)</option>
+                  <option value="always">Once on Demurrage, Always on Demurrage</option>
+                </select>
+              </label>
+              <label>Demurrage Starts<input className="fv-ops__vd-in fv-ops__frl-demstart" value={fmtDT2(outcome.demurrageStart)} readOnly title="Auto — when used laytime reaches the allowance" /></label>
             </div>
             <div className="fv-ops__frl-laysum">
               <div><span>Laytime Allowed</span><b>{fmt(res.allowed, 3)} d</b></div>
               <div><span>Laytime Used</span><b>{fmt(res.used, 3)} d</b></div>
-              <div><span>{res.onDemurrage ? 'On Demurrage' : 'Time Saved'}</span><b className={res.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{fmt(Math.abs(res.balance), 3)} d</b></div>
-              <div><span>{res.onDemurrage ? 'Demurrage Due' : 'Despatch Due'}</span><b className={res.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{res.onDemurrage ? money(res.demurrageAmt) : money(res.despatchAmt)}</b></div>
+              {method === 'deduction' && <div><span>Gross Time</span><b>{fmt(res.gross, 3)} d</b></div>}
+              {method === 'deduction' && <div><span>Total Deducted</span><b>{fmt(res.deductions, 3)} d</b></div>}
+              <div><span>{outcome.onDemurrage ? 'On Demurrage' : 'Time Saved'}</span><b className={outcome.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{fmt(Math.abs(outcome.balance), 3)} d</b></div>
+              <div><span>{outcome.onDemurrage ? 'Demurrage Due' : 'Despatch Due'}</span><b className={outcome.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{outcome.onDemurrage ? money(outcome.demurrageAmt) : money(outcome.despatchAmt)}</b></div>
+              <div><span>Demurrage Starts</span><b className={outcome.onDemurrage ? 'fv-ops__neg' : ''}>{outcome.onDemurrage ? fmtDT2(outcome.demurrageStart) : '—'}</b></div>
+              {pool && <div className="fv-ops__frl-laypool"><span>Reversible — combined {reversiblePorts.length} ports</span><b>Allowed {fmt(pool.allowed, 3)} d · Used {fmt(pool.used, 3)} d</b></div>}
             </div>
           </div>
-          <div className="fv-ops__vd-sub-head"><i className="fas fa-list-ul" aria-hidden="true" /> Statement of Facts
+          <div className="fv-ops__vd-sub-head"><i className="fas fa-list-ul" aria-hidden="true" /> Statement of Facts — {method === 'deduction' ? 'enter deducted / excepted periods only' : 'time-counting'}
             {editing && <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addEvent}><i className="fas fa-plus" aria-hidden="true" /> Row</button>}
           </div>
           <table className="fv-ops__soa-tbl">
             <thead>
-              <tr><th>Date</th><th>From</th><th>To</th><th className="fv-ops__r">% Count</th><th className="fv-ops__r">Elapsed (d)</th><th className="fv-ops__r">Counted (d)</th><th className="fv-ops__r">Cumulative (d)</th><th>Remarks</th>{editing && <th aria-label="Remove" />}</tr>
+              <tr><th>Date</th><th>From</th><th>To</th><th className="fv-ops__r">Time (d)</th><th className="fv-ops__r">% Count</th><th className="fv-ops__r">Time Used / Deducted (d)</th><th className="fv-ops__r">Cumulative (d)</th><th>Remarks</th>{editing && <th aria-label="Remove" />}</tr>
             </thead>
             <tbody>
               {res.rows.length === 0 && <tr><td colSpan={editing ? 9 : 8} className="fv-ops__vd-empty">No facts recorded.{editing ? ' Use “Row” to log NOR, laytime periods, stoppages, weather etc.' : ''}</td></tr>}
@@ -4237,8 +5001,8 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
                   <td>{inp(ev.date, (v) => setEvent(i, { date: v }), 96, 'dd-mm-yyyy')}</td>
                   <td>{inp(ev.from, (v) => setEvent(i, { from: v }), 56, 'HH:MM')}</td>
                   <td>{inp(ev.to, (v) => setEvent(i, { to: v }), 56, 'HH:MM')}</td>
-                  <td className="fv-ops__r">{inp(ev.pct, (v) => setEvent(i, { pct: v }), 48)}</td>
                   <td className="fv-ops__r">{fmt(elapsed, 3)}</td>
+                  <td className="fv-ops__r">{inp(ev.pct, (v) => setEvent(i, { pct: v }), 48)}</td>
                   <td className="fv-ops__r">{fmt(counted, 3)}</td>
                   <td className="fv-ops__r">{fmt(cumulative, 3)}</td>
                   <td>{inp(ev.remark, (v) => setEvent(i, { remark: v }), undefined, 'Remarks')}</td>
@@ -4247,10 +5011,10 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
               ))}
             </tbody>
             <tfoot>
-              <tr className="fv-ops__soa-sum"><td colSpan={5}>Total Time Used</td><td className="fv-ops__r">{fmt(res.used, 3)}</td><td className="fv-ops__r" colSpan={editing ? 3 : 2}>days</td></tr>
+              <tr className="fv-ops__soa-sum"><td colSpan={5}>{method === 'deduction' ? 'Total Time Deducted' : 'Total Time Used'}</td><td className="fv-ops__r">{fmt(method === 'deduction' ? res.deductions : res.used, 3)}</td><td className="fv-ops__r" colSpan={editing ? 3 : 2}>days</td></tr>
             </tfoot>
           </table>
-          <p className="fv-ops__hint">Laytime Allowed = Quantity ÷ Rate. Each fact row counts its elapsed time × % to count; demurrage / despatch derive from used vs allowed. Use <b>Edit</b> to adjust, <b>Save</b> to persist, <b>PDF</b> to print. *E&amp;OE.</p>
+          <p className="fv-ops__hint">Laytime Allowed = Quantity ÷ Rate. {method === 'deduction' ? 'Deduction method: laytime used = gross time (Commenced → Completed) minus the deducted periods entered below.' : 'Time-counting method: each fact row counts its time × % as laytime used.'} Demurrage starts automatically once used laytime reaches the allowance{view.reversible ? ', pooled across reversible ports' : ''}. Use <b>Edit</b> to adjust, <b>Save</b> to persist, <b>PDF</b> to print. *E&amp;OE.</p>
         </div>
       </div>
     </div>
@@ -4259,75 +5023,230 @@ function LaytimeModal({ port, recap, onSave, onDelete, onClose }: {
 
 /* ------------------------------------------------------------ Cost Comparisons */
 
-function CostsTab({ pnl }: { pnl: Pnl }) {
-  const lines: { label: string; est: number; act: number }[] = [
-    { label: 'Hire (net)', est: pnl.netHire * 0.97, act: pnl.netHire },
-    { label: 'Bunkers', est: pnl.bunkerCost * 0.92, act: pnl.bunkerCost },
-    { label: 'Port DA', est: pnl.portCost * 0.9, act: pnl.portCost },
-    { label: 'C/V/E', est: pnl.cveTotal, act: pnl.cveTotal },
-    { label: 'ILOHC', est: pnl.ilohc, act: pnl.ilohc },
-    { label: 'Other', est: pnl.otherCost * 0.8, act: pnl.otherCost },
-  ];
+/* ------------------------------------------------------------ Tools tab */
+
+type OpsToolTab = 'eta' | 'rob' | 'leg' | 'weather';
+const OPS_TOOL_TABS: { id: OpsToolTab; label: string; icon: string }[] = [
+  { id: 'eta', label: 'ETA Calculation', icon: 'fa-calculator' },
+  { id: 'rob', label: 'ROB Calculation', icon: 'fa-gas-pump' },
+  { id: 'leg', label: 'Leg Estimation', icon: 'fa-chart-line' },
+  { id: 'weather', label: 'Weather Margins', icon: 'fa-cloud-sun-rain' },
+];
+
+function CostsTab() {
+  const [tool, setTool] = useState<OpsToolTab>('eta');
   return (
-    <Card title="Cost Comparison — Estimate vs Actual" icon="fa-scale-balanced">
-      <table className="fv-ops__table">
-        <thead>
-          <tr><th>Cost Line</th><th className="fv-ops__r">Estimate</th><th className="fv-ops__r">Actual</th><th className="fv-ops__r">Variance</th><th className="fv-ops__r">%</th></tr>
-        </thead>
-        <tbody>
-          {lines.map((l) => {
-            const v = l.act - l.est;
-            const pct = l.est ? (v / l.est) * 100 : 0;
-            return (
-              <tr key={l.label}>
-                <td>{l.label}</td>
-                <td className="fv-ops__r">{money(l.est)}</td>
-                <td className="fv-ops__r">{money(l.act)}</td>
-                <td className={`fv-ops__r ${v <= 0 ? 'fv-ops__pos' : 'fv-ops__neg'}`}>{money(v)}</td>
-                <td className={`fv-ops__r ${v <= 0 ? 'fv-ops__pos' : 'fv-ops__neg'}`}>{fmt(pct)}%</td>
-              </tr>
-            );
-          })}
-          <tr className="fv-ops__row-sub">
-            <td>Total</td>
-            <td className="fv-ops__r">{money(lines.reduce((s, l) => s + l.est, 0))}</td>
-            <td className="fv-ops__r">{money(lines.reduce((s, l) => s + l.act, 0))}</td>
-            <td className="fv-ops__r">{money(lines.reduce((s, l) => s + (l.act - l.est), 0))}</td>
-            <td />
-          </tr>
-        </tbody>
-      </table>
-    </Card>
+    <div className="fv-ops__col">
+      <nav className="fv-ops__tabs fv-ops__subtabs" aria-label="Tools">
+        {OPS_TOOL_TABS.map((t) => (
+          <button key={t.id} type="button" className={`fv-ops__tab${tool === t.id ? ' fv-ops__tab--active' : ''}`} onClick={() => setTool(t.id)}>
+            <i className={`fas ${t.icon}`} aria-hidden="true" /> {t.label}
+          </button>
+        ))}
+      </nav>
+      {tool === 'eta' && <EtaCalculation />}
+      {tool === 'rob' && <RobCalculation />}
+      {tool === 'leg' && <VoyageEstimation />}
+      {tool === 'weather' && <WeatherMargins />}
+    </div>
   );
 }
 
 /* ------------------------------------------------------------ Vessel Reports */
 
-function ReportsTab({ voyage }: { voyage: Voyage }) {
-  const reports = [
-    { date: '20-07 12:00 UTC', type: 'Noon at Sea', spd: voyage.instSpeed ?? 12.4, fo: voyage.instCons ?? 26, pos: '14°20N 070°10E' },
-    { date: '19-07 12:00 UTC', type: 'Noon at Sea', spd: 12.1, fo: 25.6, pos: '13°02N 073°44E' },
-    { date: '18-07 12:00 UTC', type: 'Noon at Sea', spd: 12.6, fo: 26.4, pos: '11°40N 077°05E' },
-    { date: '14-07 22:00 LT', type: 'Departure', spd: 0, fo: 0, pos: 'Salalah' },
+/** Seed a representative set of vessel reports from the voyage figures. */
+function seedVesselReports(recap: Recap, voyage: Voyage): VesselReport[] {
+  const spd = voyage.instSpeed ?? 12.4;
+  const fo = voyage.instCons ?? 26;
+  const blank = (): VesselReport => ({
+    id: uid('vr'), type: 'NOON - SEA', shiftSub: '', dtUtc: '', dtLt: '', duration: '', position: '',
+    avgSpdGps: '', avgSpdLog: '', distSinceLast: '', distTotal: '', robFo: '', robDo: '',
+    consFo: '', consDo: '', rpm: '', mcr: '', weather: '', remarks: '',
+  });
+  return [
+    { ...blank(), type: 'COSP (Departure)', dtUtc: '14-07-2025 22:00', dtLt: '15-07-2025 03:30', position: recap.loadPort || 'Salalah', distSinceLast: '0', distTotal: '0', robFo: String(num(recap.etaPlan.startRobVlsfo)), robDo: String(num(recap.etaPlan.startRobMgo)), consFo: '0', consDo: '0', weather: 'NE 3 / 1.0m / nil', remarks: 'Full away on passage' },
+    { ...blank(), type: 'NOON - SEA', dtUtc: '15-07-2025 12:00', dtLt: '15-07-2025 17:30', duration: '14.0', position: '14°20N 070°10E', avgSpdGps: fmt(spd, 1), avgSpdLog: fmt(spd - 0.3, 1), distSinceLast: fmt(spd * 14, 0), distTotal: fmt(spd * 14, 0), robFo: '325', robDo: '215', consFo: fmt(fo * 14 / 24, 1), consDo: '0.1', rpm: '104', mcr: '68', weather: 'SW 4 / 1.5m / +0.3kt' },
+    { ...blank(), type: 'NOON - SEA', dtUtc: '16-07-2025 12:00', dtLt: '16-07-2025 17:30', duration: '24.0', position: '13°02N 073°44E', avgSpdGps: '12.1', avgSpdLog: '11.8', distSinceLast: '290', distTotal: fmt(spd * 14 + 290, 0), robFo: '299', robDo: '215', consFo: fmt(fo, 1), consDo: '0.1', rpm: '103', mcr: '67', weather: 'SW 5 / 2.0m / +0.2kt' },
+    { ...blank(), type: 'EOSP (Arrival)', dtUtc: '19-07-2025 06:00', dtLt: '19-07-2025 11:30', duration: '18.0', position: recap.dischargePort || 'Paradip', avgSpdGps: '12.3', avgSpdLog: '12.0', distSinceLast: '221', distTotal: '685', robFo: '250', robDo: '213', consFo: fmt(fo * 18 / 24, 1), consDo: '0.1', rpm: '102', mcr: '66', weather: 'S 3 / 1.2m / nil', remarks: 'End of sea passage' },
   ];
+}
+
+function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage }) {
+  const stored = recap.vesselReports;
+  const valid = Array.isArray(stored);
+  const reports = valid ? (stored as VesselReport[]) : seedVesselReports(recap, voyage);
+
+  useEffect(() => {
+    if (!valid) setRecap((r) => ({ ...r, vesselReports: seedVesselReports(r, voyage) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid]);
+
+  // Reports arrive automatically from the vessel; the log is read-only until Edit is pressed.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<VesselReport[]>(reports);
+  const view = editing ? draft : reports;
+
+  const beginEdit = () => { setDraft(reports); setEditing(true); };
+  const save = () => { setRecap((r) => ({ ...r, vesselReports: draft })); setEditing(false); };
+  const discard = () => { setDraft(reports); setEditing(false); };
+
+  const setRep = (id: string, patch: Partial<VesselReport>) => setDraft((list) => list.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  const addRep = () => setDraft((list) => {
+    const last = list[list.length - 1];
+    return [...list, {
+      id: uid('vr'), type: 'NOON - SEA', shiftSub: '', dtUtc: '', dtLt: '', duration: '', position: '',
+      avgSpdGps: '', avgSpdLog: '', distSinceLast: '', distTotal: last?.distTotal ?? '', robFo: last?.robFo ?? '', robDo: last?.robDo ?? '',
+      consFo: '', consDo: '', rpm: '', mcr: '', weather: '', remarks: '',
+    }];
+  });
+  const delRep = (id: string) => setDraft((list) => list.filter((x) => x.id !== id));
+
+  const txt = (val: string, on: (v: string) => void, ph?: string, wide?: boolean) => (
+    editing
+      ? <input className={`fv-ops__vd-in${wide ? ' fv-ops__vr-in--wide' : ''}`} value={val} placeholder={ph} onChange={(e) => on(e.target.value)} />
+      : <span className="fv-ops__vr-val">{val || '—'}</span>
+  );
+  const nIn = (val: string, on: (v: string) => void, ph?: string) => (
+    editing
+      ? <input className="fv-ops__eta-in" inputMode="decimal" value={val} placeholder={ph} onChange={(e) => on(e.target.value)} />
+      : <span className="fv-ops__vr-val">{val || '—'}</span>
+  );
+  const isShifting = (t: string) => /shifting/i.test(t);
+  const typeLabel = (r: VesselReport) => (isShifting(r.type) && r.shiftSub ? `${r.type} — ${r.shiftSub}` : r.type);
+
+  const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const cols = ['Report Type', 'Date/Time UTC', 'Date/Time LT', 'Duration (hrs)', 'Position', 'Avg Spd GPS', 'Avg Spd LOG', 'Dist Since Last (nm)', 'Total Dist (nm)', 'ROB FO', 'ROB DO', 'Cons FO', 'Cons DO', 'RPM', '% MCR', 'Weather', 'Remarks'];
+  const rowCells = (r: VesselReport) => [typeLabel(r), r.dtUtc, r.dtLt, r.duration, r.position, r.avgSpdGps, r.avgSpdLog, r.distSinceLast, r.distTotal, r.robFo, r.robDo, r.consFo, r.consDo, r.rpm, r.mcr, r.weather, r.remarks];
+  const tableHtml = () => {
+    const head = `<tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>`;
+    const body = view.map((r) => `<tr>${rowCells(r).map((c, i) => `<td class="${i >= 3 && i <= 14 ? 'r' : ''}">${esc(String(c))}</td>`).join('')}</tr>`).join('');
+    return `<thead>${head}</thead><tbody>${body}</tbody>`;
+  };
+
+  const exportExcel = () => {
+    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>
+      <table border="1"><caption>Vessel Reports — ${esc(recap.vesselName)}</caption>${tableHtml()}</table></body></html>`;
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `VesselReports_${(recap.vesselName || 'voyage').replace(/\s+/g, '_')}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+  const exportPdf = () => {
+    const w = window.open('', '_blank', 'width=1200,height=800');
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Vessel Reports — ${esc(recap.vesselName)}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:20px;font-size:10px}
+      h1{font-size:14px;margin:0 0 2px}.sub{color:#555;margin:0 0 10px;font-size:10px}
+      table{border-collapse:collapse;width:100%}
+      th,td{border:1px solid #bbb;padding:3px 5px;text-align:left}
+      td.r,th.r{text-align:right}thead th{background:#f2f2f2}
+      @page{size:landscape}
+    </style></head><body>
+      <h1>Vessel Reports — ${esc(recap.vesselName)}</h1>
+      <p class="sub">Owners ${esc(recap.owners)} · ${esc(recap.loadPort)} → ${esc(recap.dischargePort)} · CP ${esc(recap.cpDate || '—')}</p>
+      <table>${tableHtml()}</table>
+      <p class="sub">*E&amp;OE.</p></body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
   return (
-    <Card title="Vessel Reports" icon="fa-file-lines">
-      <table className="fv-ops__table">
-        <thead>
-          <tr><th>Date</th><th>Report</th><th className="fv-ops__r">Speed (kn)</th><th className="fv-ops__r">FO/day (MT)</th><th>Position</th></tr>
-        </thead>
-        <tbody>
-          {reports.map((r, i) => (
-            <tr key={i}>
-              <td>{r.date}</td>
-              <td>{r.type}</td>
-              <td className="fv-ops__r">{fmt(r.spd, 1)}</td>
-              <td className="fv-ops__r">{fmt(r.fo, 1)}</td>
-              <td>{r.pos}</td>
+    <Card
+      title="Vessel Reports"
+      icon="fa-file-lines"
+      right={(
+        <span className="fv-ops__frl-secbtns">
+          {!editing && <button type="button" className="fv-ops__btn" onClick={beginEdit}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>}
+          {editing && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={save}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>}
+          {editing && <button type="button" className="fv-ops__btn" onClick={discard}><i className="fas fa-rotate-left" aria-hidden="true" /> Discard</button>}
+          {editing && <button type="button" className="fv-ops__btn" onClick={addRep}><i className="fas fa-plus" aria-hidden="true" /> Add Report</button>}
+          <button type="button" className="fv-ops__btn" onClick={exportExcel}><i className="fas fa-file-excel" aria-hidden="true" /> Excel</button>
+          <button type="button" className="fv-ops__btn" onClick={exportPdf}><i className="fas fa-file-pdf" aria-hidden="true" /> PDF</button>
+        </span>
+      )}
+    >
+      <div className="fv-ops__eta-scroll">
+        <table className="fv-ops__eta fv-ops__vr">
+          <thead>
+            <tr>
+              <th rowSpan={2}>Report Type</th>
+              <th colSpan={2}>Date / Time</th>
+              <th rowSpan={2}>Dur<br />(hrs)</th>
+              <th rowSpan={2}>Position</th>
+              <th colSpan={2}>Avg Spd (kn)</th>
+              <th colSpan={2}>Distance (nm)</th>
+              <th colSpan={2}>ROB (MT)</th>
+              <th colSpan={2}>Cons Last (MT)</th>
+              <th rowSpan={2}>RPM</th>
+              <th rowSpan={2}>%MCR</th>
+              <th rowSpan={2}>Weather<br />(Wind / Wave / Curr.)</th>
+              <th rowSpan={2}>Remarks</th>
+              {editing && <th rowSpan={2} aria-label="Remove" />}
             </tr>
-          ))}
-        </tbody>
-      </table>
+            <tr>
+              <th>UTC</th>
+              <th>LT</th>
+              <th>GPS</th>
+              <th>LOG</th>
+              <th>Last</th>
+              <th>Total</th>
+              <th>FO</th>
+              <th>DO</th>
+              <th>FO</th>
+              <th>DO</th>
+            </tr>
+          </thead>
+          <tbody>
+            {view.length === 0 && <tr><td colSpan={editing ? 19 : 18} className="fv-ops__vd-empty">No reports received yet.{editing ? ' Use “Add Report” to log one.' : ''}</td></tr>}
+            {view.map((r) => (
+              <tr key={r.id}>
+                <td className="fv-ops__vr-type">
+                  {editing ? (
+                    <>
+                      <select className="fv-ops__eta-sel" value={r.type} onChange={(e) => setRep(r.id, { type: e.target.value })}>
+                        {r.type && !OPS_REPORT_TYPES.includes(r.type) && <option value={r.type}>{r.type}</option>}
+                        {OPS_REPORT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                      {isShifting(r.type) && (
+                        <select className="fv-ops__eta-sel fv-ops__vr-sub" value={r.shiftSub} onChange={(e) => setRep(r.id, { shiftSub: e.target.value })}>
+                          <option value="">— sub-type —</option>
+                          {OPS_SHIFTING_SUBTYPES.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      )}
+                    </>
+                  ) : (
+                    <span className="fv-ops__vr-val fv-ops__vr-typeval">{typeLabel(r)}</span>
+                  )}
+                </td>
+                <td>{txt(r.dtUtc, (v) => setRep(r.id, { dtUtc: v }), 'dd-mm-yyyy HH:MM', true)}</td>
+                <td>{txt(r.dtLt, (v) => setRep(r.id, { dtLt: v }), 'dd-mm-yyyy HH:MM', true)}</td>
+                <td className="fv-ops__r">{nIn(r.duration, (v) => setRep(r.id, { duration: v }))}</td>
+                <td>{txt(r.position, (v) => setRep(r.id, { position: v }), 'Lat / Long or port', true)}</td>
+                <td className="fv-ops__r">{nIn(r.avgSpdGps, (v) => setRep(r.id, { avgSpdGps: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.avgSpdLog, (v) => setRep(r.id, { avgSpdLog: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.distSinceLast, (v) => setRep(r.id, { distSinceLast: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.distTotal, (v) => setRep(r.id, { distTotal: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.robFo, (v) => setRep(r.id, { robFo: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.robDo, (v) => setRep(r.id, { robDo: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.consFo, (v) => setRep(r.id, { consFo: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.consDo, (v) => setRep(r.id, { consDo: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.rpm, (v) => setRep(r.id, { rpm: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.mcr, (v) => setRep(r.id, { mcr: v }))}</td>
+                <td>{txt(r.weather, (v) => setRep(r.id, { weather: v }), 'e.g. SW 4 / 1.5m / +0.3kt', true)}</td>
+                <td>{txt(r.remarks, (v) => setRep(r.id, { remarks: v }), 'Remarks', true)}</td>
+                {editing && <td className="fv-ops__r"><button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove report" onClick={() => delRep(r.id)}><i className="fas fa-trash" aria-hidden="true" /></button></td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="fv-ops__hint">Reports (SBE · FWE · COSP · Noon at Sea / Port / Anchor · EOSP · Bunker · Shifting · Speed / Fuel change · Stop · Resume · Deviation) update automatically as received from the vessel. Use <b>Edit</b> to correct entries, then <b>Save</b>; export the log to <b>Excel</b> or <b>PDF</b>.</p>
     </Card>
   );
 }
