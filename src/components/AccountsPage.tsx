@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import {
   useAccountTxns,
@@ -307,8 +308,11 @@ const CATEGORY_CHIPS: TxnCategory[] = ['Hire', 'Freight', 'PDA', 'FDA', 'Bunker'
 
 const CASH_IN_BANK = 4_245_890;
 
-export function AccountsPage() {
+export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
+  const [searchParams] = useSearchParams();
+  const createMode = mode === 'create' || searchParams.get('new') === '1';
   const txns = useAccountTxns();
+  const rows = createMode ? [] : txns;
   const sidebarVessel = useSelectedAccountVessel();
   const [tab, setTab] = useState<Tab>('overview');
   const [company, setCompany] = useState('All');
@@ -321,13 +325,13 @@ export function AccountsPage() {
   const [gridTab, setGridTab] = useState<'due' | 'overdue' | 'scheduled' | 'completed' | 'all'>('due');
   const [detail, setDetail] = useState<FinTxn | null>(null);
 
-  const vessels = useMemo(() => ['All', ...Array.from(new Set(txns.map((t) => t.vessel)))], [txns]);
+  const vessels = useMemo(() => ['All', ...Array.from(new Set(rows.map((t) => t.vessel)))], [rows]);
 
   const toggleCat = (c: TxnCategory) => setCats((prev) => { const n = new Set(prev); if (n.has(c)) n.delete(c); else n.add(c); return n; });
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return txns.filter((t) => {
+    return rows.filter((t) => {
       if (sidebarVessel && t.vessel !== sidebarVessel) return false;
       if (vessel !== 'All' && t.vessel !== vessel) return false;
       if (typeF !== 'All' && t.kind !== typeF) return false;
@@ -337,10 +341,10 @@ export function AccountsPage() {
       if (q && !`${t.invoiceNo} ${t.vessel} ${t.counterparty} ${t.reference} ${t.category}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [txns, sidebarVessel, vessel, typeF, currency, statusF, cats, query]);
+  }, [rows, sidebarVessel, vessel, typeF, currency, statusF, cats, query]);
 
   // Dashboard scope follows the sidebar-selected vessel (all vessels when none).
-  const scope = useMemo(() => (sidebarVessel ? txns.filter((t) => t.vessel === sidebarVessel) : txns), [txns, sidebarVessel]);
+  const scope = useMemo(() => (sidebarVessel ? rows.filter((t) => t.vessel === sidebarVessel) : rows), [rows, sidebarVessel]);
 
   const kpi = useMemo(() => {
     const payUnpaid = scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.status !== 'Cancelled');

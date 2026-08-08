@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from 'react';
+
 /**
  * Shared voyage dataset — the single source of truth that links every
  * page together.
@@ -589,11 +591,146 @@ export const VOYAGES: Voyage[] = [
   },
 ];
 
+const CREATED_VOYAGES_KEY = 'fv.createdVoyages';
+let createdVoyages: Voyage[] = readCreatedVoyages();
+let voyagesSnapshot: Voyage[] = mergeVoyages(VOYAGES, createdVoyages);
+const voyageListeners = new Set<() => void>();
+
+function parseVoyageNum(id: string): number {
+  const m = id.match(/^OPT(\d+)$/i);
+  return m ? Number.parseInt(m[1], 10) : 0;
+}
+
+function nextVoyageId(): string {
+  const maxBase = VOYAGES.reduce((m, v) => Math.max(m, parseVoyageNum(v.id)), 0);
+  const maxCreated = createdVoyages.reduce((m, v) => Math.max(m, parseVoyageNum(v.id)), 0);
+  const n = Math.max(maxBase, maxCreated) + 1;
+  return `OPT${String(n).padStart(3, '0')}`;
+}
+
+function buildVoyageRecord(patch: Partial<Voyage>): Voyage {
+  const id = (patch.id ?? '').trim() || nextVoyageId();
+  return {
+    id,
+    priority: patch.priority ?? 'LOW',
+    dueLt: patch.dueLt ?? 0,
+    dueUtc: patch.dueUtc ?? 0,
+    remaining: patch.remaining ?? '',
+    vessel: patch.vessel ?? '',
+    pic: patch.pic ?? 'You',
+    client: patch.client ?? '',
+    service: patch.service ?? 'PMO',
+    status: patch.status ?? 'At Sea',
+    portFrom: patch.portFrom ?? '',
+    portTo: patch.portTo ?? '',
+    eta: patch.eta ?? '',
+    lastNoon: patch.lastNoon ?? '',
+    wx: patch.wx ?? '',
+    int: patch.int ?? '',
+    eov: patch.eov ?? '',
+    opt: patch.opt ?? '',
+    openTasks: patch.openTasks ?? 0,
+    tags: patch.tags ?? '',
+    aiAlert: patch.aiAlert ?? '',
+    health: patch.health ?? 0,
+    handoverNote: patch.handoverNote ?? '',
+    open: patch.open ?? 'OPEN',
+    imo: patch.imo ?? '',
+    vesselType: patch.vesselType ?? '',
+    flag: patch.flag ?? '',
+    dwt: patch.dwt ?? '',
+    built: patch.built ?? 0,
+    loa: patch.loa ?? '',
+    beam: patch.beam ?? '',
+    enginePower: patch.enginePower ?? '',
+    clientEmail: patch.clientEmail ?? '',
+    price: patch.price ?? 0,
+    pricingBasis: patch.pricingBasis ?? 'Per Day',
+    ecdisModel: patch.ecdisModel ?? '',
+    interimPort: patch.interimPort ?? '',
+    etdDisplay: patch.etdDisplay ?? '',
+    etdIso: patch.etdIso ?? '',
+    routeRef: patch.routeRef ?? '',
+    cpSpeed: patch.cpSpeed ?? 0,
+    cpCons: patch.cpCons ?? 0,
+    instSpeed: patch.instSpeed ?? 0,
+    instCons: patch.instCons ?? 0,
+    costPerDay: patch.costPerDay ?? 0,
+    foCost: patch.foCost ?? 0,
+    goCost: patch.goCost ?? 0,
+    euaCost: patch.euaCost ?? 0,
+    seed: patch.seed ?? 0,
+  };
+}
+
+function mergeVoyages(base: Voyage[], extra: Voyage[]): Voyage[] {
+  const out = [...extra];
+  const seen = new Set(extra.map((v) => v.id.toLowerCase()));
+  for (const v of base) {
+    if (!seen.has(v.id.toLowerCase())) out.push(v);
+  }
+  return out;
+}
+
+function readCreatedVoyages(): Voyage[] {
+  try {
+    const raw = window.localStorage.getItem(CREATED_VOYAGES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((x) => buildVoyageRecord(x as Partial<Voyage>));
+  } catch {
+    return [];
+  }
+}
+
+function writeCreatedVoyages(next: Voyage[]): void {
+  createdVoyages = next;
+  voyagesSnapshot = mergeVoyages(VOYAGES, createdVoyages);
+  try {
+    window.localStorage.setItem(CREATED_VOYAGES_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore */
+  }
+  voyageListeners.forEach((l) => l());
+}
+
+function subscribeVoyages(listener: () => void): () => void {
+  voyageListeners.add(listener);
+  return () => voyageListeners.delete(listener);
+}
+
+export function getVoyages(): Voyage[] {
+  return voyagesSnapshot;
+}
+
+export function useVoyages(): Voyage[] {
+  return useSyncExternalStore(subscribeVoyages, getVoyages, getVoyages);
+}
+
+export function upsertCreatedVoyage(patch: Partial<Voyage>): Voyage {
+  const candidateId = (patch.id ?? '').trim().toLowerCase();
+  const idx = candidateId
+    ? createdVoyages.findIndex((v) => v.id.toLowerCase() === candidateId)
+    : -1;
+  const merged = idx >= 0
+    ? buildVoyageRecord({ ...createdVoyages[idx], ...patch, id: createdVoyages[idx].id })
+    : buildVoyageRecord(patch);
+  if (idx >= 0) {
+    const next = [...createdVoyages];
+    next[idx] = merged;
+    writeCreatedVoyages(next);
+  } else {
+    writeCreatedVoyages([merged, ...createdVoyages]);
+  }
+  return merged;
+}
+
 /** Look up a voyage by its id (case-insensitive). */
 export function getVoyageById(id: string | null | undefined): Voyage | undefined {
   if (!id) return undefined;
   const needle = id.trim().toLowerCase();
-  return VOYAGES.find((v) => v.id.toLowerCase() === needle);
+  return getVoyages().find((v) => v.id.toLowerCase() === needle);
 }
 
 /** Convenience: the default voyage shown when nothing is selected yet. */

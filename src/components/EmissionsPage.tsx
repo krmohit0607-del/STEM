@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import type { Voyage } from '../data/voyages';
+import { makeBlankVoyage } from '../data/voyages';
 import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
 import {
   defaultEmissionsDoc, loadEmissionsDoc, readEmissionsRaw, writeEmissionsRaw, subscribeEmissionsDoc,
@@ -139,12 +141,16 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 /* -------------------------------------------------------------- data loader */
 
-export function EmissionsPage() {
-  const voyage = useSelectedVoyage();
+export function EmissionsPage({ mode }: { mode?: 'create' } = {}) {
+  const [searchParams] = useSearchParams();
+  const selectedVoyage = useSelectedVoyage();
+  const createMode = mode === 'create' || searchParams.get('new') === '1';
+  const blankVoyage = useMemo(() => makeBlankVoyage(), []);
+  const voyage = createMode ? blankVoyage : selectedVoyage;
 
   const [recap, setRecap] = useState<Recap>(() => {
     const loaded = loadOpsRecap(voyage?.id);
-    return loaded ? { ...seedRecap(voyage), ...(loaded as Partial<Recap>) } : seedRecap(voyage);
+    return loaded ? { ...seedRecap(voyage, createMode), ...(loaded as Partial<Recap>) } : seedRecap(voyage, createMode);
   });
   const [doc, setDocState] = useState<EmissionsDoc>(() => loadEmissionsDoc(voyage?.id) ?? defaultEmissionsDoc());
   const lastRecap = useRef<string>(readOpsRecapRaw(voyage?.id) ?? '');
@@ -152,12 +158,12 @@ export function EmissionsPage() {
 
   useEffect(() => {
     const loaded = loadOpsRecap(voyage?.id);
-    setRecap(loaded ? { ...seedRecap(voyage), ...(loaded as Partial<Recap>) } : seedRecap(voyage));
+    setRecap(loaded ? { ...seedRecap(voyage, createMode), ...(loaded as Partial<Recap>) } : seedRecap(voyage, createMode));
     lastRecap.current = readOpsRecapRaw(voyage?.id) ?? '';
     setDocState(loadEmissionsDoc(voyage?.id) ?? defaultEmissionsDoc());
     lastDoc.current = readEmissionsRaw(voyage?.id) ?? '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voyage?.id]);
+  }, [voyage?.id, createMode]);
 
   useEffect(() => {
     if (!voyage) return;

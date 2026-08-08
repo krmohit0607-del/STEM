@@ -1,7 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
-import { getVoyageById, type Voyage } from './voyages';
+import { getVoyageById, getVoyages, type Voyage } from './voyages';
 
 /**
  * Cross-page "selected voyage" plumbing.
@@ -89,5 +89,11 @@ export function useSelectedVoyageId(): string | undefined {
 /** Resolve the active `Voyage` object (undefined when nothing matches). */
 export function useSelectedVoyage(): Voyage | undefined {
   const id = useSelectedVoyageId();
-  return getVoyageById(id);
+  const selected = getVoyageById(id);
+  if (selected) return selected;
+
+  // Self-heal stale ids (e.g. deleted/test-created voyage ids left in storage).
+  const fallback = getVoyages()[0];
+  if (fallback && id) writeSelectedVoyageId(fallback.id);
+  return fallback;
 }

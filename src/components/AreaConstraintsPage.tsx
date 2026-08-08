@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, CircleMarker, Polygon, Marker, useMapEvents } from 'react-leaflet';
 import L, { type LatLngBoundsLiteral, type Map as LeafletMap } from 'leaflet';
 
 import { useL } from '../i18n/LocalizationProvider';
@@ -7,13 +7,17 @@ import { useTheme } from '../theme';
 import { WeatherFieldControl } from './WeatherFieldControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
+import { PortsControl, RulerControl } from './MapToolsControl';
+import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
 import {
   AreaConstraintsLayer,
   ZONE_STYLES,
   getZoneStyle,
   speedKnots,
+  normalizeRingLonLat,
 } from './AreaConstraintsLayer';
 import { AreaConstraintEditLayer } from './AreaConstraintEditLayer';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 import {
   AREA_CONSTRAINTS,
   constraintScope,
@@ -41,6 +45,96 @@ const WORLD_BOUNDS: LatLngBoundsLiteral = [
 ];
 
 const EDITS_KEY = 'fv.areaConstraints.edits';
+
+function round5(n: number) { return Math.round(n * 1e5) / 1e5; }
+
+/** Captures map clicks/double-clicks to build a polygon ring interactively. */
+function MapDrawHandler({ onAdd, onFinish }: {
+  onAdd: (pt: [number, number]) => void;
+  onFinish: () => void;
+}) {
+  const clickTimeoutRef = useRef<number | null>(null);
+  const lastPtRef = useRef<[number, number] | null>(null);
+
+  const map = useMapEvents({
+    click(e) {
+      L.DomEvent.stop(e);
+      if (clickTimeoutRef.current) {
+        window.clearTimeout(clickTimeoutRef.current);
+        clickTimeoutRef.current = null;
+        return; // second click of a dblclick — discard
+      }
+      const pt: [number, number] = [round5(e.latlng.lat), round5(e.latlng.lng)];
+      clickTimeoutRef.current = window.setTimeout(() => {
+        clickTimeoutRef.current = null;
+        // Reject duplicate coordinates
+        const last = lastPtRef.current;
+        if (last && last[0] === pt[0] && last[1] === pt[1]) return;
+        lastPtRef.current = pt;
+        onAdd(pt);
+      }, 220);
+    },
+    dblclick(e) {
+      L.DomEvent.stop(e);
+      if (clickTimeoutRef.current) {
+        window.clearTimeout(clickTimeoutRef.current);
+        clickTimeoutRef.current = null;
+      }
+      // No point was added by either click of the dblclick, so don't remove anything
+      onFinish();
+    },
+  });
+
+  useEffect(() => {
+    map.doubleClickZoom.disable();
+    map.getContainer().style.cursor = 'crosshair';
+    return () => {
+      map.doubleClickZoom.enable();
+      map.getContainer().style.cursor = '';
+      if (clickTimeoutRef.current) window.clearTimeout(clickTimeoutRef.current);
+    };
+  }, [map]);
+  return null;
+}
+
+function vertexIcon(color: string): L.DivIcon {
+  return L.divIcon({
+    className: 'fv-area-drawing-vertex',
+    html: `<span style="background:${color}"></span>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+/** Draggable marker for drawing polygon points. */
+function DrawingPointMarker({
+  index,
+  position,
+  color,
+  onMove,
+}: {
+  index: number;
+  position: [number, number];
+  color: string;
+  onMove: (index: number, newPosition: [number, number]) => void;
+}) {
+  const icon = useMemo(() => vertexIcon(color), [color]);
+
+  return (
+    <Marker
+      position={position}
+      icon={icon}
+      draggable
+      keyboard={false}
+      eventHandlers={{
+        drag: (e) => {
+          const ll = (e.target as L.Marker).getLatLng();
+          onMove(index, [round5(ll.lat), round5(ll.lng)]);
+        },
+      }}
+    />
+  );
+}
 
 // ── Coordinate <-> degrees/minutes helpers ────────────────────────────
 type Hemi = 'N' | 'S' | 'E' | 'W';
@@ -136,7 +230,7 @@ type ScopeView = 'all' | 'admin' | 'voyage';
  */
 export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voyage' }) {
   const l = useL();
-  const [theme] = useTheme();
+  useTheme(); // retain for potential future tile theme switching
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
@@ -146,17 +240,104 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
   const voyageId = mode === 'voyage' ? voyage?.id : undefined;
 
   const mapRef = useRef<LeafletMap | null>(null);
+  const originalRingsRef = useRef<Record<string, [number, number][][]>>({});
   const [data, setData] = useState<AreaConstraint[]>(() => loadInitial(voyageId));
   const [search, setSearch] = useState('');
   const [zoneFilter, setZoneFilter] = useState<string | null>(null);
   const [scopeView, setScopeView] = useState<ScopeView>('all');
+  const [baseLayer, setBaseLayer] = useState<MapLayerId>(() => readMapLayerId());
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [drawingState, setDrawingState] = useState<{ zoneType: string; geomType: string; pts: [number, number][] } | null>(null);
+  const [drawingConstraintId, setDrawingConstraintId] = useState<string | null>(null);
 
-  // Reload when the selected voyage changes (voyage view only).
+  const startDrawing = (zoneType: string, geomType: string) => {
+    if (!voyageId) return;
+    setCreating(false);
+    setDrawingState({ zoneType, geomType, pts: [] });
+    
+    // Create the constraint immediately with empty rings
+    const style = getZoneStyle(zoneType);
+    const constraintId = newVoyageConstraintId();
+    const created: AreaConstraint = {
+      id: constraintId,
+      name: `New ${style.label} zone`,
+      rawName: `Voyage constraint · ${style.label}`,
+      zoneType,
+      geomType,
+      rpmMin: '', rpmMax: '', speedMin: '', speedMax: '',
+      rings: [[]],
+      voyageId,
+    };
+    
+    originalRingsRef.current[constraintId] = [[]];
+    setData((prev) => [...prev, created]);
+    setDrawingConstraintId(constraintId);
+    setSelectedId(constraintId);
+  };
+
+  const cancelDrawing = () => {
+    // Remove the constraint if it has no valid points
+    if (drawingConstraintId) {
+      setData((prev) => prev.filter((c) => c.id !== drawingConstraintId));
+      setDrawingConstraintId(null);
+      setSelectedId(null);
+    }
+    setDrawingState(null);
+  };
+
+  const finalizeDrawing = () => {
+    if (!drawingState || !drawingConstraintId) { 
+      setDrawingState(null);
+      return; 
+    }
+    const { pts } = drawingState;
+    if (pts.length < 3) { 
+      cancelDrawing();
+      return; 
+    }
+    
+    // Update the constraint with the finalized rings
+    setData((prev) => {
+      const next = prev.map((c) =>
+        c.id === drawingConstraintId ? { ...c, rings: [pts] } : c
+      );
+      if (voyageId) {
+        saveVoyageConstraints(voyageId, next.filter((c) => constraintScope(c) === 'voyage'));
+      }
+      return next;
+    });
+    
+    // Update original rings to reflect the saved state
+    originalRingsRef.current[drawingConstraintId] = [pts];
+    
+    setScopeView('voyage');
+    setDrawingState(null);
+    setDrawingConstraintId(null);
+  };
   useEffect(() => {
-    setData(loadInitial(voyageId));
+    const initial = loadInitial(voyageId);
+    setData(initial);
+    // Update original rings reference whenever data is reloaded
+    originalRingsRef.current = {};
+    for (const c of initial) {
+      originalRingsRef.current[c.id] = cloneRings(c.rings);
+    }
   }, [voyageId]);
+
+  // Sync drawing points to constraint in data so they show in the left panel
+  useEffect(() => {
+    if (drawingState && drawingConstraintId) {
+      setData((prev) =>
+        prev.map((c) =>
+          c.id === drawingConstraintId
+            ? { ...c, rings: [drawingState.pts] }
+            : c
+        )
+      );
+    }
+  }, [drawingState?.pts.length, drawingConstraintId]);
 
   // Make sure Leaflet measures the container after the flex layout settles,
   // otherwise the map can render as a thin sliver.
@@ -167,15 +348,18 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
     return () => window.clearTimeout(id);
   }, []);
 
-  // What the map draws: admin view shows everything; voyage view follows the
-  // on-map scope selector (all / admin / this voyage).
-  const mapConstraints = useMemo(
-    () =>
-      mode === 'admin' || scopeView === 'all'
-        ? data
-        : data.filter((c) => constraintScope(c) === scopeView),
-    [data, mode, scopeView],
-  );
+  // Filter map constraints based on scope view
+  const mapConstraints = useMemo(() => {
+    switch (scopeView) {
+      case 'admin':
+        return data.filter((c) => constraintScope(c) === 'admin');
+      case 'voyage':
+        return data.filter((c) => constraintScope(c) === 'voyage');
+      case 'all':
+      default:
+        return data;
+    }
+  }, [data, scopeView]);
 
   // The sidebar list is voyage-only on the left-menu view — admin constraints
   // are visible on the map (via the scope selector) but not listed here.
@@ -302,6 +486,51 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
   };
 
   const resetConstraint = (id: string) => {
+    const constraint = data.find((c) => c.id === id);
+    if (!constraint) return;
+    
+    // If this is a constraint being drawn, reset the drawing state
+    if (drawingConstraintId === id && drawingState) {
+      // Clear points from both drawing state and constraint
+      setDrawingState((prev) => prev ? { ...prev, pts: [] } : null);
+      setData((prev) =>
+        prev.map((c) =>
+          c.id === id ? { ...c, rings: [[]] } : c
+        )
+      );
+      return;
+    }
+    
+    // For voyage constraints, check if we should re-enter drawing mode
+    if (constraintScope(constraint) === 'voyage' && !drawingConstraintId) {
+      const storedOriginal = originalRingsRef.current[id];
+      // If this is a newly created constraint (has actual drawn rings), offer to re-draw
+      if (storedOriginal && storedOriginal.length > 0) {
+        // Re-enter drawing mode with empty points to redraw
+        setDrawingConstraintId(id);
+        setDrawingState({
+          zoneType: constraint.zoneType,
+          geomType: constraint.geomType,
+          pts: [],
+        });
+        // Clear the data rings so we can redraw
+        setData((prev) =>
+          prev.map((c) =>
+            c.id === id ? { ...c, rings: [[]] } : c
+          )
+        );
+        return;
+      }
+    }
+    
+    // Otherwise restore from original rings
+    const storedOriginal = originalRingsRef.current[id];
+    if (storedOriginal) {
+      mutateRings(id, () => cloneRings(storedOriginal));
+      return;
+    }
+    
+    // Fall back to bundled constraints
     const orig = AREA_CONSTRAINTS.find((c) => c.id === id);
     if (!orig) return;
     mutateRings(id, () => cloneRings(orig.rings));
@@ -336,52 +565,15 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
 
     setData((prev) => prev.filter((c) => c.id !== id));
     setSelectedId((sel) => (sel === id ? null : sel));
+    
+    // Clear drawing state if we're deleting the currently drawn constraint
+    if (drawingConstraintId === id) {
+      setDrawingState(null);
+      setDrawingConstraintId(null);
+    }
   };
 
-  const createConstraint = (zoneType: string, geomType: string) => {
-    if (!voyageId) return;
-    const style = getZoneStyle(zoneType);
-    const center = mapRef.current?.getCenter();
-    const clat = center?.lat ?? 20;
-    const clng = center?.lng ?? 20;
-    const d = 3;
-    const ring: [number, number][] = [
-      [Math.round((clat + d) * 1e5) / 1e5, Math.round((clng - d) * 1e5) / 1e5],
-      [Math.round((clat + d) * 1e5) / 1e5, Math.round((clng + d) * 1e5) / 1e5],
-      [Math.round((clat - d) * 1e5) / 1e5, Math.round((clng + d) * 1e5) / 1e5],
-      [Math.round((clat - d) * 1e5) / 1e5, Math.round((clng - d) * 1e5) / 1e5],
-    ];
-    const created: AreaConstraint = {
-      id: newVoyageConstraintId(),
-      name: `New ${style.label} zone`,
-      rawName: `Voyage constraint · ${style.label}`,
-      zoneType,
-      geomType,
-      rpmMin: '',
-      rpmMax: '',
-      speedMin: '',
-      speedMax: '',
-      rings: [ring],
-      voyageId,
-    };
-    setData((prev) => {
-      const next = [...prev, created];
-      saveVoyageConstraints(
-        voyageId,
-        next.filter((c) => constraintScope(c) === 'voyage'),
-      );
-      return next;
-    });
-    setScopeView('voyage');
-    setCreating(false);
-    setSelectedId(created.id);
-    flyTo(created);
-  };
-
-  const tileUrl =
-    theme === 'light'
-      ? 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'
-      : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png';
+  // startDrawing replaced the old auto-box approach
 
   return (
     <div className="fv-area-page">
@@ -398,7 +590,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
 
         {mode === 'voyage' && (
           <div className="fv-area-page__create">
-            {!creating ? (
+            {!creating && !drawingState ? (
               <button
                 type="button"
                 className="fv-area-create-btn"
@@ -413,7 +605,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
                 <i className="fas fa-plus" aria-hidden="true" />{' '}
                 {t('newConstraint', 'New area constraint')}
               </button>
-            ) : (
+            ) : !drawingState ? (
               <div className="fv-area-create">
                 <div className="fv-area-create__label">
                   {t('chooseZoneType', 'Choose zone type')}
@@ -426,7 +618,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
                         key={z.zoneType}
                         type="button"
                         className="fv-area-create__type"
-                        onClick={() => createConstraint(z.zoneType, z.geomType)}
+                        onClick={() => startDrawing(z.zoneType, z.geomType)}
                       >
                         <span
                           className="fv-area-chip__swatch"
@@ -445,7 +637,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
                   {t('cancel', 'Cancel')}
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
         )}
 
@@ -526,6 +718,14 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
                     onDeletePoint={deletePoint}
                     onAddPoint={addPoint}
                     onSave={saveEdits}
+                    onSaveComplete={() => {
+                      setSelectedId(null);
+                      // Clear drawing state when saving from the editor
+                      if (drawingConstraintId === selected.id && drawingState) {
+                        setDrawingState(null);
+                        setDrawingConstraintId(null);
+                      }
+                    }}
                     onReset={() => resetConstraint(selected.id)}
                     onZoom={() => flyTo(selected)}
                     onDelete={
@@ -568,20 +768,35 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
           maxBoundsViscosity={1.0}
           style={{ height: '100%', width: '100%' }}
         >
-          <TileLayer
-            key={theme}
-            attribution="&copy; OpenStreetMap, &copy; CARTO"
-            url={tileUrl}
-            maxZoom={18}
-            crossOrigin="anonymous"
-          />
+          {baseLayer === 'satellite' && (
+            <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" attribution="Tiles &copy; Esri" />
+          )}
+          {baseLayer === 'dark' && (
+            <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution="&copy; OpenStreetMap contributors &copy; CARTO" />
+          )}
+          {(baseLayer === 'standard' || baseLayer === 'nautical') && (
+            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" crossOrigin="anonymous" />
+          )}
+          {baseLayer === 'nautical' && (
+            <TileLayer url="https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png" attribution="&copy; OpenSeaMap" />
+          )}
           <WeatherFieldControl position="topright" />
           <WeatherPointControl position="topright" />
-          <MapCursorPosition />
+          <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+          <PortsControl position="topright" />
+          <RulerControl position="topright" />
+          <MapCursorPosition position="topleft" />
           <AreaConstraintsLayer
             constraints={mapConstraints}
             selectedId={selectedId ?? undefined}
+            onConstraintClick={(id) => {
+              const constraint = data.find((c) => c.id === id);
+              if (constraint) select(constraint);
+            }}
           />
+          {overlayLayers.includes('loadLineZones') && (
+            <LoadLineZonesLayer />
+          )}
           {selected && (
             <AreaConstraintEditLayer
               constraint={selected}
@@ -591,10 +806,61 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
               onInsert={(ri, pi, coord) => insertPoint(selected.id, ri, pi, coord)}
             />
           )}
+          {drawingState && (
+            <>
+              <MapDrawHandler
+                onAdd={(pt) => setDrawingState((prev) => prev ? { ...prev, pts: [...prev.pts, pt] } : null)}
+                onFinish={finalizeDrawing}
+              />
+              {drawingState.pts.length >= 3 && (
+                <Polygon
+                  positions={normalizeRingLonLat(drawingState.pts)}
+                  pathOptions={{
+                    color: getZoneStyle(drawingState.zoneType).color,
+                    weight: 2,
+                    fillColor: getZoneStyle(drawingState.zoneType).color,
+                    fillOpacity: 0.2,
+                  }}
+                />
+              )}
+              {drawingState.pts.length > 1 && (
+                <Polyline
+                  positions={normalizeRingLonLat(
+                    drawingState.pts.length > 2
+                      ? [...drawingState.pts, drawingState.pts[0]]
+                      : drawingState.pts
+                  )}
+                  pathOptions={{
+                    color: getZoneStyle(drawingState.zoneType).color,
+                    weight: 2,
+                    dashArray: '6 4',
+                  }}
+                />
+              )}
+              {drawingState.pts.map((pt, idx) => (
+                <DrawingPointMarker
+                  key={idx}
+                  index={idx}
+                  position={pt}
+                  color={getZoneStyle(drawingState.zoneType).color}
+                  onMove={(index, newPosition) => {
+                    setDrawingState((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            pts: prev.pts.map((p, i) => (i === index ? newPosition : p)),
+                          }
+                        : null
+                    );
+                  }}
+                />
+              ))}
+            </>
+          )}
         </MapContainer>
 
         {mode === 'voyage' && (
-          <div className="fv-area-map-scope" role="group" aria-label={t('constraintScope', 'Constraint scope')}>
+          <div className="fv-area-map-scope fv-area-map-scope--topright" role="group" aria-label={t('constraintScope', 'Constraint scope')}>
             <button
               type="button"
               className={`fv-area-map-scope__btn${scopeView === 'all' ? ' fv-area-map-scope__btn--on' : ''}`}
@@ -621,6 +887,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
             </button>
           </div>
         )}
+
 
         <div className="fv-area-legend">
           {Object.entries(ZONE_STYLES).map(([zt, z]) => (
@@ -652,6 +919,7 @@ interface CoordinateEditorProps {
   onDeletePoint: (id: string, ri: number, pi: number) => void;
   onAddPoint: (id: string, ri: number) => void;
   onSave: () => void;
+  onSaveComplete?: () => void;
   onReset: () => void;
   onZoom: () => void;
   onDelete?: () => void;
@@ -666,6 +934,7 @@ function CoordinateEditor({
   onDeletePoint,
   onAddPoint,
   onSave,
+  onSaveComplete,
   onReset,
   onZoom,
   onDelete,
@@ -677,6 +946,9 @@ function CoordinateEditor({
   const handleSave = () => {
     onSave();
     setSaved(true);
+    if (onSaveComplete) {
+      onSaveComplete();
+    }
     window.setTimeout(() => setSaved(false), 1500);
   };
 

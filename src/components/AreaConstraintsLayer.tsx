@@ -18,6 +18,20 @@ import { AREA_CONSTRAINTS, type AreaConstraint } from '../data/areaConstraints';
 
 const MS_TO_KN = 1.94384;
 
+/** Adjust ring longitudes so no consecutive pair differs by more than 180° — fixes antimeridian rendering. */
+export function normalizeRingLonLat(ring: [number, number][]): [number, number][] {
+  if (ring.length === 0) return ring;
+  const out: [number, number][] = [[ring[0][0], ring[0][1]]];
+  for (let i = 1; i < ring.length; i++) {
+    let lon = ring[i][1];
+    const prevLon = out[i - 1][1];
+    while (lon - prevLon > 180) lon -= 360;
+    while (lon - prevLon < -180) lon += 360;
+    out.push([ring[i][0], lon]);
+  }
+  return out;
+}
+
 export interface ZoneStyle {
   label: string;
   color: string;
@@ -106,9 +120,11 @@ function ConstraintTooltip({ c }: { c: AreaConstraint }) {
 export function AreaConstraintsLayer({
   constraints = AREA_CONSTRAINTS,
   selectedId,
+  onConstraintClick,
 }: {
   constraints?: AreaConstraint[];
   selectedId?: string;
+  onConstraintClick?: (id: string) => void;
 } = {}) {
   return (
     <>
@@ -127,12 +143,13 @@ export function AreaConstraintsLayer({
           <Fragment key={c.id}>
             {c.rings.map((ring, ri) => (
               <Polygon
-                key={ri}
-                positions={ring}
+                key={`${c.id}-${ri}`}
+                positions={normalizeRingLonLat(ring)}
                 pathOptions={pathOptions}
                 eventHandlers={{
                   mouseover: (e) => e.target.setStyle(hoverOptions),
                   mouseout: (e) => e.target.setStyle(pathOptions),
+                  click: () => onConstraintClick?.(c.id),
                 }}
               >
                 <ConstraintTooltip c={c} />

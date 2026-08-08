@@ -62,45 +62,24 @@ function SpeedConsTable({ rows, condition }: { rows: EngineSpeedConsRow[]; condi
   );
 }
 
-/** CP / good-weather criteria collapsed into one compact human-readable line. */
-function cpSummary(cp: {
-  cpWinds: string;
-  cpSwh: string;
-  cpDss: string;
-  cpCurrents: string;
-  cpMinHours: string;
-  cpGoodWeatherSelection: string;
-}): string {
-  const parts: string[] = [];
-  if (cp.cpWinds) parts.push(`Winds ≤ ${cp.cpWinds}`);
-  if (cp.cpSwh) parts.push(`SWH ≤ ${cp.cpSwh}`);
-  if (cp.cpDss) parts.push(`DSS ≤ ${cp.cpDss}`);
-  if (cp.cpMinHours) parts.push(`Min ${cp.cpMinHours} hrs`);
-  if (cp.cpCurrents) parts.push(`Currents: ${cp.cpCurrents}`);
-  if (cp.cpGoodWeatherSelection) parts.push(`Basis: ${cp.cpGoodWeatherSelection}`);
-  return parts.length ? parts.join(' · ') : '—';
-}
-
-/** Weather safety limits collapsed into one compact line. */
-function limitSummary(leg: LegRow): string {
-  const parts: string[] = [];
-  if (leg.maxSwh) parts.push(`SWH ≤ ${leg.maxSwh}`);
-  if (leg.maxWind) parts.push(`Wind ≤ ${leg.maxWind}`);
-  if (leg.maxSeaState) parts.push(`Sea State ≤ ${leg.maxSeaState}`);
-  return parts.length ? parts.join(' · ') : '—';
-}
-
-/** True when a sub-leg's CP criteria match the parent leg (i.e. show "Same as leg"). */
-function subLegUsesLegCp(s: LegRow['subLegs'][number], leg: LegRow): boolean {
-  if (s.useDefaultCp) return true;
-  return (
-    s.cpWinds === leg.cpWinds &&
-    s.cpSwh === leg.cpSwh &&
-    s.cpDss === leg.cpDss &&
-    s.cpCurrents === leg.cpCurrents &&
-    s.cpMinHours === leg.cpMinHours &&
-    s.cpGoodWeatherSelection === leg.cpGoodWeatherSelection
-  );
+/** Compute ETD in local time from UTC string + UTC±n timezone. */
+function etdLT(etdUtc: string, tz: string): string {
+  if (!etdUtc || !tz) return '—';
+  const tzMatch = tz.match(/UTC([+-]?\d+)/);
+  if (!tzMatch) return '—';
+  const offset = parseInt(tzMatch[1], 10);
+  if (isNaN(offset)) return '—';
+  const normalised = etdUtc
+    .replace(/(\d{2})-([A-Za-z]{3})-(\d{4})\s+(\d{2}:\d{2}).*/, '$2 $1 $3 $4 UTC')
+    .replace(/(\d{2})\s+([A-Za-z]{3})\s+(\d{4}),\s+(\d{2}:\d{2}).*/, '$2 $1 $3 $4 UTC');
+  const d = new Date(normalised);
+  if (isNaN(d.getTime())) return '—';
+  d.setUTCHours(d.getUTCHours() + offset);
+  const MONS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const dd = String(d.getUTCDate()).padStart(2,'0');
+  const hh = String(d.getUTCHours()).padStart(2,'0');
+  const mm = String(d.getUTCMinutes()).padStart(2,'0');
+  return `${dd}-${MONS[d.getUTCMonth()]}-${d.getUTCFullYear()} ${hh}:${mm} LT`;
 }
 
 /** Read-only, compact rendering of a single leg. */
@@ -114,42 +93,29 @@ function LegBlock({ leg }: { leg: LegRow }) {
       <div className="fv-voyage__cols fv-voyage__cols--4">
         <Info label="Voyage Type" value={dash(leg.type)} />
         <Info label="Status" value={dash(leg.status)} />
-        <Info label="ETD" value={dash(leg.etd)} />
+        <Info label="ETD (UTC)" value={dash(leg.etd)} />
+        <Info label="Time Zone" value={dash(leg.etdTimezone)} />
+        <Info label="ETD (LT)" value={etdLT(leg.etd, leg.etdTimezone)} />
+        <Info label="Auto Route" value={leg.autoRoute ? 'On' : 'Off'} />
         <Info label="Distance (NM)" value={dash(leg.distanceNm)} />
       </div>
-      <div className="fv-voyage__cols fv-voyage__cols--1">
-        <Info label="Weather Safety Limits" value={limitSummary(leg)} />
-        <Info label="CP / Good-Weather Criteria" value={cpSummary(leg)} />
-      </div>
-
-      {leg.subLegs.length > 0 && (
-        <div className="fv-voyage__cols fv-voyage__cols--1">
-          <span className="fv-voyage__info-label">Intermediate Ports / Sub-Legs</span>
-          <div className="fv-voyage__table-scroll">
-            <table className="fv-voyage__dtable">
-              <thead>
-                <tr>
-                  <th>Type</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>ETD</th>
-                  <th>CP Criteria</th>
-                </tr>
-              </thead>
-              <tbody>
-                {leg.subLegs.map((s, i) => (
-                  <tr key={i}>
-                    <td>{dash(s.type)}</td>
-                    <td>{dash(s.from)}</td>
-                    <td>{dash(s.to)}</td>
-                    <td>{dash(s.etd)}</td>
-                    <td>{subLegUsesLegCp(s, leg) ? 'Same as leg' : cpSummary(s)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {leg.useDifferentCp && (
+        <>
+          <div className="fv-voyage__cols fv-voyage__cols--5">
+            <Info label="Winds (BF)" value={dash(leg.cpWinds)} />
+            <Info label="DSS" value={dash(leg.cpDss)} />
+            <Info label="SWH" value={dash(leg.cpSwh)} />
+            <Info label="Min Hours (h)" value={dash(leg.cpMinHours)} />
+            <Info label="Currents" value={dash(leg.cpCurrents)} />
           </div>
-        </div>
+          <div className="fv-voyage__cols fv-voyage__cols--5">
+            <Info label="Good Weather Selection" value={dash(leg.cpGoodWeatherSelection)} />
+            <Info label="Allowable Fuel Method" value={dash(leg.cpAllowableFuelMethod)} />
+            <Info label="About Speed" value={leg.cpAboutSpeed ? `${leg.cpAboutSpeed} ${leg.cpAboutSpeedUnit || ''}`.trim() : '—'} />
+            <Info label="Time Gain (%)" value={dash(leg.cpTimeGain)} />
+            <Info label="Time Loss (%)" value={dash(leg.cpTimeLoss)} />
+          </div>
+        </>
       )}
     </div>
   );
@@ -409,7 +375,30 @@ export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse 
           </div>
         )}
 
-        {/* 3. Leg Details */}
+        {/* 3. CP Details — Good Weather Criteria (default, from first leg) */}
+        <h5 className="fv-voyage__subhead">CP Details — Good Weather Criteria</h5>
+        {view.legs[0] ? (
+          <>
+            <div className="fv-voyage__cols fv-voyage__cols--5">
+              <Info label="Winds (BF)" value={dash(view.legs[0].cpWinds)} />
+              <Info label="DSS" value={dash(view.legs[0].cpDss)} />
+              <Info label="SWH" value={dash(view.legs[0].cpSwh)} />
+              <Info label="Min Hours (h)" value={dash(view.legs[0].cpMinHours)} />
+              <Info label="Currents" value={dash(view.legs[0].cpCurrents)} />
+            </div>
+            <div className="fv-voyage__cols fv-voyage__cols--5">
+              <Info label="Good Weather Selection" value={dash(view.legs[0].cpGoodWeatherSelection)} />
+              <Info label="Allowable Fuel Method" value={dash(view.legs[0].cpAllowableFuelMethod)} />
+              <Info label="About Speed" value={view.legs[0].cpAboutSpeed ? `${view.legs[0].cpAboutSpeed} ${view.legs[0].cpAboutSpeedUnit || ''}`.trim() : '—'} />
+              <Info label="Time Gain (%)" value={dash(view.legs[0].cpTimeGain)} />
+              <Info label="Time Loss (%)" value={dash(view.legs[0].cpTimeLoss)} />
+            </div>
+          </>
+        ) : (
+          <p className="fv-voyage__notes">No legs defined.</p>
+        )}
+
+        {/* 4. Leg Details */}
         <h5 className="fv-voyage__subhead">Leg Details</h5>
         {view.legs.length ? (
           view.legs.map((leg, i) => <LegBlock key={i} leg={leg} />)

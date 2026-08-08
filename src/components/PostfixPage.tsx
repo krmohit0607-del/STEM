@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { useCpdds } from '../data/workflow';
 import { WorkflowStatusSelect } from './WorkflowStatusSelect';
 import type { Voyage } from '../data/voyages';
+import { makeBlankVoyage } from '../data/voyages';
 import { NoVesselSelected } from './NoVesselSelected';
 import { addPayable } from '../data/accounts';
 
@@ -167,8 +169,12 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
 
 /* ============================================================ main page */
 
-export function PostfixPage() {
-  const voyage = useSelectedVoyage();
+export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
+  const [searchParams] = useSearchParams();
+  const selectedVoyage = useSelectedVoyage();
+  const createMode = mode === 'create' || searchParams.get('new') === '1';
+  const blankVoyage = useMemo(() => makeBlankVoyage(), []);
+  const voyage = createMode ? blankVoyage : selectedVoyage;
   const cpdds = useCpdds();
   const [tab, setTab] = useState<TabId>('summary');
   const [rail, setRail] = useState<RailPanel>('summary');

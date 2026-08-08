@@ -26,9 +26,10 @@ const ALL_TYPES = Object.keys(ZONE_STYLES);
 
 function readVisible(): boolean {
   try {
-    return localStorage.getItem(VISIBLE_KEY) === '1';
+    const v = localStorage.getItem(VISIBLE_KEY);
+    return v === null ? true : v === '1'; // default ON
   } catch {
-    return false;
+    return true;
   }
 }
 

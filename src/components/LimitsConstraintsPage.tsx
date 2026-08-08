@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { useFleetView } from '../context/FleetViewContext';
 import { useSelectedVoyage } from '../data/selectedVoyage';
@@ -16,28 +16,6 @@ import {
   type LimitsHistoryEntry,
   type VoyageLimits,
 } from '../data/limitsConstraints';
-
-const HOUR = 3_600_000;
-const pad = (n: number) => String(n).padStart(2, '0');
-
-function parseDT(s: string): number | null {
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
-  if (!m) return null;
-  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
-}
-function toInput(ms: number): string {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(
-    d.getUTCHours(),
-  )}:${pad(d.getUTCMinutes())}`;
-}
-function fmtDT(ms: number | null): string {
-  if (ms == null || !Number.isFinite(ms)) return '—';
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(
-    d.getUTCHours(),
-  )}:${pad(d.getUTCMinutes())}`;
-}
 
 /** A labelled input used across the editor sections. */
 function Field({
@@ -115,16 +93,34 @@ function persistLimits(voyage: Voyage | undefined, limits: VoyageLimits): void {
   });
 }
 
+/**
+ * Keep legacy `rta` and `speedCons` sections in sync with the new
+ * `constraints` card so existing optimization readers keep working.
+ */
+function syncLegacyFromConstraints(limits: VoyageLimits): VoyageLimits {
+  const c = limits.constraints;
+  return {
+    ...limits,
+    rta: {
+      ...limits.rta,
+      enabled: c.rta.trim().length > 0,
+      value: c.rta || limits.rta.value,
+    },
+    speedCons: {
+      ...limits.speedCons,
+      minSpeed: c.speedMin,
+      maxSpeed: c.speedMax,
+      minRpm: c.rpmMin,
+      maxRpm: c.rpmMax,
+      maxFoPerDay: c.consumption,
+    },
+  };
+}
+
 export function LimitsConstraintsPage() {
   const { user } = useFleetView();
   const voyage = useSelectedVoyage();
   const voyageId = voyage?.id;
-  // Market Factors, RTA and Speed/Cons constraints are only shown for the
-  // Optimization service; other service types hide them. The service type is
-  // read from the shared store first so a change made on the Voyage Details
-  // page is reflected here.
-  const isOptimization =
-    (loadVoyageShared(voyageId)?.serviceType ?? voyage?.service) === 'Optimization';
 
   const [saved, setSaved] = useState<VoyageLimits>(() => composeLimits(voyage));
   const [draft, setDraft] = useState<VoyageLimits>(() => composeLimits(voyage));
@@ -144,45 +140,21 @@ export function LimitsConstraintsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voyageId]);
 
-  // RTA both-times computation.
-  const rtaTimes = useMemo(() => {
-    const tz = Number(draft.rta.tz) || 0;
-    const enteredMs = parseDT(draft.rta.value);
-    if (enteredMs == null) return { utc: null as number | null, lt: null as number | null };
-    if (draft.rta.mode === 'UTC') {
-      return { utc: enteredMs, lt: enteredMs + tz * HOUR };
-    }
-    return { utc: enteredMs - tz * HOUR, lt: enteredMs };
-  }, [draft.rta]);
-
   const setSection = <K extends keyof VoyageLimits>(key: K, value: VoyageLimits[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
 
-  const toggleRtaMode = () => {
-    setDraft((d) => {
-      const tz = Number(d.rta.tz) || 0;
-      const enteredMs = parseDT(d.rta.value);
-      const nextMode = d.rta.mode === 'UTC' ? 'LT' : 'UTC';
-      let value = d.rta.value;
-      if (enteredMs != null) {
-        // Keep the same instant; re-express the input in the new zone.
-        value = toInput(nextMode === 'LT' ? enteredMs + tz * HOUR : enteredMs - tz * HOUR);
-      }
-      return { ...d, rta: { ...d.rta, mode: nextMode, value } };
-    });
-  };
-
   const onSave = () => {
-    const changed = diffLimits(saved, draft);
-    persistLimits(voyage, draft);
-    setSaved(structuredClone(draft));
+    const normalized = syncLegacyFromConstraints(draft);
+    const changed = diffLimits(saved, normalized);
+    persistLimits(voyage, normalized);
+    setSaved(structuredClone(normalized));
     if (changed.length > 0) {
       const entry: LimitsHistoryEntry = {
         id: newHistoryId(),
         at: new Date().toISOString(),
         by: user?.fullName || user?.name || 'Unknown user',
         summary: `Updated ${changed.join(', ')}`,
-        changes: diffLimitsDetailed(saved, draft),
+        changes: diffLimitsDetailed(saved, normalized),
       };
       setHistory(appendLimitsHistory(entry));
     }
@@ -202,7 +174,7 @@ export function LimitsConstraintsPage() {
   };
 
   return (
-    <div className="fv-voyage">
+    <div className="fv-voyage fv-limits-page">
       <header className="fv-voyage__header">
         <div className="fv-voyage__heading">
           <span className="fv-voyage__heading-icon" aria-hidden="true">
@@ -215,13 +187,13 @@ export function LimitsConstraintsPage() {
       <div className="fv-limits">
         <div className="fv-limits__main">
           <p className="fv-limits__intro">
-            Set the market factors, weather safety limits, RTA and speed / consumption
-            constraints for {voyage ? <strong>{voyage.vessel}</strong> : 'the selected voyage'}.
+            Set the market factors, weather safety limits and optimization constraints
+            (Speed, Consumption, RTA, RPM and MCR) for{' '}
+            {voyage ? <strong>{voyage.vessel}</strong> : 'the selected voyage'}.
             Click <strong>Edit</strong> on any card to change its values, then Save.
           </p>
 
           <div className="fv-limits__overview">
-            {isOptimization && (
             <CardShell
               title="Market Factors"
               icon="fa-coins"
@@ -247,10 +219,9 @@ export function LimitsConstraintsPage() {
                 </dl>
               )}
             </CardShell>
-            )}
 
             <CardShell
-              title="Weather Safety Limits"
+              title="Safety Limits & Hydrostatics"
               icon="fa-cloud-bolt"
               editing={editingCard === 'weather'}
               justSaved={justSaved}
@@ -265,6 +236,9 @@ export function LimitsConstraintsPage() {
                   <Field label="Max Sea State" value={draft.weatherLimits.maxSeaState} onChange={(v) => setSection('weatherLimits', { ...draft.weatherLimits, maxSeaState: v })} suffix="DSS" step="1" />
                   <Field label="Max Swell" value={draft.weatherLimits.maxSwell} onChange={(v) => setSection('weatherLimits', { ...draft.weatherLimits, maxSwell: v })} suffix="m" step="0.1" />
                   <Field label="Max Roll Period" value={draft.weatherLimits.maxRollPeriod} onChange={(v) => setSection('weatherLimits', { ...draft.weatherLimits, maxRollPeriod: v })} suffix="s" step="1" />
+                  <Field label="Draft" value={draft.weatherLimits.draft} onChange={(v) => setSection('weatherLimits', { ...draft.weatherLimits, draft: v })} suffix="m" step="0.1" />
+                  <Field label="Displacement" value={draft.weatherLimits.displacement} onChange={(v) => setSection('weatherLimits', { ...draft.weatherLimits, displacement: v })} suffix="mt" step="1" />
+                  <Field label="GM" value={draft.weatherLimits.gm} onChange={(v) => setSection('weatherLimits', { ...draft.weatherLimits, gm: v })} suffix="m" step="0.01" />
                 </div>
               ) : (
                 <dl className="fv-limits__card-list">
@@ -273,120 +247,117 @@ export function LimitsConstraintsPage() {
                   <OverviewRow label="Max Sea State" value={`DSS ${saved.weatherLimits.maxSeaState || '—'}`} />
                   <OverviewRow label="Max Swell" value={`${saved.weatherLimits.maxSwell || '—'} m`} />
                   <OverviewRow label="Max Roll Period" value={`${saved.weatherLimits.maxRollPeriod || '—'} s`} />
+                  <OverviewRow label="Draft" value={saved.weatherLimits.draft ? `${saved.weatherLimits.draft} m` : '—'} />
+                  <OverviewRow label="Displacement" value={saved.weatherLimits.displacement ? `${saved.weatherLimits.displacement} mt` : '—'} />
+                  <OverviewRow label="GM" value={saved.weatherLimits.gm ? `${saved.weatherLimits.gm} m` : '—'} />
                 </dl>
               )}
             </CardShell>
 
-            {isOptimization && (
             <CardShell
-              title="RTA Constraint"
-              icon="fa-clock"
-              editing={editingCard === 'rta'}
+              title="Constraints"
+              icon="fa-sliders"
+              editing={editingCard === 'constraints'}
               justSaved={justSaved}
-              onEdit={() => startEdit('rta')}
+              onEdit={() => startEdit('constraints')}
               onSave={onSave}
               onCancel={cancelEdit}
             >
-              {editingCard === 'rta' ? (
-                <div className="fv-limits__rta">
-                  <label className="fv-limits__toggle-enable">
-                    <input
-                      type="checkbox"
-                      checked={draft.rta.enabled}
-                      onChange={(e) => setSection('rta', { ...draft.rta, enabled: e.target.checked })}
-                    />
-                    <span>Enabled</span>
-                  </label>
-                  <label className="fv-limits__field">
-                    <span className="fv-limits__field-label">
-                      Required Time of Arrival ({draft.rta.mode})
-                    </span>
-                    <span className="fv-limits__field-input">
-                      <input
-                        type="datetime-local"
-                        value={draft.rta.value}
-                        disabled={!draft.rta.enabled}
-                        onChange={(e) => setSection('rta', { ...draft.rta, value: e.target.value })}
-                      />
-                    </span>
-                  </label>
-                  <div className="fv-limits__rta-row">
-                    <div className="fv-limits__mode-toggle" role="group" aria-label="RTA time zone mode">
-                      <button
-                        type="button"
-                        className={`fv-limits__mode-btn${draft.rta.mode === 'UTC' ? ' fv-limits__mode-btn--on' : ''}`}
-                        onClick={() => draft.rta.mode !== 'UTC' && toggleRtaMode()}
-                        disabled={!draft.rta.enabled}
-                      >
-                        UTC
-                      </button>
-                      <button
-                        type="button"
-                        className={`fv-limits__mode-btn${draft.rta.mode === 'LT' ? ' fv-limits__mode-btn--on' : ''}`}
-                        onClick={() => draft.rta.mode !== 'LT' && toggleRtaMode()}
-                        disabled={!draft.rta.enabled}
-                      >
-                        LT
-                      </button>
-                    </div>
-                    <Field
-                      label="Time Zone (h)"
-                      value={draft.rta.tz}
-                      onChange={(v) => setSection('rta', { ...draft.rta, tz: v })}
-                      step="0.5"
-                    />
-                  </div>
-                  <div className="fv-limits__rta-both">
-                    <div className="fv-limits__rta-both-item">
-                      <span className="fv-limits__rta-both-label">UTC</span>
-                      <span className="fv-limits__rta-both-value">{fmtDT(rtaTimes.utc)}</span>
-                    </div>
-                    <div className="fv-limits__rta-both-item">
-                      <span className="fv-limits__rta-both-label">Local (LT)</span>
-                      <span className="fv-limits__rta-both-value">{fmtDT(rtaTimes.lt)}</span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <dl className="fv-limits__card-list">
-                  <OverviewRow label="Status" value={saved.rta.enabled ? 'Enabled' : 'Disabled'} />
-                  <OverviewRow label="Entered in" value={saved.rta.mode} />
-                  <OverviewRow label="Value" value={saved.rta.value.replace('T', ' ') || '—'} />
-                  <OverviewRow label="Time Zone" value={`UTC${Number(saved.rta.tz) >= 0 ? '+' : ''}${saved.rta.tz}`} />
-                </dl>
-              )}
-            </CardShell>
-            )}
-
-            {isOptimization && (
-            <CardShell
-              title="Speed / Cons Constraint"
-              icon="fa-gauge-high"
-              editing={editingCard === 'speed'}
-              justSaved={justSaved}
-              onEdit={() => startEdit('speed')}
-              onSave={onSave}
-              onCancel={cancelEdit}
-            >
-              {editingCard === 'speed' ? (
+              {editingCard === 'constraints' ? (
                 <div className="fv-limits__grid">
-                  <Field label="Min Speed" value={draft.speedCons.minSpeed} onChange={(v) => setSection('speedCons', { ...draft.speedCons, minSpeed: v })} suffix="kt" step="0.1" />
-                  <Field label="Max Speed" value={draft.speedCons.maxSpeed} onChange={(v) => setSection('speedCons', { ...draft.speedCons, maxSpeed: v })} suffix="kt" step="0.1" />
-                  <Field label="Min RPM" value={draft.speedCons.minRpm} onChange={(v) => setSection('speedCons', { ...draft.speedCons, minRpm: v })} step="1" />
-                  <Field label="Max RPM" value={draft.speedCons.maxRpm} onChange={(v) => setSection('speedCons', { ...draft.speedCons, maxRpm: v })} step="1" />
-                  <Field label="Max FO / Day" value={draft.speedCons.maxFoPerDay} onChange={(v) => setSection('speedCons', { ...draft.speedCons, maxFoPerDay: v })} suffix="mt" step="0.1" />
-                  <Field label="Max GO / Day" value={draft.speedCons.maxGoPerDay} onChange={(v) => setSection('speedCons', { ...draft.speedCons, maxGoPerDay: v })} suffix="mt" step="0.1" />
+                  <Field
+                    label="Speed Min"
+                    value={draft.constraints.speedMin}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, speedMin: v })
+                    }
+                    suffix="kt"
+                    step="0.1"
+                  />
+                  <Field
+                    label="Speed Max"
+                    value={draft.constraints.speedMax}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, speedMax: v })
+                    }
+                    suffix="kt"
+                    step="0.1"
+                  />
+                  <Field
+                    label="Consumption"
+                    value={draft.constraints.consumption}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, consumption: v })
+                    }
+                    suffix="mt/day"
+                    step="0.1"
+                  />
+                  <Field
+                    label="RTA"
+                    value={draft.constraints.rta}
+                    onChange={(v) => setSection('constraints', { ...draft.constraints, rta: v })}
+                    type="datetime-local"
+                  />
+                  <Field
+                    label="RPM Min"
+                    value={draft.constraints.rpmMin}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, rpmMin: v })
+                    }
+                    step="1"
+                  />
+                  <Field
+                    label="RPM Max"
+                    value={draft.constraints.rpmMax}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, rpmMax: v })
+                    }
+                    step="1"
+                  />
+                  <Field
+                    label="MCR Min"
+                    value={draft.constraints.mcrMin}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, mcrMin: v })
+                    }
+                    suffix="%"
+                    step="0.1"
+                  />
+                  <Field
+                    label="MCR Max"
+                    value={draft.constraints.mcrMax}
+                    onChange={(v) =>
+                      setSection('constraints', { ...draft.constraints, mcrMax: v })
+                    }
+                    suffix="%"
+                    step="0.1"
+                  />
                 </div>
               ) : (
                 <dl className="fv-limits__card-list">
-                  <OverviewRow label="Speed" value={`${saved.speedCons.minSpeed || '—'} – ${saved.speedCons.maxSpeed || '—'} kt`} />
-                  <OverviewRow label="RPM" value={`${saved.speedCons.minRpm || '—'} – ${saved.speedCons.maxRpm || '—'}`} />
-                  <OverviewRow label="Max FO/day" value={`${saved.speedCons.maxFoPerDay || '—'} mt`} />
-                  <OverviewRow label="Max GO/day" value={`${saved.speedCons.maxGoPerDay || '—'} mt`} />
+                  <OverviewRow
+                    label="Speed"
+                    value={`${saved.constraints.speedMin || '—'} – ${saved.constraints.speedMax || '—'} kt`}
+                  />
+                  <OverviewRow
+                    label="Consumption"
+                    value={saved.constraints.consumption ? `${saved.constraints.consumption} mt/day` : '—'}
+                  />
+                  <OverviewRow
+                    label="RTA"
+                    value={saved.constraints.rta ? saved.constraints.rta.replace('T', ' ') : '—'}
+                  />
+                  <OverviewRow
+                    label="RPM"
+                    value={`${saved.constraints.rpmMin || '—'} – ${saved.constraints.rpmMax || '—'}`}
+                  />
+                  <OverviewRow
+                    label="MCR"
+                    value={`${saved.constraints.mcrMin || '—'} – ${saved.constraints.mcrMax || '—'} %`}
+                  />
                 </dl>
               )}
             </CardShell>
-            )}
 
             <CardShell
               title="Requirements / Notes"

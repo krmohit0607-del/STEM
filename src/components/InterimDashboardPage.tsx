@@ -79,6 +79,9 @@ interface NoonReportRow {
 }
 
 interface CpDetails {
+  speedKn: number;
+  consFoPerDay: number;
+  consGoPerDay: number;
   speed: string;
   consFo: string;
   consGo: string;
@@ -86,9 +89,15 @@ interface CpDetails {
   goodWeatherDef: string;
 }
 
-interface PerformanceStats {
-  vesselPerformance: { label: string; value: string }[];
-  goodWeather: { label: string; value: string }[];
+interface InterimSummaryCell {
+  primary: string;
+  tone?: 'good' | 'bad';
+}
+
+interface InterimSummaryRow {
+  label: string;
+  overall: InterimSummaryCell;
+  goodWeather: InterimSummaryCell;
 }
 
 /** Human-readable label for a leg, used where the old stub `label` was shown. */
@@ -191,28 +200,14 @@ const SERIES_DEFS: Record<DisplayKey, SeriesDef> = {
 };
 
 const STUB_CP: CpDetails = {
+  speedKn: 12,
+  consFoPerDay: 30,
+  consGoPerDay: 0.1,
   speed: '12.0 kt',
   consFo: '30.0 MT/day',
   consGo: '0.10 MT/day',
   weatherClause: 'BF ≤ 4 / DSS ≤ 3 / no adverse current',
   goodWeatherDef: 'BF ≤ 4, Wave ≤ 2.5 m, Current ≤ 0.5 kt',
-};
-
-const STUB_PERFORMANCE: PerformanceStats = {
-  vesselPerformance: [
-    { label: 'Avg Speed since COSP', value: '11.0 kt' },
-    { label: 'Performance Speed since COSP', value: '11.25 kt' },
-    { label: 'Speed Loss vs CP', value: '-0.75 kt' },
-    { label: 'Avg FO Cons', value: '34.6 MT/day' },
-    { label: 'Cons Over CP', value: '+4.6 MT/day' },
-  ],
-  goodWeather: [
-    { label: 'Good WX Hours', value: '120 hrs' },
-    { label: 'Good WX Distance', value: '1,260 NM' },
-    { label: 'Good WX Avg Speed', value: '10.8 kt' },
-    { label: 'Good WX Speed Loss', value: '-1.2 kt' },
-    { label: 'Good WX FO Gain/Loss', value: '+12.4 MT' },
-  ],
 };
 
 const STUB_NOON_REPORTS: NoonReportRow[] = [
@@ -442,6 +437,39 @@ function voyageToVesselInfo(v: Voyage): VesselInfo {
   };
 }
 
+function formatHours(value: number): string {
+  return `${value.toFixed(2)} HRS`;
+}
+
+function formatSpeed(value: number): string {
+  return `${value.toFixed(2)} KTS`;
+}
+
+function formatMts(value: number): string {
+  return `${value.toFixed(3)} MTS`;
+}
+
+function projectionTimeCell(deltaHours: number): InterimSummaryCell {
+  const tone = deltaHours >= 0 ? 'good' : 'bad';
+  const status = deltaHours >= 0 ? 'GAIN' : 'LOSS';
+  return {
+    primary: `${Math.abs(deltaHours).toFixed(2)} HRS (${status})`,
+    tone,
+  };
+}
+
+function projectionFuelCell(deltaFuel: number): InterimSummaryCell {
+  if (Math.abs(deltaFuel) < 0.0005) {
+    return { primary: formatMts(0) };
+  }
+  const tone = deltaFuel <= 0 ? 'good' : 'bad';
+  const status = deltaFuel <= 0 ? 'UNDER' : 'OVER';
+  return {
+    primary: `${formatMts(Math.abs(deltaFuel))} (${status})`,
+    tone,
+  };
+}
+
 export function InterimDashboardPage() {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -470,6 +498,27 @@ export function InterimDashboardPage() {
     () => legs.find((leg) => leg.no === selectedLegNo) ?? legs[0],
     [legs, selectedLegNo],
   );
+
+  const cpDetails = useMemo<CpDetails>(() => {
+    if (!activeLeg) return STUB_CP;
+    const defaultSpeedRow = activeLeg.speedCons.find((row) => row.isDefault) ?? activeLeg.speedCons[0];
+    const speedKn = Number(activeLeg.cpAboutSpeed || defaultSpeedRow?.speed || STUB_CP.speedKn) || STUB_CP.speedKn;
+    const consFoPerDay = Number(defaultSpeedRow?.dailyCons1 || STUB_CP.consFoPerDay) || STUB_CP.consFoPerDay;
+    const consGoPerDay = Number(defaultSpeedRow?.dailyCons2 || STUB_CP.consGoPerDay) || STUB_CP.consGoPerDay;
+    const windLimit = activeLeg.cpWinds || '4';
+    const swhLimit = activeLeg.cpSwh || '2.5';
+    const currentLimit = parseNum(activeLeg.cpCurrents || '0.5');
+    return {
+      speedKn,
+      consFoPerDay,
+      consGoPerDay,
+      speed: `${speedKn.toFixed(1)} kt`,
+      consFo: `${consFoPerDay.toFixed(2)} MT/day`,
+      consGo: `${consGoPerDay.toFixed(2)} MT/day`,
+      weatherClause: `BF ≤ ${windLimit} / DSS ≤ ${activeLeg.cpDss || '3'} / Currents ${activeLeg.cpCurrents || '0.5 kn'}`,
+      goodWeatherDef: `BF ≤ ${windLimit}, Wave ≤ ${swhLimit} m, Current ≤ ${currentLimit.toFixed(1)} kt`,
+    };
+  }, [activeLeg]);
 
   const toggleSeries = (key: string) => {
     setVisibleSeries((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -550,6 +599,114 @@ export function InterimDashboardPage() {
     };
   }, []);
 
+  const interimSummaryRows = useMemo<InterimSummaryRow[]>(() => {
+    const reports = STUB_NOON_REPORTS;
+    const windLimit = Number(activeLeg?.cpWinds || 4) || 4;
+    const swhLimit = Number(activeLeg?.cpSwh || 2.5) || 2.5;
+    const currentLimit = parseNum(activeLeg?.cpCurrents || '0.5') || 0.5;
+    const isGoodWeather = (row: NoonReportRow) =>
+      row.bf <= windLimit
+      && parseNum(row.sigWaveHeight) <= swhLimit
+      && Math.abs(parseNum(row.currentFactor)) <= currentLimit;
+
+    const aggregate = (rows: NoonReportRow[]) => {
+      const hours = rows.reduce((sum, row) => sum + row.hoursSlr, 0);
+      const distance = rows.reduce((sum, row) => sum + parseNum(row.distance), 0);
+      const fo = rows.reduce((sum, row) => sum + parseNum(row.fo), 0);
+      const go = rows.reduce((sum, row) => sum + parseNum(row.doGo), 0);
+      const performanceDistance = rows.reduce(
+        (sum, row) => sum + (parseNum(row.sog) - parseNum(row.currentFactor)) * row.hoursSlr,
+        0,
+      );
+      const avgSpeed = hours > 0 ? distance / hours : 0;
+      const avgPerformanceSpeed = hours > 0 ? performanceDistance / hours : 0;
+      const avgFo = hours > 0 ? (fo / hours) * 24 : 0;
+      const avgGo = hours > 0 ? (go / hours) * 24 : 0;
+      const cpHours = cpDetails.speedKn > 0 ? distance / cpDetails.speedKn : 0;
+      const cpFo = cpDetails.consFoPerDay * (hours / 24);
+      const cpGo = cpDetails.consGoPerDay * (hours / 24);
+      return {
+        hours,
+        distance,
+        fo,
+        go,
+        avgSpeed,
+        avgPerformanceSpeed,
+        avgFo,
+        avgGo,
+        projectedTime: cpHours - hours,
+        projectedFo: fo - cpFo,
+        projectedGo: go - cpGo,
+      };
+    };
+
+    const overall = aggregate(reports);
+    const goodWeather = aggregate(reports.filter(isGoodWeather));
+    const goodPct = overall.hours > 0 ? (goodWeather.hours / overall.hours) * 100 : 0;
+
+    return [
+      {
+        label: 'TIME @ SEA',
+        overall: {
+          primary: formatHours(overall.hours),
+        },
+        goodWeather: {
+          primary: `${formatHours(goodWeather.hours)} (${goodPct.toFixed(1)}%)`,
+        },
+      },
+      {
+        label: 'DISTANCE',
+        overall: { primary: `${overall.distance.toFixed(0)} NM` },
+        goodWeather: { primary: `${goodWeather.distance.toFixed(0)} NM` },
+      },
+      {
+        label: 'AVERAGE SPEED',
+        overall: { primary: formatSpeed(overall.avgSpeed) },
+        goodWeather: { primary: formatSpeed(goodWeather.avgSpeed) },
+      },
+      {
+        label: 'AVERAGE PERFORMANCE SPEED',
+        overall: { primary: formatSpeed(overall.avgPerformanceSpeed) },
+        goodWeather: { primary: formatSpeed(goodWeather.avgPerformanceSpeed) },
+      },
+      {
+        label: 'AVERAGE VLSFO',
+        overall: { primary: formatMts(overall.avgFo) },
+        goodWeather: { primary: formatMts(goodWeather.avgFo) },
+      },
+      {
+        label: 'AVERAGE LSMGO',
+        overall: { primary: formatMts(overall.avgGo) },
+        goodWeather: { primary: formatMts(goodWeather.avgGo) },
+      },
+      {
+        label: 'AVERAGE NONE',
+        overall: { primary: formatMts(0) },
+        goodWeather: { primary: formatMts(0) },
+      },
+      {
+        label: 'PROJECTED TIME',
+        overall: projectionTimeCell(overall.projectedTime),
+        goodWeather: projectionTimeCell(goodWeather.projectedTime),
+      },
+      {
+        label: 'PROJECTED VLSFO',
+        overall: projectionFuelCell(overall.projectedFo),
+        goodWeather: projectionFuelCell(goodWeather.projectedFo),
+      },
+      {
+        label: 'PROJECTED LSMGO',
+        overall: projectionFuelCell(overall.projectedGo),
+        goodWeather: projectionFuelCell(goodWeather.projectedGo),
+      },
+      {
+        label: 'PROJECTED NONE',
+        overall: { primary: formatMts(0) },
+        goodWeather: { primary: formatMts(0) },
+      },
+    ];
+  }, [activeLeg, cpDetails]);
+
   return (
     <div className="fv-interim">
       <header className="fv-voyage__header">
@@ -571,23 +728,23 @@ export function InterimDashboardPage() {
           <ul className="fv-interim__cp-list">
             <li>
               <span>{t('cpSpeed', 'Speed')}</span>
-              <strong>{STUB_CP.speed}</strong>
+              <strong>{cpDetails.speed}</strong>
             </li>
             <li>
               <span>{t('cpConsFo', 'Cons FO')}</span>
-              <strong>{STUB_CP.consFo}</strong>
+              <strong>{cpDetails.consFo}</strong>
             </li>
             <li>
               <span>{t('cpConsGo', 'Cons GO')}</span>
-              <strong>{STUB_CP.consGo}</strong>
+              <strong>{cpDetails.consGo}</strong>
             </li>
             <li>
               <span>{t('weatherClause', 'WX Clause')}</span>
-              <strong>{STUB_CP.weatherClause}</strong>
+              <strong>{cpDetails.weatherClause}</strong>
             </li>
             <li>
               <span>{t('goodWeatherDef', 'Good WX Def.')}</span>
-              <strong>{STUB_CP.goodWeatherDef}</strong>
+              <strong>{cpDetails.goodWeatherDef}</strong>
             </li>
           </ul>
         </div>
@@ -635,27 +792,34 @@ export function InterimDashboardPage() {
       </div>
 
       <div className="fv-interim__stats">
-        <section className="fv-interim__stats-card">
-          <h3>{t('vesselPerformance', 'Vessel Performance')}</h3>
-          <ul>
-            {STUB_PERFORMANCE.vesselPerformance.map((item) => (
-              <li key={item.label}>
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-              </li>
-            ))}
-          </ul>
-        </section>
-        <section className="fv-interim__stats-card">
-          <h3>{t('goodWeatherGainLoss', 'Good Weather Gain / Loss')}</h3>
-          <ul>
-            {STUB_PERFORMANCE.goodWeather.map((item) => (
-              <li key={item.label}>
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-              </li>
-            ))}
-          </ul>
+        <section className="fv-interim__stats-card fv-interim__stats-card--summary fv-interim__stats-card--summary-full">
+          <h3>{t('interimSummaryProjections', 'Interim Summary and Projections')}</h3>
+          <table className="fv-interim__summary-table fv-interim__summary-table--compact">
+            <thead>
+              <tr>
+                <th />
+                <th>{t('overall', 'Overall')}</th>
+                <th>{t('goodWeather', 'Good Weather')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {interimSummaryRows.map((row, idx) => (
+                <tr key={row.label} className={idx === 6 ? 'fv-interim__summary-separator' : undefined}>
+                  <th>{row.label}</th>
+                  <td>
+                    <strong className={row.overall.tone ? `fv-interim__summary-cell-value fv-interim__summary-tone fv-interim__summary-tone--${row.overall.tone}` : 'fv-interim__summary-cell-value'}>
+                      {row.overall.primary}
+                    </strong>
+                  </td>
+                  <td>
+                    <strong className={row.goodWeather.tone ? `fv-interim__summary-cell-value fv-interim__summary-tone fv-interim__summary-tone--${row.goodWeather.tone}` : 'fv-interim__summary-cell-value'}>
+                      {row.goodWeather.primary}
+                    </strong>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       </div>
 

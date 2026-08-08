@@ -69,9 +69,13 @@ export function AreaConstraintEditLayer({
             {/* Midpoint handles (drawn first so vertices sit on top). */}
             {ring.map((pt, pi) => {
               const next = ring[(pi + 1) % ring.length];
+              // Normalize next longitude to shortest-path midpoint (antimeridian-safe)
+              let nextLon = next[1];
+              while (nextLon - pt[1] > 180) nextLon -= 360;
+              while (nextLon - pt[1] < -180) nextLon += 360;
               const mid: [number, number] = [
                 round5((pt[0] + next[0]) / 2),
-                round5((pt[1] + next[1]) / 2),
+                round5((pt[1] + nextLon) / 2),
               ];
               return (
                 <Marker

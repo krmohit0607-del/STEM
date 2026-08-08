@@ -1,6 +1,7 @@
 /** Shared types for the Voyage Details page and its section components. */
 
 export interface SpeedConsRow {
+  isDefault?: boolean;
   description: string;
   speed: string;
   fuelType1: string;
@@ -29,6 +30,7 @@ export interface EngineSpeedConsRow {
  */
 export interface SubLeg {
   type: string;
+  status: string;
   from: string;
   to: string;
   etd: string;
@@ -41,7 +43,12 @@ export interface SubLeg {
   cpSwh: string;
   cpMinHours: string;
   cpCurrents: string;
+  cpAllowableFuelMethod: string;
   cpGoodWeatherSelection: string;
+  cpAboutSpeedUnit: string;
+  cpAboutSpeed: string;
+  cpTimeGain: string;
+  cpTimeLoss: string;
 }
 
 export interface LegRow {
@@ -51,6 +58,7 @@ export interface LegRow {
   from: string;
   to: string;
   etd: string;
+  etdTimezone: string;
   status: string;
   etdLocalTime: boolean;
   autoRoute: boolean;
@@ -62,6 +70,7 @@ export interface LegRow {
   rollPeriod: string;
   // Optional sub-legs / intermediate ports within this main leg.
   subLegs: SubLeg[];
+  useDifferentCp?: boolean;
   // Weather safety limits
   maxSwh: string;
   maxWind: string;
@@ -74,6 +83,7 @@ export interface LegRow {
   cpCurrents: string;
   cpAllowableFuelMethod: string;
   cpGoodWeatherSelection: string;
+  cpAboutSpeedUnit: string;
   cpAboutSpeed: string;
   cpTimeGain: string;
   cpTimeLoss: string;
@@ -254,11 +264,12 @@ export const CP_CURRENTS_OPTIONS = [
 ];
 export const CP_GOOD_WEATHER_OPTIONS = ['50%', '75%', 'Standard'];
 export const CP_ALLOWABLE_FUEL_METHOD_OPTIONS = [
-  '5% Method',
-  'Double About Method',
-  'Gaz Energy Method',
-  'Half Knots Method',
+  '5%',
+  'Double About',
+  'Gaz Energy',
+  'Half Knots',
 ];
+export const CP_ABOUT_SPEED_UNIT_OPTIONS = ['Kts', '%'];
 export const OPTIMIZATION_MODE_OPTIONS = [
   'Min Fuel',
   'Min Time',

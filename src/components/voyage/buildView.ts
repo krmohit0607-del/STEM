@@ -27,12 +27,7 @@ export function normalizeLegs(legs: LegRow[]): LegRow[] {
     .sort((a, b) => legTypeOrder(a.leg.type) - legTypeOrder(b.leg.type) || a.idx - b.idx)
     .map(({ leg }, idx) => {
       const from = idx === 0 ? leg.from : prevTo;
-      let subPrev = from;
-      const subLegs = leg.subLegs.map((s) => {
-        const next = { ...s, from: subPrev };
-        subPrev = s.to;
-        return next;
-      });
+      const subLegs = leg.subLegs.map((s) => ({ ...s }));
       const to = subLegs.length ? subLegs[subLegs.length - 1].to : leg.to;
       prevTo = to;
       return { ...leg, no: `LEG-${idx + 1}`, from, to, subLegs };
@@ -78,7 +73,8 @@ function toNumber(value: string): number {
 
 /** Default Speed & Cons rows shown for every leg (ECO / FULL / CUSTOM). */
 export function emptySpeedCons(): SpeedConsRow[] {
-  return ['ECO', 'FULL', 'CUSTOM'].map((description) => ({
+  return ['ECO', 'FULL', 'CUSTOM'].map((description, idx) => ({
+    isDefault: idx === 0,
     description,
     speed: '',
     fuelType1: 'VLSFO',
@@ -121,6 +117,8 @@ export function emptyLeg(no: string): LegRow {  return {
     gm: '',
     rollPeriod: '',
     subLegs: [],
+    useDifferentCp: false,
+    etdTimezone: '',
     maxSwh: '',
     maxWind: '',
     maxSeaState: '',
@@ -129,8 +127,9 @@ export function emptyLeg(no: string): LegRow {  return {
     cpSwh: '',
     cpMinHours: '',
     cpCurrents: '',
-    cpAllowableFuelMethod: '',
-    cpGoodWeatherSelection: '',
+    cpAllowableFuelMethod: '5%',
+    cpGoodWeatherSelection: 'Standard',
+    cpAboutSpeedUnit: 'Kts',
     cpAboutSpeed: '',
     cpTimeGain: '',
     cpTimeLoss: '',
@@ -309,9 +308,9 @@ export function buildView(v: Voyage): VoyageView {
   ];
 
   const mkSpeedCons = (): SpeedConsRow[] => [
-    { description: 'ECO', speed: ecoSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: ecoCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: 'Biogas', dailyCons3: '0.1' },
-    { description: 'FULL', speed: fullSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: fullCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: 'Biogas', dailyCons3: '0.1' },
-    { description: 'CUSTOM', speed: customSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: customCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.4', fuelType3: '', dailyCons3: '' },
+    { isDefault: true, description: 'ECO', speed: ecoSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: ecoCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: 'Biogas', dailyCons3: '0.1' },
+    { isDefault: false, description: 'FULL', speed: fullSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: fullCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: 'Biogas', dailyCons3: '0.1' },
+    { isDefault: false, description: 'CUSTOM', speed: customSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: customCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.4', fuelType3: '', dailyCons3: '' },
   ];
 
   const mkLeg = (
@@ -334,6 +333,7 @@ export function buildView(v: Voyage): VoyageView {
     from,
     to,
     etd,
+    etdTimezone: '',
     status,
     etdLocalTime: true,
     autoRoute: true,
@@ -346,13 +346,14 @@ export function buildView(v: Voyage): VoyageView {
     maxSwh: swh,
     maxWind: wind,
     maxSeaState: sea,
-    cpWinds: 'BF 5',
+    cpWinds: '5',
     cpDss: '4',
     cpSwh: '2.5',
     cpMinHours: '12',
     cpCurrents: '0.5 kn',
-    cpAllowableFuelMethod: 'VLSFO',
-    cpGoodWeatherSelection: 'Noon-to-Noon',
+    cpAllowableFuelMethod: '5%',
+    cpGoodWeatherSelection: 'Standard',
+    cpAboutSpeedUnit: 'Kts',
     cpAboutSpeed: ecoSpeed.toFixed(1),
     cpTimeGain: '0',
     cpTimeLoss: '0',
@@ -385,8 +386,8 @@ export function buildView(v: Voyage): VoyageView {
 
   // Seed LEG-2 with an intermediate port to demonstrate sub-legs.
   legs[1].subLegs = [
-    { type: 'Laden', from: interim, to: 'Port Said (EGPSD)', etd: addDays(v.etdDisplay, 4), autoRoute: true, cpWinds: 'BF 5', cpDss: '4', cpSwh: '2.5', cpMinHours: '12', cpCurrents: '0.5 kn', cpGoodWeatherSelection: 'Noon-to-Noon' },
-    { type: 'Laden', from: 'Port Said (EGPSD)', to: v.portTo, etd: addDays(v.etdDisplay, 8), autoRoute: true, cpWinds: 'BF 5', cpDss: '4', cpSwh: '2.5', cpMinHours: '12', cpCurrents: '0.5 kn', cpGoodWeatherSelection: 'Noon-to-Noon' },
+    { type: 'Laden', status: 'Active', useDefaultCp: true, from: interim, to: 'Port Said (EGPSD)', etd: addDays(v.etdDisplay, 4), autoRoute: true, cpWinds: '5', cpDss: '4', cpSwh: '2.5', cpMinHours: '12', cpCurrents: '0.5 kn', cpAllowableFuelMethod: '5%', cpGoodWeatherSelection: 'Standard', cpAboutSpeedUnit: 'Kts', cpAboutSpeed: ecoSpeed.toFixed(1), cpTimeGain: '0', cpTimeLoss: '0' },
+    { type: 'Laden', status: 'Planning', useDefaultCp: true, from: 'Port Said (EGPSD)', to: v.portTo, etd: addDays(v.etdDisplay, 8), autoRoute: true, cpWinds: '5', cpDss: '4', cpSwh: '2.5', cpMinHours: '12', cpCurrents: '0.5 kn', cpAllowableFuelMethod: '5%', cpGoodWeatherSelection: 'Standard', cpAboutSpeedUnit: 'Kts', cpAboutSpeed: ecoSpeed.toFixed(1), cpTimeGain: '0', cpTimeLoss: '0' },
   ];
 
   return {

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { loadVoyageShared } from '../data/voyageOverrides';
 import { PORT_COORDS } from '../data/fleet';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
 import { type OptimizedRoute } from '../data/routeOptimizer';
@@ -21,6 +22,11 @@ import { bumpSavedRoutes } from '../data/optimizationStore';
 import { OptimizationRunDialog } from './OptimizationRunDialog';
 import { PortInput } from './PortInput';
 import { useVesselPosition } from '../data/vesselPosition';
+import {
+  setRouteReportFuelSelection,
+  setRouteReportSpeedSelection,
+  useRouteReportMarkers,
+} from '../data/routeReportMarkers';
 
 /**
  * Route Explorer page — `/route-explorer`.
@@ -63,6 +69,17 @@ interface Waypoint {
    */
   legType?: 'rhumb' | 'greatcircle';
 }
+
+interface SpeedProfileOption {
+  id: string;
+  label: string;
+  speedKts: number;
+  isDefault?: boolean;
+}
+
+const REPORT_FUEL_OPTIONS = ['VLSFO', 'LSMGO', 'HSFO', 'MDO', 'MGO', 'LNG', 'Methanol'];
+
+const REPORT_LOCK_MAX_DIST_NM = 250;
 
 const STUB_WAYPOINTS: Waypoint[] = [
   {
@@ -648,6 +665,104 @@ export function RouteExplorerPage() {
   const shipMarkers = useMapShipMarkers();
   const plannedColor = useMapPlannedColor();
   const activeWaypoints = useMapRouteWaypoints();
+  const reportMarkers = useRouteReportMarkers();
+  const sharedLegSpeedProfiles = useMemo(
+    () => loadVoyageShared(selectedVoyage?.id)?.legSpeedProfiles ?? [],
+    [selectedVoyage?.id],
+  );
+
+  // Received reports (non-interpolated tracksheet rows) anchor the route:
+  // while editing, their nearest waypoint cannot be moved/deleted.
+  const lockedWaypointIds = useMemo(() => {
+    const anchors = reportMarkers.filter((r) => !r.isInterpolated);
+    if (anchors.length === 0 || waypoints.length === 0) return new Set<string>();
+    const lock = new Set<string>();
+    for (const anchor of anchors) {
+      let bestId: string | null = null;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (const wp of waypoints) {
+        const lat = dmToDec(wp.lat);
+        const lon = dmToDec(wp.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const d = haversineNM(lat, lon, anchor.pos[0], anchor.pos[1]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestId = wp.id;
+        }
+      }
+      if (bestId && bestDist <= REPORT_LOCK_MAX_DIST_NM) lock.add(bestId);
+    }
+    return lock;
+  }, [reportMarkers, waypoints]);
+
+  const activeLegSpeedProfile = useMemo(() => {
+    if (sharedLegSpeedProfiles.length === 0) return null;
+    return (
+      sharedLegSpeedProfiles.find((leg) => /active/i.test(leg.status)) ??
+      sharedLegSpeedProfiles[0]
+    );
+  }, [sharedLegSpeedProfiles]);
+
+  const reportSpeedOptions = useMemo<SpeedProfileOption[]>(() => {
+    const legRows = activeLegSpeedProfile?.speedCons
+      ?.filter((row) => Number.isFinite(Number(row.speed)) && Number(row.speed) > 0)
+      .map((row, idx) => ({
+        id: `legspd-${idx}-${row.description || 'profile'}`,
+        label: `${row.description || `Profile ${idx + 1}`} (${Number(row.speed).toFixed(1)} kt / ${row.dailyCons1 || '—'} mt/day)`,
+        speedKts: Number(row.speed),
+        isDefault: !!row.isDefault,
+      }));
+    if (legRows && legRows.length > 0) {
+      const hasDefault = legRows.some((row) => row.isDefault);
+      return legRows.map((row, idx) => ({ ...row, isDefault: hasDefault ? row.isDefault : idx === 0 }));
+    }
+    const speeds = Array.from(
+      new Set(
+        waypoints
+          .map((wp) => Number(wp.speed))
+          .filter((v) => Number.isFinite(v) && v > 0)
+          .map((v) => Number(v.toFixed(1))),
+      ),
+    ).sort((a, b) => a - b);
+    const eco = speeds[0] ?? 10;
+    const full = speeds[speeds.length - 1] ?? 13;
+    const custom = Number(((eco + full) / 2).toFixed(1));
+    const base: SpeedProfileOption[] = [
+      { id: 'eco', label: `ECO (${eco.toFixed(1)} kt)`, speedKts: eco },
+      { id: 'full', label: `FULL (${full.toFixed(1)} kt)`, speedKts: full },
+      { id: 'custom', label: `CUSTOM (${custom.toFixed(1)} kt)`, speedKts: custom },
+    ];
+    const extras = speeds.map((v) => ({
+      id: `spd-${v.toFixed(1)}`,
+      label: `${v.toFixed(1)} kt`,
+      speedKts: v,
+    }));
+    const seen = new Set<string>();
+    return [...base, ...extras].filter((o) => {
+      const key = `${o.label}|${o.speedKts}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [activeLegSpeedProfile, waypoints]);
+
+  const defaultReportFuelType = useMemo(() => {
+    const defaultRow = activeLegSpeedProfile?.speedCons?.find((row) => !!row.isDefault)
+      ?? activeLegSpeedProfile?.speedCons?.[0];
+    return defaultRow?.fuelType1 || REPORT_FUEL_OPTIONS[0];
+  }, [activeLegSpeedProfile]);
+
+  const onSelectReportSpeed = (reportId: string, opt: SpeedProfileOption) => {
+    setRouteReportSpeedSelection(reportId, opt.label, opt.speedKts);
+  };
+
+  const reportFuelOptions = useMemo(() => REPORT_FUEL_OPTIONS, []);
+
+  const onSelectReportFuel = (reportId: string, fuelType: string) => {
+    setRouteReportFuelSelection(reportId, fuelType);
+  };
+
+  const isWaypointLocked = (id: string) => lockedWaypointIds.has(id);
 
   // Last reported vessel position (from the tracksheet's last row).
   const vesselPos = useVesselPosition();
@@ -728,10 +843,11 @@ export function RouteExplorerPage() {
           lonLabel: wp.lon,
           distFromPrev: Math.round(wp.distanceFromPrev),
           distFromStart: Math.round(cumulative),
+          locked: isWaypointLocked(wp.id),
         };
       })
       .filter((p) => !Number.isNaN(p.lat) && !Number.isNaN(p.lon));
-  }, [waypoints]);
+  }, [waypoints, lockedWaypointIds]);
 
   // Publish the route currently drawn on the map so the Route Simulator (in
   // the bottom drawer) can play it back as the "Active" route. The path is
@@ -812,14 +928,15 @@ export function RouteExplorerPage() {
   const deletePoint = (id: string) => {
     setWaypoints((prev) => {
       const wp = prev.find((x) => x.id === id);
-      // Departure / arrival ports are fixed endpoints — keep them.
-      if (!wp || wp.isPort) return prev;
+      // Departure/arrival and report-anchored waypoints are fixed.
+      if (!wp || wp.isPort || isWaypointLocked(id)) return prev;
       return recomputeGeometry(prev.filter((x) => x.id !== id));
     });
     setSelected((prev) => prev.filter((x) => x !== id));
   };
 
   const moveWaypoint = (id: string, lat: number, lon: number) => {
+    if (isWaypointLocked(id)) return;
     setWaypoints((prev) =>
       recomputeGeometry(
         prev.map((wp) =>
@@ -898,10 +1015,14 @@ export function RouteExplorerPage() {
   const deleteCheckedWaypoints = () => {
     if (checkedIds.length === 0) return;
     setWaypoints((prev) =>
-      recomputeGeometry(prev.filter((wp) => wp.isPort || !checkedIds.includes(wp.id))),
+      recomputeGeometry(
+        prev.filter(
+          (wp) => wp.isPort || isWaypointLocked(wp.id) || !checkedIds.includes(wp.id),
+        ),
+      ),
     );
     setSelected((prev) => prev.filter((id) => !checkedIds.includes(id)));
-    setCheckedIds([]);
+    setCheckedIds((prev) => prev.filter((id) => isWaypointLocked(id)));
   };
 
   /** Open the "Set speed" popup for the checked waypoints. */
@@ -1021,6 +1142,7 @@ export function RouteExplorerPage() {
     key: K,
     value: Waypoint[K],
   ) => {
+    if (isWaypointLocked(id) && (key === 'lat' || key === 'lon')) return;
     setWaypoints((prev) =>
       prev.map((wp) => (wp.id === id ? { ...wp, [key]: value } : wp)),
     );
@@ -1221,6 +1343,7 @@ export function RouteExplorerPage() {
                                     <input
                                       type="text"
                                       value={selectedWaypoint.lat}
+                                      disabled={isWaypointLocked(selectedWaypoint.id)}
                                       onChange={(e) =>
                                         updateWaypoint(selectedWaypoint.id, 'lat', e.target.value)
                                       }
@@ -1232,6 +1355,7 @@ export function RouteExplorerPage() {
                                     <input
                                       type="text"
                                       value={selectedWaypoint.lon}
+                                      disabled={isWaypointLocked(selectedWaypoint.id)}
                                       onChange={(e) =>
                                         updateWaypoint(selectedWaypoint.id, 'lon', e.target.value)
                                       }
@@ -1319,7 +1443,7 @@ export function RouteExplorerPage() {
                                   type="button"
                                   className="fv-route__btn fv-route__btn--danger"
                                   onClick={() => deletePoint(selectedWaypoint.id)}
-                                  disabled={selectedWaypoint.isPort}
+                                  disabled={selectedWaypoint.isPort || isWaypointLocked(selectedWaypoint.id)}
                                 >
                                   <i className="fas fa-trash" aria-hidden="true" />{' '}
                                   {t('delete', 'Delete')}
@@ -1383,6 +1507,12 @@ export function RouteExplorerPage() {
               routes={overlayRoutes}
               selectedRouteId={selectedRouteId}
               shipMarkers={allShipMarkers}
+              reportMarkers={reportMarkers}
+              reportSpeedOptions={reportSpeedOptions}
+              reportFuelOptions={reportFuelOptions}
+              defaultReportFuelType={defaultReportFuelType}
+              onSetReportSpeed={onSelectReportSpeed}
+              onSetReportFuel={onSelectReportFuel}
               plannedRouteColor={plannedColor}
               activeWaypoints={activeWaypoints}
               onSelectRoute={setSelectedRouteId}

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, Fragment } from 'react';
 import type { ReactNode, Dispatch, SetStateAction } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
-import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useSelectedVoyage, writeSelectedVoyageId } from '../data/selectedVoyage';
 import type { Voyage } from '../data/voyages';
-import { makeBlankVoyage } from '../data/voyages';
+import { makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { addNotification, copyLaytimeToPostfix, useCpdds, useFixtureNumbers } from '../data/workflow';
 import { loadClients, saveClients, SERVICE_PROVIDER_TYPES } from '../data/clients';
 import { addBunkerRequirement } from '../data/bunker';
@@ -12,7 +12,6 @@ import { loadVessels, saveVessels } from '../data/vessels';
 import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
 import { NoVesselSelected } from './NoVesselSelected';
 import { WorkflowStatusSelect } from './WorkflowStatusSelect';
-import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
 import { LAYTIME_TERMS_OPTIONS, PORT_TYPE_OPTIONS } from '../data/estimationOptions';
 import { EtaCalculation, RobCalculation } from './EtaRobCalculation';
 import { VoyageEstimation } from './VoyageEstimation';
@@ -105,14 +104,22 @@ export interface Recap {
   hireCurrency: string;
   freightCurrency: string;
   cargoQtyUnit: string;
+  charterHirePerDay: string;
+  charterHireCurrency: string;
   // --- hire payment schedule ---------------------------------------------
   firstHirePeriodDays: string;
   firstHireInclude: string;
   firstHireDays: string;
   firstHireBasis: string;
   hireEveryDays: string;
+  charterFirstHirePeriodDays: string;
+  charterFirstHireInclude: string;
+  charterFirstHireDays: string;
+  charterFirstHireBasis: string;
+  charterHireEveryDays: string;
   // --- hire payment workflow (per installment: status + ballast + off-hire) -----
   hirePayState: Record<string, HirePayEntry>;
+  charterHirePayState: Record<string, HirePayEntry>;
   // --- freight payment ----------------------------------------------------
   freightPaymentDays: string;
   freightPaymentBasis: string;
@@ -131,6 +138,7 @@ export interface Recap {
   freightLaytime?: FreightLaytimeData;
   // --- Independent duplicated hire installments (kept out of the live schedule) --
   hireDuplicates?: HireDuplicate[];
+  charterHireDuplicates?: HireDuplicate[];
   // --- Estimated voyage cash flow (Voyage Details tab) --------------------
   cashflow?: CashflowData;
   // --- Vessel reports (Vessel Reports tab) -------------------------------
@@ -317,11 +325,90 @@ interface FreightInvoice {
   blQtyOverride?: string;      // cargo / B-L quantity (MT)
   freightRateOverride?: string; // freight rate per MT
   adcomOverride?: string;      // address commission (%)
+  claimIds?: string[];
 }
 
 interface FreightLaytimeData {
   invoices: FreightInvoice[];
   laytimes: LaytimePort[];
+  settlement?: FreightSettlementData;
+}
+
+interface SettlementAttachment {
+  id: string;
+  name: string;
+  sizeKb: number;
+  at: string;
+}
+
+const STATUS_OPTIONS_PDA = ['PDA Draft', 'PDA Submitted', 'PDA Approved', 'FDA Received', 'Approved', 'Closed'];
+const STATUS_OPTIONS_AGENT_SERVICE = ['Open', 'Pending', 'Under Review', 'Approved', 'Paid', 'Closed', 'Settled'];
+const STATUS_OPTIONS_CLAIMS = ['Open', 'Under Review', 'Approved', 'Settled', 'Closed', 'Rejected'];
+const CLAIM_CHARGE_TO_OPTIONS = ['Owners', 'Charterers', 'Agents', 'Surveyor', 'Receiver', 'Shipper', 'P&I Club', 'Terminal'];
+
+interface PdaRow {
+  id: string;
+  port: string;
+  agent: string;
+  due?: string;
+  currency: string;
+  estimated: number;
+  advance: number;
+  fdaFinal: number;
+  status: string;
+  approval: string;
+  attachments?: SettlementAttachment[];
+}
+
+interface AgentInvoiceRow {
+  id: string;
+  invoiceNo: string;
+  vendor: string;
+  category: string;
+  port: string;
+  due: string;
+  currency: string;
+  amount: number;
+  approved: number;
+  paid: number;
+  dept: string;
+  accounts: string;
+  status: string;
+  attachments?: SettlementAttachment[];
+}
+
+interface ServiceRow {
+  id: string;
+  service: string;
+  vendor: string;
+  invoice: string;
+  currency: string;
+  cost: number;
+  tax: number;
+  reason: string;
+  status: string;
+  attachments?: SettlementAttachment[];
+}
+
+interface ClaimRow {
+  id: string;
+  type: string;
+  reference: string;
+  chargeTo?: string;
+  owner?: string; // legacy key kept for backward compatibility
+  due?: string;
+  currency: string;
+  amount: number;
+  settlement: number;
+  status: string;
+  attachments?: SettlementAttachment[];
+}
+
+interface FreightSettlementData {
+  pda: PdaRow[];
+  agentInvoices: AgentInvoiceRow[];
+  services: ServiceRow[];
+  claims: ClaimRow[];
 }
 
 /** One inward (receivable) or outward (payable) line in the voyage cash flow. */
@@ -357,7 +444,7 @@ interface VesselReport {
 }
 
 /** Recap keys whose value is a plain string (everything except arrays). */
-type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'freightLaytime' | 'hireDuplicates' | 'cashflow' | 'vesselReports' | 'eua'>;
+type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'cashflow' | 'vesselReports' | 'eua'>;
 
 interface DocItem {
   id: string;
@@ -377,6 +464,14 @@ interface Alert {
   text: string;
   level: 'info' | 'warn' | 'alert';
 }
+
+interface DuePopupItem {
+  id: string;
+  text: string;
+  level: 'info' | 'warn' | 'alert';
+}
+
+const OPS_DUE_POPUP_SNOOZE_MS = 3 * 60 * 60 * 1000;
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -402,6 +497,198 @@ function parseDMY(s: string): Date | null {
 function daysBetween(a: Date | null, b: Date | null): number {
   if (!a || !b) return 0;
   return Math.max(0, (b.getTime() - a.getTime()) / 86_400_000);
+}
+
+function startOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function dayDiffFromNow(target: Date, now: Date): number {
+  const ms = startOfDay(target).getTime() - startOfDay(now).getTime();
+  return Math.round(ms / 86_400_000);
+}
+
+function fmtShortDate(d: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  return `${p2(d.getDate())}-${p2(d.getMonth() + 1)}-${d.getFullYear()}`;
+}
+
+function parseFlexibleDate(raw: string): Date | null {
+  const dmy = parseDMY(raw);
+  if (dmy) return dmy;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? new Date(t) : null;
+}
+
+function parseNoticeDays(raw: string): number[] {
+  return Array.from(
+    new Set(
+      (raw || '')
+        .split(/[^\d]+/)
+        .map((x) => parseInt(x, 10))
+        .filter((n) => Number.isFinite(n) && n >= 0),
+    ),
+  ).sort((a, b) => b - a);
+}
+
+function addDaysDate(d: Date, n: number): Date {
+  return new Date(d.getTime() + n * 86_400_000);
+}
+
+function addBankingDaysDate(d: Date, n: number): Date {
+  const out = new Date(d);
+  let added = 0;
+  while (added < n) {
+    out.setDate(out.getDate() + 1);
+    const dow = out.getDay();
+    if (dow !== 0 && dow !== 6) added += 1;
+  }
+  return out;
+}
+
+function moveOffWeekendDate(d: Date): Date {
+  const out = new Date(d);
+  const dow = out.getDay();
+  if (dow === 0) out.setDate(out.getDate() - 2);
+  else if (dow === 6) out.setDate(out.getDate() - 1);
+  return out;
+}
+
+function readDuePopupSnoozeMap(storageKey: string): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function writeDuePopupSnoozeMap(storageKey: string, map: Record<string, number>): void {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(map));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function buildDuePopupItems(recap: Recap, pnl: Pnl, voyage: Voyage, now: Date): DuePopupItem[] {
+  const out: DuePopupItem[] = [];
+  const pushDue = (id: string, label: string, dueDateRaw: string, baseLevel: Alert['level'] = 'warn') => {
+    const due = parseFlexibleDate(dueDateRaw);
+    if (!due) return;
+    const diff = dayDiffFromNow(due, now);
+    if (diff !== 0 && diff !== 1) return;
+    const when = diff === 0 ? 'today' : 'tomorrow';
+    out.push({
+      id: `${id}|${fmtShortDate(due)}`,
+      text: `${label} is due ${when} (${fmtShortDate(due)}).`,
+      level: diff === 0 ? 'alert' : baseLevel,
+    });
+  };
+
+  const deliveryDt = parseDMY(recap.deliveryDateTime);
+  const redeliveryDt = parseDMY(recap.redeliveryDateTime);
+  const deliveryNoticeDays = parseNoticeDays(recap.deliveryNotices);
+  const redeliveryNoticeDays = parseNoticeDays(recap.redeliveryNotices);
+  if (deliveryDt) {
+    deliveryNoticeDays.forEach((d) => {
+      const due = addDaysDate(deliveryDt, -d);
+      pushDue(`notice:delivery:${d}`, `Delivery notice (${d}-day)`, fmtShortDate(due), 'info');
+    });
+  }
+  if (redeliveryDt) {
+    redeliveryNoticeDays.forEach((d) => {
+      const due = addDaysDate(redeliveryDt, -d);
+      pushDue(`notice:redelivery:${d}`, `Redelivery notice (${d}-day)`, fmtShortDate(due), 'info');
+    });
+  }
+
+  const start = parseDMY(recap.deliveryDateTime);
+  if (start) {
+    const firstPeriod = Math.max(1, num(recap.firstHirePeriodDays) || 15);
+    const dueBank = Math.max(0, num(recap.firstHireDays) || 3);
+    const subPeriod = Math.max(1, num(recap.hireEveryDays) || 15);
+    let covered = 0;
+    let n = 1;
+    while (covered < pnl.days - 0.01 && n <= 200) {
+      const key = String(n);
+      const state = recap.hirePayState[key];
+      const deleted = state?.deleted === true;
+      const status = state?.status || 'Draft';
+      const periodLen = n === 1 ? firstPeriod : subPeriod;
+      const days = Math.min(periodLen, pnl.days - covered);
+      const from = addDaysDate(start, covered);
+      const duePre = n === 1 ? addBankingDaysDate(start, dueBank) : from;
+      const due = moveOffWeekendDate(duePre);
+      if (!deleted && status !== 'Paid & Locked') {
+        pushDue(`hire:${key}`, `${ordinal(n)} hire payment`, fmtShortDate(due), 'warn');
+      }
+      covered += days;
+      n += 1;
+    }
+  }
+
+  const voyageType = (recap.voyageFixType || '').toUpperCase();
+  const [inType = '', outType = ''] = voyageType.split('-');
+  const dualTimeCharter = (inType === 'TCIN' || inType === 'TCTIN') && (outType === 'TCOUT' || outType === 'TCTOUT');
+  if (start && dualTimeCharter) {
+    const firstPeriod = Math.max(1, num(recap.charterFirstHirePeriodDays) || 15);
+    const dueBank = Math.max(0, num(recap.charterFirstHireDays) || 3);
+    const subPeriod = Math.max(1, num(recap.charterHireEveryDays) || 15);
+    let covered = 0;
+    let n = 1;
+    while (covered < pnl.days - 0.01 && n <= 200) {
+      const periodLen = n === 1 ? firstPeriod : subPeriod;
+      const days = Math.min(periodLen, pnl.days - covered);
+      const from = addDaysDate(start, covered);
+      const duePre = n === 1 ? addBankingDaysDate(start, dueBank) : from;
+      const due = moveOffWeekendDate(duePre);
+      pushDue(`hire-charter:${n}`, `${ordinal(n)} charterers hire payment`, fmtShortDate(due), 'warn');
+      covered += days;
+      n += 1;
+    }
+  }
+
+  const stored = recap.freightLaytime;
+  const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
+  const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
+  const settlement = fl.settlement ?? seedFreightSettlement(voyage);
+
+  fl.invoices.forEach((inv) => {
+    if (!inv.dueDate || inv.status === 'Paid') return;
+    const label = `${inv.kind === 'Freight' ? 'Freight' : 'Demurrage'} invoice ${inv.invoiceNo || ''}`.trim();
+    pushDue(`freight:${inv.id}`, label, inv.dueDate, 'warn');
+  });
+
+  settlement.agentInvoices.forEach((inv) => {
+    if (!inv.due) return;
+    const outstanding = (inv.approved || inv.amount) - inv.paid;
+    if (outstanding <= 0) return;
+    if (/closed|settled/i.test(inv.status) || /paid/i.test(inv.accounts)) return;
+    pushDue(`agent:${inv.id}`, `Agent invoice ${inv.invoiceNo || ''}`.trim(), inv.due, 'warn');
+  });
+
+  settlement.pda.forEach((p) => {
+    if (!p.due) return;
+    const expected = p.fdaFinal > 0 ? p.fdaFinal : p.estimated;
+    const outstanding = expected - p.advance;
+    if (outstanding <= 0) return;
+    if (/closed/i.test(p.status)) return;
+    pushDue(`pda:${p.id}`, `PDA payment ${p.port || ''}`.trim(), p.due, 'warn');
+  });
+
+  settlement.claims.forEach((c) => {
+    if (!c.due) return;
+    if (claimOutstanding(c) <= 0) return;
+    if (/settled|closed|rejected/i.test(c.status)) return;
+    const ref = c.reference || c.type || 'Claim';
+    pushDue(`claim:${c.id}`, `Claim settlement ${ref}`, c.due, 'warn');
+  });
+
+  return out;
 }
 
 /* --------------------------------------------------------- seed the recap */
@@ -494,8 +781,8 @@ function etaEndRob(plan: EtaPlan): { v: number; m: number } {
   return { v: last ? last.robV : num(plan.startRobVlsfo), m: last ? last.robM : num(plan.startRobMgo) };
 }
 
-export function seedRecap(voyage: Voyage | undefined): Recap {
-  return {
+export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
+  const base: Recap = {
     vesselName: voyage?.vessel || 'AP JADRAN',
     vesselEmail: '',
     voyageFixType: 'TCTIN-VOUT',
@@ -558,12 +845,20 @@ export function seedRecap(voyage: Voyage | undefined): Recap {
     hireCurrency: 'USD',
     freightCurrency: 'USD',
     cargoQtyUnit: 'MT',
+    charterHirePerDay: '12,500.00',
+    charterHireCurrency: 'USD',
     firstHirePeriodDays: '15',
     firstHireInclude: 'Bunkers',
     firstHireDays: '3',
     firstHireBasis: 'Banking Days',
     hireEveryDays: '15',
+    charterFirstHirePeriodDays: '15',
+    charterFirstHireInclude: 'None',
+    charterFirstHireDays: '3',
+    charterFirstHireBasis: 'Banking Days',
+    charterHireEveryDays: '15',
     hirePayState: {},
+    charterHirePayState: {},
     freightPaymentDays: '3',
     freightPaymentBasis: 'Banking Days',
     serviceProviders: [],
@@ -631,6 +926,82 @@ export function seedRecap(voyage: Voyage | undefined): Recap {
       tropicalDraft: '13.17',
     },
   };
+
+  if (!blank) return base;
+
+  const blankRecap = { ...base } as Recap;
+  for (const key of Object.keys(blankRecap) as (keyof Recap)[]) {
+    if (typeof blankRecap[key] === 'string') {
+      ((blankRecap as unknown) as Record<string, unknown>)[key] = '';
+    }
+  }
+
+  blankRecap.vesselName = voyage?.vessel || '';
+  blankRecap.hireCurrency = 'USD';
+  blankRecap.freightCurrency = 'USD';
+  blankRecap.cargoQtyUnit = 'MT';
+  blankRecap.charterHireCurrency = 'USD';
+  blankRecap.firstHirePeriodDays = '15';
+  blankRecap.firstHireInclude = 'None';
+  blankRecap.firstHireDays = '3';
+  blankRecap.firstHireBasis = 'Banking Days';
+  blankRecap.hireEveryDays = '15';
+  blankRecap.charterFirstHirePeriodDays = '15';
+  blankRecap.charterFirstHireInclude = 'None';
+  blankRecap.charterFirstHireDays = '3';
+  blankRecap.charterFirstHireBasis = 'Banking Days';
+  blankRecap.charterHireEveryDays = '15';
+  blankRecap.freightPaymentDays = '3';
+  blankRecap.freightPaymentBasis = 'Banking Days';
+  blankRecap.bunkers = [
+    { fuel: 'VLSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+    { fuel: 'ULSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+    { fuel: 'MGO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+  ];
+  blankRecap.etaPlan = {
+    startDep: '',
+    startRobVlsfo: '',
+    startRobMgo: '',
+    weatherMargin: '',
+    perf: {
+      speedMode: 'Full',
+      full: { ballast: '', laden: '' },
+      eco: { ballast: '', laden: '' },
+      customs: [],
+      mainNormal: { type: 'VLSFO', ballast: '', laden: '', idle: '', work: '' },
+      mainEca: { type: 'ULSFO', ballast: '', laden: '', idle: '', work: '' },
+      subNormal: { type: 'MGO', sea: '', idle: '', work: '' },
+      subEca: { type: 'MGO', sea: '', idle: '', work: '' },
+    },
+    legs: [],
+  };
+  blankRecap.stowage = {
+    lightship: '',
+    autoBunker: true,
+    points: [],
+    holds: [],
+    draft: {
+      tpc: '',
+      densityFrom: '',
+      densityTo: '',
+      draftCurrent: '',
+      dispSW: '',
+      vlsfo: '',
+      mgo: '',
+      bw: '',
+      fw: '',
+      constants: '',
+      shipSurveyQty: '',
+      shoreScaleQty: '',
+    },
+    grades: [],
+    ports: [],
+    summerDraft: '',
+    winterDraft: '',
+    tropicalDraft: '',
+  };
+
+  return blankRecap;
 }
 
 /* --------------------------------------------------------- P&L computation */
@@ -778,6 +1149,110 @@ function looksTextual(s: string): boolean {
     if (c === 9 || c === 10 || c === 13 || (c >= 32 && c < 127)) printable++;
   }
   return sample.length > 0 && printable / sample.length > 0.85;
+}
+
+function readNumberToken(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const v = Number.parseFloat(raw.replace(/,/g, '').trim());
+  return Number.isFinite(v) ? v : undefined;
+}
+
+function cleanPortToken(raw: string): string {
+  const cleaned = raw
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(?:CHOPS|ECI|MPT|SB|SP|PORT\s+DISCHARGE\s+BASIS|SINGLE\s+PORT\s+DISCHARGE\s+BASIS)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  const bits = cleaned.split(',').map((x) => x.trim()).filter(Boolean);
+  const keep = bits.find((x) => /[A-Za-z]/.test(x) && !/^(?:\d+\/?\d*|INDIA|SOUTH AFRICA)$/i.test(x));
+  const value = keep ?? bits[0] ?? cleaned;
+  return value
+    .toLowerCase()
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function parseDateToken(token: string, fallbackYear?: number): { d: number; m: number; y: number } | null {
+  const m = token.match(/(\d{1,2})(?:ST|ND|RD|TH)?\s*([A-Z]{3,9})\s*(\d{4})?/i);
+  if (!m) return null;
+  const monthMap: Record<string, number> = {
+    JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6,
+    JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12,
+  };
+  const day = Number(m[1]);
+  const mon = monthMap[m[2].slice(0, 3).toUpperCase()] ?? 0;
+  const year = m[3] ? Number(m[3]) : (fallbackYear ?? new Date().getFullYear());
+  if (!day || !mon || !year) return null;
+  return { d: day, m: mon, y: year };
+}
+
+function toRecapDateTime(part: { d: number; m: number; y: number }, hhmm = '0000'): string {
+  const hh = hhmm.padStart(4, '0').slice(0, 2);
+  const mm = hhmm.padStart(4, '0').slice(2, 4);
+  return `${String(part.d).padStart(2, '0')}-${String(part.m).padStart(2, '0')}-${part.y} ${hh}:${mm}`;
+}
+
+function extractRecapFromPaste(text: string): Partial<Recap> {
+  const src = text.replace(/\r/g, '').replace(/\*/g, '');
+  const up = src.toUpperCase();
+  const out: Partial<Recap> = { ...extractRecapFields(src) };
+
+  const vesselName = src.match(/\n\s*([A-Z][A-Z0-9 .'-]{2,})\s*\n\s*BUILT\b/i)?.[1]?.trim();
+  if (vesselName) out.vesselName = vesselName;
+
+  const cargoLine = src.match(/CARGO\s*&\s*QTY\s*:\s*([^\n]+)/i)?.[1]?.trim();
+  if (cargoLine) out.cargoName = cargoLine.replace(/\s+/g, ' ');
+  const qty = src.match(/\b(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*\+\/-\s*\d+(?:\.\d+)?%/i)?.[1];
+  if (qty) out.cpQuantity = qty;
+
+  const laycanBlock = src.match(/LAYCAN\s*:\s*([\s\S]{0,260})/i)?.[1] ?? '';
+  const dateTokens = [...laycanBlock.matchAll(/\d{1,2}(?:ST|ND|RD|TH)?\s*[A-Z]{3,9}\s*(?:\d{4})?/gi)].map((m) => m[0]);
+  const timeTokens = [...laycanBlock.matchAll(/(\d{3,4})\s*HRS/gi)].map((m) => m[1]);
+  const first = dateTokens[0] ? parseDateToken(dateTokens[0]) : null;
+  const last = dateTokens[1] ? parseDateToken(dateTokens[1], first?.y) : null;
+  if (first) out.laycanStart = toRecapDateTime(first, timeTokens[0] ?? '0001');
+  if (last) out.laycanEnd = toRecapDateTime(last, timeTokens[1] ?? '2359');
+
+  const loadPortRaw = src.match(/LOAD\s+PORT\s*:\s*([^\n]+)/i)?.[1] ?? '';
+  const loadPort = cleanPortToken(loadPortRaw);
+  if (loadPort) out.loadPort = loadPort;
+
+  const dischPorts = [...src.matchAll(/[A-Z]\)\s*[^\n\-]*-\s*([^\n]+)/gi)]
+    .map((m) => cleanPortToken(m[1]))
+    .filter(Boolean);
+  if (dischPorts.length > 0) out.dischargePort = Array.from(new Set(dischPorts)).join(' / ');
+
+  const loadRate = src.match(/LOAD\s+RATE[\s\S]{0,140}?-\s*([\d,]+(?:\.\d+)?)\s*MT/i)?.[1];
+  if (loadRate) out.loadRate = `${loadRate} MT`;
+
+  const dischRatePairs = [...src.matchAll(/\b(PARADIP|GOPALPUR|GANGAVARAM)\s*-\s*([\d,]+(?:\.\d+)?)\s*MT/gi)]
+    .map((m) => `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()} ${m[2]} MT`);
+  if (dischRatePairs.length > 0) out.dischRate = dischRatePairs.join(' / ');
+
+  const freightRate = src.match(/FREIGHT\s+RATE[^\n:]*:\s*[^\d\n]*([\d]+(?:\.\d+)?)/i)?.[1];
+  if (freightRate) out.freightPerMt = freightRate;
+
+  const demLine = src.match(/DEM\/?DSP[^\n]*/i)?.[0]?.replace(/\s+/g, ' ').trim();
+  if (demLine) {
+    out.demDespatch = demLine.replace(/^DEM\/?DSP\s*:?\s*/i, '').trim();
+  } else {
+    const dem = readNumberToken(src.match(/DEM\/?DSP[^\n:]*:\s*USD\s*([\d,]+(?:\.\d+)?)/i)?.[1]);
+    if (typeof dem === 'number' && dem > 0) {
+      out.demDespatch = `${dem.toLocaleString('en-US')} / ${(dem / 2).toLocaleString('en-US')}`;
+    }
+  }
+
+  const eco = up.match(/ECO\s+SPEED[\s\S]*?LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT/i);
+  const service = up.match(/SERVICE\s+SPEED[\s\S]*?LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT/i);
+  const speed = readNumberToken(eco?.[1] ?? service?.[1]);
+  const cons = readNumberToken(eco?.[2] ?? service?.[2]);
+  if (typeof speed === 'number' && speed > 0) out.cpSpeed = speed.toFixed(2);
+  if (typeof cons === 'number' && cons > 0) out.cpCons = cons.toFixed(2);
+
+  return out;
 }
 
 /** Extract recap fields from readable recap / charter-party text (label: value). */
@@ -941,18 +1416,80 @@ function seedTasks(): Task[] {
 }
 function seedAlerts(r: Recap, pnl: Pnl): Alert[] {
   const list: Alert[] = [];
+  const now = new Date();
+  const isSameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+  const fmtDate = (d: Date) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+
+  const noticeDays = Array.from(
+    new Set(
+      (r.redeliveryNotices || '')
+        .split(/[^\d]+/)
+        .map((x) => parseInt(x, 10))
+        .filter((n) => Number.isFinite(n) && n >= 0),
+    ),
+  ).sort((a, b) => b - a);
+  const redeliveryDt = parseDMY(r.redeliveryDateTime);
+
   if (pnl.profit < 0) list.push({ id: 'a1', text: 'Voyage P&L is negative — review costs.', level: 'alert' });
   list.push({ id: 'a2', text: `Next hire payment due — ${r.charterers}.`, level: 'warn' });
   list.push({ id: 'a3', text: 'Demurrage may accrue at Haldia (congestion).', level: 'warn' });
-  list.push({ id: 'a4', text: `Redelivery notice window open (${r.redeliveryNotices}).`, level: 'info' });
+
+  if (noticeDays.length > 0 && !redeliveryDt) {
+    list.push({
+      id: 'a4',
+      text: 'Redelivery notices selected but Redelivery Date / Time is missing.',
+      level: 'warn',
+    });
+  }
+
+  if (redeliveryDt && noticeDays.length > 0) {
+    const schedule = noticeDays
+      .map((d) => ({
+        day: d,
+        dueAt: new Date(redeliveryDt.getTime() - d * 86_400_000),
+      }))
+      .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
+
+    const dueToday = schedule.filter((x) => isSameDay(x.dueAt, now));
+    dueToday.forEach((x, idx) => {
+      list.push({
+        id: `a4-today-${idx}`,
+        text: `Send ${x.day}-day redelivery notice today (${fmtDate(x.dueAt)}).`,
+        level: 'alert',
+      });
+    });
+
+    const nextUpcoming = schedule.find((x) => x.dueAt.getTime() > now.getTime());
+    if (nextUpcoming) {
+      const level: Alert['level'] = nextUpcoming.dueAt.getTime() - now.getTime() <= 86_400_000 ? 'warn' : 'info';
+      list.push({
+        id: 'a4-next',
+        text: `Upcoming redelivery notice: ${nextUpcoming.day}-day due on ${fmtDate(nextUpcoming.dueAt)}.`,
+        level,
+      });
+    }
+
+    const lastMissed = [...schedule].reverse().find((x) => x.dueAt.getTime() < now.getTime() && !isSameDay(x.dueAt, now));
+    if (lastMissed) {
+      list.push({
+        id: 'a4-overdue',
+        text: `Missed redelivery notice: ${lastMissed.day}-day was due on ${fmtDate(lastMissed.dueAt)}.`,
+        level: 'warn',
+      });
+    }
+  }
+
   return list;
 }
 
 /* -------------------------------------------------------- small UI helpers */
 
-function Card({ title, icon, right, children, wide, span2 }: { title: string; icon: string; right?: ReactNode; children: ReactNode; wide?: boolean; span2?: boolean }) {
+function Card({ title, icon, right, children, wide, span2, span3 }: { title: string; icon: string; right?: ReactNode; children: ReactNode; wide?: boolean; span2?: boolean; span3?: boolean }) {
   return (
-    <section className={`fv-ops__card${wide ? ' fv-ops__card--wide' : ''}${span2 ? ' fv-ops__card--span2' : ''}`}>
+    <section className={`fv-ops__card${wide ? ' fv-ops__card--wide' : ''}${span2 ? ' fv-ops__card--span2' : ''}${span3 ? ' fv-ops__card--span3' : ''}`}>
       <header className="fv-ops__card-head">
         <span className="fv-ops__card-title">
           <i className={`fas ${icon}`} aria-hidden="true" /> {title}
@@ -969,7 +1506,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'pnl', label: 'Live P&L', icon: 'fa-sack-dollar' },
   { id: 'etarob', label: "ETA & ROB's", icon: 'fa-gauge-high' },
   { id: 'stowage', label: 'Cargo & Stowage', icon: 'fa-boxes-stacked' },
-  { id: 'hire', label: 'Hire Payments', icon: 'fa-money-bill-wave' },
+  { id: 'hire', label: 'Hire & Claims', icon: 'fa-money-bill-wave' },
   { id: 'freight', label: 'Freight & Laytime', icon: 'fa-file-invoice-dollar' },
   { id: 'reports', label: 'Vessel Reports', icon: 'fa-file-lines' },
   { id: 'costs', label: 'Tool', icon: 'fa-scale-balanced' },
@@ -981,6 +1518,7 @@ type RailPanel = 'docs' | 'tasks' | 'alerts' | 'upload' | null;
 
 export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const selectedVoyage = useSelectedVoyage();
   // "create" mode (prop or ?new=1) opens a blank operations workspace.
   const createMode = mode === 'create' || searchParams.get('new') === '1';
@@ -989,27 +1527,45 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
 
   const [recap, setRecap] = useState<Recap>(() => {
     const loaded = loadOpsRecap(voyage?.id);
-    return loaded ? { ...seedRecap(voyage), ...(loaded as Partial<Recap>) } : seedRecap(voyage);
+    return loaded ? { ...seedRecap(voyage, createMode), ...(loaded as Partial<Recap>) } : seedRecap(voyage, createMode);
   });
-  const [tab, setTab] = useState<TabId>('pnl');
+  const [tab, setTab] = useState<TabId>('details');
   const [rail, setRail] = useState<RailPanel>(null);
   const [docs, setDocs] = useState<DocItem[]>(() => seedDocs());
   const [tasks, setTasks] = useState<Task[]>(() => seedTasks());
   const [fetchNote, setFetchNote] = useState<string | null>(null);
+  const [cpPasteOpen, setCpPasteOpen] = useState(createMode);
+  const [cpPasteText, setCpPasteText] = useState('');
+  const [cpPasteMsg, setCpPasteMsg] = useState<string | null>(null);
   const [opsStatus, setOpsStatus] = useState<string>(voyage?.status || 'At Sea');
+  const [duePopupClock, setDuePopupClock] = useState<number>(Date.now());
+  const voyageTypeForTabs = String(recap.voyageFixType || '').toUpperCase();
+  const includesVoyageType = voyageTypeForTabs.includes('VOUT') || voyageTypeForTabs.includes('VIN') || voyageTypeForTabs.includes('VOYAGE');
+  const freightTabLabel = includesVoyageType ? 'Freight & Laytime' : 'Services';
+  const duePopupStorageKey = `fv.ops.duePopupSnooze.v1:${voyage?.id ?? 'none'}`;
+  const [duePopupSnooze, setDuePopupSnooze] = useState<Record<string, number>>(() => readDuePopupSnoozeMap(duePopupStorageKey));
   // Guards the shared-store sync loop: the raw JSON we last read/wrote.
   const lastSavedRef = useRef<string>(readOpsRecapRaw(voyage?.id) ?? '');
 
   useEffect(() => {
     const loaded = loadOpsRecap(voyage?.id);
-    setRecap(loaded ? { ...seedRecap(voyage), ...(loaded as Partial<Recap>) } : seedRecap(voyage));
+    setRecap(loaded ? { ...seedRecap(voyage, createMode), ...(loaded as Partial<Recap>) } : seedRecap(voyage, createMode));
     lastSavedRef.current = readOpsRecapRaw(voyage?.id) ?? '';
-    setTab('pnl');
+    setTab('details');
     setDocs(seedDocs());
     setTasks(seedTasks());
+    setCpPasteOpen(createMode);
+    setCpPasteText('');
+    setCpPasteMsg(null);
     setOpsStatus(voyage?.status || 'At Sea');
+    setDuePopupSnooze(readDuePopupSnoozeMap(`fv.ops.duePopupSnooze.v1:${voyage?.id ?? 'none'}`));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voyage?.id]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setDuePopupClock(Date.now()), 60_000);
+    return () => window.clearInterval(t);
+  }, []);
 
   // Persist recap edits to the shared per-voyage store (skips no-op writes).
   useEffect(() => {
@@ -1041,12 +1597,70 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
 
   const pnl = useMemo(() => computePnl(recap), [recap]);
   const alerts = useMemo(() => seedAlerts(recap, pnl), [recap, pnl]);
+  const duePopupItems = useMemo(
+    () => (voyage ? buildDuePopupItems(recap, pnl, voyage, new Date(duePopupClock)) : []),
+    [recap, pnl, voyage, duePopupClock],
+  );
+  const visibleDuePopupItems = useMemo(
+    () => duePopupItems.filter((x) => (duePopupSnooze[x.id] ?? 0) <= duePopupClock),
+    [duePopupItems, duePopupSnooze, duePopupClock],
+  );
   // Estimate baseline = the fixed recap from Chartering (independent of live edits).
-  const estPnl = useMemo(() => computePnl(seedRecap(voyage)), [voyage?.id]);
+  const estPnl = useMemo(() => computePnl(seedRecap(voyage, createMode)), [voyage?.id, createMode]);
 
   if (!voyage) return <NoVesselSelected />;
 
   const set = (k: keyof Recap, v: string) => setRecap((r) => ({ ...r, [k]: v }));
+  const canSaveCreate = createMode && recap.vesselName.trim().length > 0;
+
+  const discardCreateDraft = () => {
+    setRecap(seedRecap(voyage, true));
+    setCpPasteText('');
+    setCpPasteMsg(null);
+    setOpsStatus('At Sea');
+    setFetchNote(null);
+  };
+
+  const saveCreateDraft = () => {
+    if (!canSaveCreate) return;
+    const loadPort = recap.loadPort || recap.deliveryPort || voyage.portFrom || '';
+    const dischPort = recap.dischargePort || recap.redeliveryPort || voyage.portTo || '';
+    const saved = upsertCreatedVoyage({
+      vessel: recap.vesselName.trim(),
+      imo: voyage.imo || '',
+      vesselType: voyage.vesselType || '',
+      dwt: recap.cpQuantity || voyage.dwt || '',
+      built: voyage.built || 0,
+      client: recap.charterers || recap.owners || voyage.client || '',
+      clientEmail: recap.vesselEmail || voyage.clientEmail || '',
+      pic: voyage.pic || 'You',
+      service: voyage.service || 'PMO',
+      status: opsStatus || 'At Sea',
+      portFrom: loadPort,
+      portTo: dischPort,
+      eta: recap.redeliveryDateTime || '',
+      etdDisplay: recap.deliveryDateTime || '',
+      etdIso: '',
+      cpSpeed: num(recap.cpSpeed),
+      cpCons: num(recap.cpCons),
+      instSpeed: num(recap.cpSpeed),
+      instCons: num(recap.cpCons),
+      price: num(recap.hirePerDay),
+      pricingBasis: 'Per Day',
+      costPerDay: num(recap.hirePerDay),
+      foCost: num(recap.foPrice),
+      goCost: num(recap.doPrice),
+      euaCost: 0,
+      openTasks: 0,
+      health: 75,
+      open: 'OPEN',
+      seed: Date.now() % 10_000,
+    });
+    writeOpsRecapRaw(saved.id, JSON.stringify(recap));
+    writeSelectedVoyageId(saved.id);
+    addNotification(`Operations draft saved — ${saved.vessel}`, 'Operations');
+    navigate(`/operations?voyage=${encodeURIComponent(saved.id)}`);
+  };
 
   const addDocs = (files: FileList | null, category = 'Supporting') => {
     if (!files) return;
@@ -1087,28 +1701,109 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
     );
   };
 
+  const applyCpPaste = () => {
+    const body = cpPasteText.trim();
+    if (!body) {
+      setCpPasteMsg('Paste CP/Recap text first, then click Apply.');
+      return;
+    }
+    const extracted = extractRecapFromPaste(body);
+    const appliedEntries = Object.entries(extracted).filter(([, v]) => typeof v === 'string' && v.trim().length > 0);
+    if (appliedEntries.length === 0) {
+      setCpPasteMsg('No matching recap fields found in the pasted text.');
+      return;
+    }
+    setRecap((prev) => ({ ...prev, ...extracted }));
+    setCpPasteMsg(`Applied ${appliedEntries.length} field(s) from pasted CP details.`);
+  };
+
   const openTasks = tasks.filter((t) => !t.done).length;
+  const dismissDuePopup = () => {
+    if (visibleDuePopupItems.length === 0) return;
+    const until = Date.now() + OPS_DUE_POPUP_SNOOZE_MS;
+    const next = { ...duePopupSnooze };
+    visibleDuePopupItems.forEach((x) => { next[x.id] = until; });
+    setDuePopupSnooze(next);
+    writeDuePopupSnoozeMap(duePopupStorageKey, next);
+  };
 
   return (
     <div className="fv-ops">
+      {visibleDuePopupItems.length > 0 && <DueAlertsPopup items={visibleDuePopupItems} onClose={dismissDuePopup} />}
       <div className="fv-ops__main">
         {/* ===================== SLIM TOP BAR ===================== */}
         <RecapTopBar recap={recap} voyage={voyage} status={opsStatus} onStatus={setOpsStatus} />
 
-        {/* ===================== TABS ===================== */}
-        <nav className="fv-ops__tabs" aria-label="Operations sections">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`fv-ops__tab${tab === t.id ? ' fv-ops__tab--active' : ''}`}
-              onClick={() => setTab(t.id)}
-              aria-current={tab === t.id ? 'page' : undefined}
-            >
-              <i className={`fas ${t.icon}`} aria-hidden="true" /> {t.label}
+        {createMode && (
+          <div className="fv-ops__create-actions">
+            <button type="button" className="fv-ops__btn" onClick={discardCreateDraft}>
+              <i className="fas fa-rotate-left" aria-hidden="true" /> Discard
             </button>
-          ))}
-        </nav>
+            <button
+              type="button"
+              className="fv-ops__btn fv-ops__btn--primary"
+              disabled={!canSaveCreate}
+              onClick={saveCreateDraft}
+            >
+              <i className="fas fa-floppy-disk" aria-hidden="true" /> Save Voyage
+            </button>
+          </div>
+        )}
+
+        {cpPasteOpen && (
+          <section className="fv-pastebox fv-ops__pastebox">
+            <div className="fv-pastebox__head">
+              <h3>Paste CP / Recap Details</h3>
+              <p>Paste text from charter party or recap email. Matching Operations fields will be auto-filled.</p>
+            </div>
+            <textarea
+              className="fv-pastebox__input"
+              value={cpPasteText}
+              onChange={(e) => setCpPasteText(e.target.value)}
+              placeholder="Paste CP or recap details here..."
+            />
+            <div className="fv-pastebox__actions">
+              <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={applyCpPaste}>
+                <i className="fas fa-wand-magic-sparkles" aria-hidden="true" /> Apply to Operations
+              </button>
+              <button
+                type="button"
+                className="fv-ops__btn"
+                onClick={() => {
+                  setCpPasteText('');
+                  setCpPasteMsg(null);
+                }}
+              >
+                <i className="fas fa-eraser" aria-hidden="true" /> Clear
+              </button>
+              {cpPasteMsg && <span className="fv-pastebox__msg">{cpPasteMsg}</span>}
+            </div>
+          </section>
+        )}
+
+        {/* ===================== TABS ===================== */}
+        <div className="fv-ops__tabs-row">
+          <nav className="fv-ops__tabs" aria-label="Operations sections">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={`fv-ops__tab${tab === t.id ? ' fv-ops__tab--active' : ''}`}
+                onClick={() => setTab(t.id)}
+                aria-current={tab === t.id ? 'page' : undefined}
+              >
+                <i className={`fas ${t.icon}`} aria-hidden="true" /> {t.id === 'freight' ? freightTabLabel : t.label}
+              </button>
+            ))}
+          </nav>
+          <button
+            type="button"
+            className={`fv-ops__btn fv-ops__btn--sm${cpPasteOpen ? ' fv-ops__btn--primary' : ''}`}
+            onClick={() => setCpPasteOpen((v) => !v)}
+          >
+            <i className="fas fa-paste" aria-hidden="true" /> {cpPasteOpen ? 'Hide CP Details' : 'Paste CP Details'}
+          </button>
+        </div>
 
         {/* ===================== TAB CONTENT ===================== */}
         <div className="fv-ops__content">
@@ -1116,7 +1811,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
           {tab === 'pnl' && <PnlTab recap={recap} set={set} setRecap={setRecap} pnl={pnl} estPnl={estPnl} />}
           {tab === 'etarob' && <EtaRobTab recap={recap} setRecap={setRecap} voyage={voyage} />}
           {tab === 'stowage' && <StowageTab recap={recap} setRecap={setRecap} />}
-          {tab === 'hire' && <HireTab recap={recap} setRecap={setRecap} pnl={pnl} />}
+          {tab === 'hire' && <HireTab recap={recap} setRecap={setRecap} pnl={pnl} voyage={voyage} />}
           {tab === 'freight' && <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} />}
           {tab === 'costs' && <CostsTab />}
           {tab === 'reports' && <ReportsTab recap={recap} setRecap={setRecap} voyage={voyage} />}
@@ -1344,6 +2039,34 @@ function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage
 function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; status: string }) {
   const set = (k: keyof Recap, v: string) => setRecap((r) => ({ ...r, [k]: v }));
 
+  const OPS_ALLOWED_VOYAGE_TYPES = [
+    'TCIN-TCOUT',
+    'TCIN-VOUT',
+    'TCIN-TCTOUT',
+    'TCTIN-TCTOUT',
+    'TCTIN-VOUT',
+    'VIN-VOUT',
+    'OWN-TCOUT',
+    'OWN-VOUT',
+    'OWN-TCTOUT',
+  ];
+
+  const voyageType = (recap.voyageFixType || '').toUpperCase();
+  const [inType = '', outType = ''] = voyageType.split('-');
+  const hasTcIn = inType === 'TCIN' || inType === 'TCTIN';
+  const hasVin = inType === 'VIN';
+  const outIsTime = outType === 'TCOUT' || outType === 'TCTOUT';
+  const outIsVoyage = outType === 'VOUT';
+  const showDualHire = hasTcIn && outIsTime && !hasVin && !outIsVoyage;
+
+  const showDelivery = hasTcIn || outIsTime;
+  const showVoyageCargo = hasVin || outIsVoyage;
+  const showLoadDischarge = hasVin || outIsVoyage;
+  const showFreightFields = outIsVoyage;
+  const showChartererLaycan = outIsTime;
+  const showHireFields = hasTcIn || outIsTime;
+  const showLaytimeTerms = hasVin || outIsVoyage;
+
   // Counterparty / service-provider options sourced from Settings → Account Details.
   const clients = useMemo(() => loadClients(), []);
   const namesFor = (kind: string, cat: string) =>
@@ -1419,11 +2142,12 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
     { label: 'Fixture No.', value: fixtureNo },
     { label: 'Vessel', value: recap.vesselName || voyage.vessel },
     { label: 'Voyage Type', value: recap.voyageFixType || '—' },
-    { label: 'Cargo', value: recap.cargoName || '—' },
-    { label: 'Hire / Day', value: `${recap.hireCurrency} ${recap.hirePerDay}`.trim() || '—' },
-    { label: 'Freight Rate', value: `${recap.freightCurrency} ${recap.freightPerMt} / ${recap.cargoQtyUnit}`.trim() || '—' },
-    { label: 'Delivery Port', value: recap.deliveryPort || '—' },
-    { label: 'Redelivery Port', value: recap.redeliveryPort || '—' },
+    ...(showVoyageCargo ? [{ label: 'Cargo', value: recap.cargoName || '—' }] : []),
+    ...(showHireFields ? [{ label: 'Hire / Day', value: `${recap.hireCurrency} ${recap.hirePerDay}`.trim() || '—' }] : []),
+    ...(showDualHire ? [{ label: 'Sub-Hire / Day', value: `${recap.charterHireCurrency} ${recap.charterHirePerDay}`.trim() || '—' }] : []),
+    ...(showFreightFields ? [{ label: 'Freight Rate', value: `${recap.freightCurrency} ${recap.freightPerMt} / ${recap.cargoQtyUnit}`.trim() || '—' }] : []),
+    ...(showDelivery ? [{ label: 'Delivery Port', value: recap.deliveryPort || '—' }] : []),
+    ...(showDelivery ? [{ label: 'Redelivery Port', value: recap.redeliveryPort || '—' }] : []),
   ];
 
   const milestones = buildMilestones(recap, voyage, status);
@@ -1454,16 +2178,18 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
               onChange={(v) => { set('vesselEmail', v); syncVesselEmail(v); }}
               placeholder="master.vessel@…"
             />
-            <VdSelect label="Voyage / Fix Type" value={recap.voyageFixType} onChange={(v) => set('voyageFixType', v)} options={FIX_TYPE_FILTER_OPTIONS} />
-            <VdField label="Cargo Name" value={recap.cargoName} onChange={(v) => set('cargoName', v)} accent />
-            <VdValueUnit label="CP Quantity" value={recap.cpQuantity} onValue={(v) => set('cpQuantity', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} />
-            <VdValueUnit label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num />
-            <VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} />
-            <VdSelect label="Hold Cleaning" value={recap.holdCleaning} onChange={(v) => set('holdCleaning', v)} options={OPS_HOLD_CLEANING} />
-            <label className="fv-ops__vd-field">
-              <span>Voyage Duration (days)</span>
-              <input className="fv-ops__vd-in" readOnly value={fmt(daysBetween(parseDMY(recap.deliveryDateTime), parseDMY(recap.redeliveryDateTime)), 2)} title="Delivery → Redelivery" />
-            </label>
+            <VdSelect label="Voyage / Fix Type" value={recap.voyageFixType} onChange={(v) => set('voyageFixType', v)} options={OPS_ALLOWED_VOYAGE_TYPES} />
+            {showVoyageCargo && <VdField label="Cargo Name" value={recap.cargoName} onChange={(v) => set('cargoName', v)} accent />}
+            {showVoyageCargo && <VdValueUnit label="CP Quantity" value={recap.cpQuantity} onValue={(v) => set('cpQuantity', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} />}
+            {showVoyageCargo && <VdValueUnit label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num />}
+            {showVoyageCargo && <VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} />}
+            {showVoyageCargo && <VdSelect label="Hold Cleaning" value={recap.holdCleaning} onChange={(v) => set('holdCleaning', v)} options={OPS_HOLD_CLEANING} />}
+            {showDelivery && (
+              <label className="fv-ops__vd-field">
+                <span>Voyage Duration (days)</span>
+                <input className="fv-ops__vd-in" readOnly value={fmt(daysBetween(parseDMY(recap.deliveryDateTime), parseDMY(recap.redeliveryDateTime)), 2)} title="Delivery → Redelivery" />
+              </label>
+            )}
             <VdField label="CP Speed (kn)" value={recap.cpSpeed} onChange={(v) => set('cpSpeed', v)} num />
             <VdField label="CP Consumption (MT/day)" value={recap.cpCons} onChange={(v) => set('cpCons', v)} num />
           </div>
@@ -1474,31 +2200,35 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
             <VdCombo label="Owners" value={recap.owners} onChange={(v) => set('owners', v)} options={ownerNames} listId="vd-owners" accent />
             <VdCombo label="Owners Broker" value={recap.ownersBroker} onChange={(v) => set('ownersBroker', v)} options={brokerNames} listId="vd-brokers" />
             <VdField label="CP Date" value={recap.cpDate} onChange={(v) => set('cpDate', v)} placeholder="dd-mm-yyyy" />
-            <VdValueUnit label="Hire Per Day (PDPR)" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} accent num />
+            {showHireFields && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
-          <div className="fv-ops__vd-dr">
-            <div className="fv-ops__vd-dr-col">
-              <VdDateTime label="Laycan Start" value={recap.laycanStart} onChange={(v) => set('laycanStart', v)} />
+          {showHireFields && (
+            <div className="fv-ops__vd-dr">
+              <div className="fv-ops__vd-dr-col">
+                <VdDateTime label="Laycan Start" value={recap.laycanStart} onChange={(v) => set('laycanStart', v)} />
+              </div>
+              <div className="fv-ops__vd-dr-col">
+                <VdDateTime label="Laycan End" value={recap.laycanEnd} onChange={(v) => set('laycanEnd', v)} />
+              </div>
             </div>
-            <div className="fv-ops__vd-dr-col">
-              <VdDateTime label="Laycan End" value={recap.laycanEnd} onChange={(v) => set('laycanEnd', v)} />
+          )}
+          {showHireFields && (
+            <div className="fv-ops__vd-sub">
+              <div className="fv-ops__vd-sub-head"><i className="fas fa-money-check-dollar" aria-hidden="true" /> Hire Payment</div>
+              <div className="fv-ops__vd-inline fv-ops__vd-inline--tight">
+                <span>1st hire covers</span>
+                <select className="fv-ops__vd-unit" value={recap.firstHirePeriodDays} onChange={(e) => set('firstHirePeriodDays', e.target.value)}>{OPS_HIRE_INTERVALS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <span>days, including</span>
+                <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.firstHireInclude} onChange={(e) => set('firstHireInclude', e.target.value)}>{OPS_HIRE_INCLUDE.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+                <span>, payable within</span>
+                <select className="fv-ops__vd-unit" value={recap.firstHireDays} onChange={(e) => set('firstHireDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.firstHireBasis} onChange={(e) => set('firstHireBasis', e.target.value)}>{OPS_PAYMENT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
+                <span>, then every</span>
+                <select className="fv-ops__vd-unit" value={recap.hireEveryDays} onChange={(e) => set('hireEveryDays', e.target.value)}>{OPS_HIRE_INTERVALS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <span>days in advance</span>
+              </div>
             </div>
-          </div>
-          <div className="fv-ops__vd-sub">
-            <div className="fv-ops__vd-sub-head"><i className="fas fa-money-check-dollar" aria-hidden="true" /> Hire Payment</div>
-            <div className="fv-ops__vd-inline fv-ops__vd-inline--tight">
-              <span>1st hire covers</span>
-              <select className="fv-ops__vd-unit" value={recap.firstHirePeriodDays} onChange={(e) => set('firstHirePeriodDays', e.target.value)}>{OPS_HIRE_INTERVALS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
-              <span>days, including</span>
-              <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.firstHireInclude} onChange={(e) => set('firstHireInclude', e.target.value)}>{OPS_HIRE_INCLUDE.map((o) => <option key={o} value={o}>{o}</option>)}</select>
-              <span>, payable within</span>
-              <select className="fv-ops__vd-unit" value={recap.firstHireDays} onChange={(e) => set('firstHireDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
-              <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.firstHireBasis} onChange={(e) => set('firstHireBasis', e.target.value)}>{OPS_PAYMENT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
-              <span>, then every</span>
-              <select className="fv-ops__vd-unit" value={recap.hireEveryDays} onChange={(e) => set('hireEveryDays', e.target.value)}>{OPS_HIRE_INTERVALS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
-              <span>days in advance</span>
-            </div>
-          </div>
+          )}
         </Card>
 
         <Card title="Sub Charter — Charterers" icon="fa-handshake">
@@ -1506,28 +2236,50 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
             <VdCombo label="Charterers" value={recap.charterers} onChange={(v) => set('charterers', v)} options={chartererNames} listId="vd-charterers" accent />
             <VdCombo label="Charterers Broker" value={recap.charterersBroker} onChange={(v) => set('charterersBroker', v)} options={brokerNames} listId="vd-brokers2" />
             <VdField label="Charterers CP Date" value={recap.charterersCpDate} onChange={(v) => set('charterersCpDate', v)} placeholder="dd-mm-yyyy" />
-            <VdValueUnit label="Freight / MT" value={recap.freightPerMt} onValue={(v) => set('freightPerMt', v)} unit={recap.freightCurrency} onUnit={(v) => set('freightCurrency', v)} units={OPS_CURRENCIES} accent num />
+            {showDualHire && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.charterHirePerDay} onValue={(v) => set('charterHirePerDay', v)} unit={recap.charterHireCurrency} onUnit={(v) => set('charterHireCurrency', v)} units={OPS_CURRENCIES} accent num />}
+            {showFreightFields && <VdValueUnit label="Freight / MT" value={recap.freightPerMt} onValue={(v) => set('freightPerMt', v)} unit={recap.freightCurrency} onUnit={(v) => set('freightCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
-          <div className="fv-ops__vd-dr">
-            <div className="fv-ops__vd-dr-col">
-              <VdDateTime label="Charterers Laycan Start" value={recap.charterersLaycanStart} onChange={(v) => set('charterersLaycanStart', v)} />
+          {showChartererLaycan && (
+            <div className="fv-ops__vd-dr">
+              <div className="fv-ops__vd-dr-col">
+                <VdDateTime label="Charterers Laycan Start" value={recap.charterersLaycanStart} onChange={(v) => set('charterersLaycanStart', v)} />
+              </div>
+              <div className="fv-ops__vd-dr-col">
+                <VdDateTime label="Charterers Laycan End" value={recap.charterersLaycanEnd} onChange={(v) => set('charterersLaycanEnd', v)} />
+              </div>
             </div>
-            <div className="fv-ops__vd-dr-col">
-              <VdDateTime label="Charterers Laycan End" value={recap.charterersLaycanEnd} onChange={(v) => set('charterersLaycanEnd', v)} />
+          )}
+          {showFreightFields && (
+            <div className="fv-ops__vd-sub">
+              <div className="fv-ops__vd-sub-head"><i className="fas fa-file-invoice-dollar" aria-hidden="true" /> Freight Payment</div>
+              <div className="fv-ops__vd-inline fv-ops__vd-inline--tight">
+                <span>Within</span>
+                <select className="fv-ops__vd-unit" value={recap.freightPaymentDays} onChange={(e) => set('freightPaymentDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.freightPaymentBasis} onChange={(e) => set('freightPaymentBasis', e.target.value)}>{OPS_PAYMENT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
+                <span>after loading / BL</span>
+              </div>
             </div>
-          </div>
-          <div className="fv-ops__vd-sub">
-            <div className="fv-ops__vd-sub-head"><i className="fas fa-file-invoice-dollar" aria-hidden="true" /> Freight Payment</div>
-            <div className="fv-ops__vd-inline fv-ops__vd-inline--tight">
-              <span>Within</span>
-              <select className="fv-ops__vd-unit" value={recap.freightPaymentDays} onChange={(e) => set('freightPaymentDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
-              <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.freightPaymentBasis} onChange={(e) => set('freightPaymentBasis', e.target.value)}>{OPS_PAYMENT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
-              <span>after loading / BL</span>
+          )}
+          {showDualHire && (
+            <div className="fv-ops__vd-sub">
+              <div className="fv-ops__vd-sub-head"><i className="fas fa-money-check-dollar" aria-hidden="true" /> Hire Payment</div>
+              <div className="fv-ops__vd-inline fv-ops__vd-inline--tight">
+                <span>1st hire covers</span>
+                <select className="fv-ops__vd-unit" value={recap.charterFirstHirePeriodDays} onChange={(e) => set('charterFirstHirePeriodDays', e.target.value)}>{OPS_HIRE_INTERVALS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <span>days, including</span>
+                <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.charterFirstHireInclude} onChange={(e) => set('charterFirstHireInclude', e.target.value)}>{OPS_HIRE_INCLUDE.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+                <span>, payable within</span>
+                <select className="fv-ops__vd-unit" value={recap.charterFirstHireDays} onChange={(e) => set('charterFirstHireDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.charterFirstHireBasis} onChange={(e) => set('charterFirstHireBasis', e.target.value)}>{OPS_PAYMENT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
+                <span>, then every</span>
+                <select className="fv-ops__vd-unit" value={recap.charterHireEveryDays} onChange={(e) => set('charterHireEveryDays', e.target.value)}>{OPS_HIRE_INTERVALS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <span>days in advance</span>
+              </div>
             </div>
-          </div>
+          )}
         </Card>
 
-        <Card title="Delivery / Redelivery" icon="fa-clock">
+        {showDelivery && <Card title="Delivery / Redelivery" icon="fa-clock">
           <div className="fv-ops__vd-dr">
             <div className="fv-ops__vd-dr-col">
               <VdField label="Delivery Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} accent />
@@ -1572,23 +2324,23 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
               </select>
             </div>
           </div>
-        </Card>
+        </Card>}
 
         <Card title="Commercial Terms" icon="fa-file-contract">
           <div className="fv-ops__vd-fields">
-            <VdField label="ILOHC" value={recap.ilohc} onChange={(v) => set('ilohc', v)} num />
-            <VdField label="CVE (per month)" value={recap.cve} onChange={(v) => set('cve', v)} num />
+            {showHireFields && <VdField label="ILOHC" value={recap.ilohc} onChange={(v) => set('ilohc', v)} num />}
+            {showHireFields && <VdField label="CVE (per month)" value={recap.cve} onChange={(v) => set('cve', v)} num />}
             <VdField label="ADCOM" value={recap.adcom} onChange={(v) => set('adcom', v)} placeholder="e.g. 3.75%" />
             <VdField label="Brokerage" value={recap.brokerage} onChange={(v) => set('brokerage', v)} />
-            <VdField label="Ballast Bonus" value={recap.ballastBonus} onChange={(v) => set('ballastBonus', v)} num />
-            <VdField label="Demurrage / Day" value={recap.demDespatch} onChange={(v) => set('demDespatch', v)} num />
-            <VdSelect label="Despatch" value={recap.despatchTerm} onChange={(v) => set('despatchTerm', v)} options={OPS_DESPATCH_TERMS} />
+            {showHireFields && <VdField label="Ballast Bonus" value={recap.ballastBonus} onChange={(v) => set('ballastBonus', v)} num />}
+            {showLaytimeTerms && <VdField label="Demurrage / Day" value={recap.demDespatch} onChange={(v) => set('demDespatch', v)} num />}
+            {showLaytimeTerms && <VdSelect label="Despatch" value={recap.despatchTerm} onChange={(v) => set('despatchTerm', v)} options={OPS_DESPATCH_TERMS} />}
             <VdField label="WX Clause" value={recap.wxClause} onChange={(v) => set('wxClause', v)} />
             <VdField label="Hull Cleaning Clause" value={recap.hullCleaningClause} onChange={(v) => set('hullCleaningClause', v)} />
           </div>
         </Card>
 
-        <Card title="Load & Discharge Ports" icon="fa-anchor">
+        {showLoadDischarge && <Card title="Load & Discharge Ports" icon="fa-anchor" span2>
           <div className="fv-ops__vd-fields">
             <VdField label="Load Port" value={recap.loadPort} onChange={(v) => set('loadPort', v)} accent />
             <VdCombo label="NOR at Load Port" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} listId="vd-nor-load" />
@@ -1603,7 +2355,7 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
               <VdSelect label="LOI Status" value={recap.loiStatus} onChange={(v) => set('loiStatus', v)} options={OPS_LOI_STATUS} />
             )}
           </div>
-        </Card>
+        </Card>}
 
         <BunkersCard recap={recap} setRecap={setRecap} />
 
@@ -1693,7 +2445,7 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
     <Card
       title="Bunkers"
       icon="fa-gas-pump"
-      span2
+      span3
       right={(
         <select
           className="fv-ops__vd-unit fv-ops__vd-unit--wide"
@@ -2897,7 +3649,7 @@ interface OffHireRow { cat: string; from: string; to: string; pct: string; remar
 /** Extra ad-hoc expense line in a hire SOA, due to Owners or Charterers. */
 interface ExtraExpense { desc: string; amount: string; due: string }
 /** Per-installment hire workflow state. */
-interface HirePayEntry { status: string; ballast: boolean; name?: string; from?: string; to?: string; offHire?: OffHireRow[]; bunkerPay?: boolean; bunkerRev?: boolean; jointOn?: string; jointOff?: string; hra?: string; ownersExp?: string; ownersClaim?: string; ilohcOn?: boolean; borV?: string; borM?: string; borFo?: string; borDo?: string; bunkerPayOff?: boolean; ballastPayOff?: boolean; extraExpenses?: ExtraExpense[]; deleted?: boolean }
+interface HirePayEntry { status: string; ballast: boolean; name?: string; from?: string; to?: string; offHire?: OffHireRow[]; bunkerPay?: boolean; bunkerRev?: boolean; jointOn?: string; jointOff?: string; hra?: string; ownersExp?: string; ownersClaim?: string; ownersClaimIds?: string[]; ilohcOn?: boolean; borV?: string; borM?: string; borFo?: string; borDo?: string; bunkerPayOff?: boolean; ballastPayOff?: boolean; extraExpenses?: ExtraExpense[]; deleted?: boolean }
 
 /** A standalone snapshot of a hire installment — independent from the live schedule. */
 interface HireDuplicate { id: string; name: string; account: string; from: string; to: string; onHire: number; offHire: number; amount: number; due: string; status: string }
@@ -2919,20 +3671,46 @@ function offHireDays(o: OffHireRow): number {
   return Math.max(0, days) * (pct / 100);
 }
 
-function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl }) {
+function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; voyage: Voyage }) {
   const hd = num(recap.hirePerDay);
   const dedPct = num(recap.adcom) + num(recap.brokerage);
   const cur = recap.hireCurrency || 'USD';
   const owners = recap.owners || '—';
+  const voyageType = (recap.voyageFixType || '').toUpperCase();
+  const [inType = '', outType = ''] = voyageType.split('-');
+  const showDualHire = (inType === 'TCIN' || inType === 'TCTIN') && (outType === 'TCOUT' || outType === 'TCTOUT');
   const ballastBonusAmt = num(recap.ballastBonus);
+  const stored = recap.freightLaytime;
+  const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
+  const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
+  const seededSettlement = useMemo(() => seedFreightSettlement(voyage), [voyage.id, voyage.portFrom, voyage.portTo]);
+  const settlement = fl.settlement ?? seededSettlement;
+  const setFL = (patch: Partial<FreightLaytimeData>) =>
+    setRecap((r) => {
+      const cur = (r.freightLaytime && Array.isArray(r.freightLaytime.invoices) && Array.isArray(r.freightLaytime.laytimes))
+        ? r.freightLaytime : seedFreightLaytime(r);
+      return { ...r, freightLaytime: { ...cur, ...patch } };
+    });
+  const setSettlement = (patch: Partial<FreightSettlementData>) => setFL({ settlement: { ...settlement, ...patch } });
+
+  useEffect(() => {
+    if (!valid || !fl.settlement) {
+      setRecap((r) => {
+        const cur = (r.freightLaytime && Array.isArray(r.freightLaytime.invoices) && Array.isArray(r.freightLaytime.laytimes))
+          ? r.freightLaytime : seedFreightLaytime(r);
+        return { ...r, freightLaytime: { ...cur, settlement: cur.settlement ?? seededSettlement } };
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid, fl.settlement, seededSettlement]);
 
   const stateOf = (key: string): HirePayEntry => {
     const s = recap.hirePayState[key];
-    return { status: (s?.status as HireStatus) ?? 'Draft', ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
+    return { status: (s?.status as HireStatus) ?? 'Draft', ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
   };
   const setState = (key: string, patch: Partial<HirePayEntry>) =>
     setRecap((r) => ({ ...r, hirePayState: { ...r.hirePayState, [key]: { ...stateOfRaw(r, key), ...patch } } }));
-  const stateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: (r.hirePayState[key]?.status as HireStatus) ?? 'Draft', ballast: r.hirePayState[key]?.ballast ?? false, name: r.hirePayState[key]?.name, from: r.hirePayState[key]?.from, to: r.hirePayState[key]?.to, offHire: r.hirePayState[key]?.offHire ?? [], bunkerPay: r.hirePayState[key]?.bunkerPay ?? false, bunkerRev: r.hirePayState[key]?.bunkerRev ?? false, jointOn: r.hirePayState[key]?.jointOn, jointOff: r.hirePayState[key]?.jointOff, hra: r.hirePayState[key]?.hra, ownersExp: r.hirePayState[key]?.ownersExp, ownersClaim: r.hirePayState[key]?.ownersClaim, ilohcOn: r.hirePayState[key]?.ilohcOn, borV: r.hirePayState[key]?.borV, borM: r.hirePayState[key]?.borM, borFo: r.hirePayState[key]?.borFo, borDo: r.hirePayState[key]?.borDo, bunkerPayOff: r.hirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.hirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.hirePayState[key]?.extraExpenses ?? [], deleted: r.hirePayState[key]?.deleted ?? false });
+  const stateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: (r.hirePayState[key]?.status as HireStatus) ?? 'Draft', ballast: r.hirePayState[key]?.ballast ?? false, name: r.hirePayState[key]?.name, from: r.hirePayState[key]?.from, to: r.hirePayState[key]?.to, offHire: r.hirePayState[key]?.offHire ?? [], bunkerPay: r.hirePayState[key]?.bunkerPay ?? false, bunkerRev: r.hirePayState[key]?.bunkerRev ?? false, jointOn: r.hirePayState[key]?.jointOn, jointOff: r.hirePayState[key]?.jointOff, hra: r.hirePayState[key]?.hra, ownersExp: r.hirePayState[key]?.ownersExp, ownersClaim: r.hirePayState[key]?.ownersClaim, ownersClaimIds: r.hirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.hirePayState[key]?.ilohcOn, borV: r.hirePayState[key]?.borV, borM: r.hirePayState[key]?.borM, borFo: r.hirePayState[key]?.borFo, borDo: r.hirePayState[key]?.borDo, bunkerPayOff: r.hirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.hirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.hirePayState[key]?.extraExpenses ?? [], deleted: r.hirePayState[key]?.deleted ?? false });
   // Bunker reversal anchor is single-select: setting one clears the flag on other installments.
   const setBunkerAnchor = (key: string, field: 'bunkerPay' | 'bunkerRev', on: boolean) =>
     setRecap((r) => {
@@ -2958,6 +3736,37 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
       next['1'] = { ...(next['1'] ?? stateOfRaw(r, '1')), ballastPayOff: !on };
       if (on) next[key] = { ...(next[key] ?? stateOfRaw(r, key)), ballast: true, ballastPayOff: false };
       return { ...r, hirePayState: next };
+    });
+
+  const charterStateOf = (key: string): HirePayEntry => {
+    const s = recap.charterHirePayState[key];
+    return { status: (s?.status as HireStatus) ?? 'Draft', ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
+  };
+  const charterStateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: (r.charterHirePayState[key]?.status as HireStatus) ?? 'Draft', ballast: r.charterHirePayState[key]?.ballast ?? false, name: r.charterHirePayState[key]?.name, from: r.charterHirePayState[key]?.from, to: r.charterHirePayState[key]?.to, offHire: r.charterHirePayState[key]?.offHire ?? [], bunkerPay: r.charterHirePayState[key]?.bunkerPay ?? false, bunkerRev: r.charterHirePayState[key]?.bunkerRev ?? false, jointOn: r.charterHirePayState[key]?.jointOn, jointOff: r.charterHirePayState[key]?.jointOff, hra: r.charterHirePayState[key]?.hra, ownersExp: r.charterHirePayState[key]?.ownersExp, ownersClaim: r.charterHirePayState[key]?.ownersClaim, ownersClaimIds: r.charterHirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.charterHirePayState[key]?.ilohcOn, borV: r.charterHirePayState[key]?.borV, borM: r.charterHirePayState[key]?.borM, borFo: r.charterHirePayState[key]?.borFo, borDo: r.charterHirePayState[key]?.borDo, bunkerPayOff: r.charterHirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.charterHirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.charterHirePayState[key]?.extraExpenses ?? [], deleted: r.charterHirePayState[key]?.deleted ?? false });
+  const setCharterState = (key: string, patch: Partial<HirePayEntry>) =>
+    setRecap((r) => ({ ...r, charterHirePayState: { ...r.charterHirePayState, [key]: { ...charterStateOfRaw(r, key), ...patch } } }));
+  const setCharterBunkerAnchor = (key: string, field: 'bunkerPay' | 'bunkerRev', on: boolean) =>
+    setRecap((r) => {
+      const next: Record<string, HirePayEntry> = {};
+      for (const [k, v] of Object.entries(r.charterHirePayState)) next[k] = { ...v, [field]: false };
+      next[key] = { ...(next[key] ?? charterStateOfRaw(r, key)), [field]: on };
+      return { ...r, charterHirePayState: next };
+    });
+  const setCharterBunkerPay = (key: string, on: boolean) =>
+    setRecap((r) => {
+      const next: Record<string, HirePayEntry> = {};
+      for (const [k, v] of Object.entries(r.charterHirePayState)) next[k] = { ...v, bunkerPay: false };
+      next['1'] = { ...(next['1'] ?? charterStateOfRaw(r, '1')), bunkerPayOff: !on };
+      if (on) next[key] = { ...(next[key] ?? charterStateOfRaw(r, key)), bunkerPay: true, bunkerPayOff: false };
+      return { ...r, charterHirePayState: next };
+    });
+  const setCharterBallastPay = (key: string, on: boolean) =>
+    setRecap((r) => {
+      const next: Record<string, HirePayEntry> = {};
+      for (const [k, v] of Object.entries(r.charterHirePayState)) next[k] = { ...v, ballast: false };
+      next['1'] = { ...(next['1'] ?? charterStateOfRaw(r, '1')), ballastPayOff: !on };
+      if (on) next[key] = { ...(next[key] ?? charterStateOfRaw(r, key)), ballast: true, ballastPayOff: false };
+      return { ...r, charterHirePayState: next };
     });
 
   const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86_400_000);
@@ -3083,8 +3892,8 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
   // (default 1st), user-selectable or off. Not shown/applied when terms are Bunkers or None.
   const ballastOff = stateOf('1').ballastPayOff === true;
   let ballastPayIdx = rows.findIndex((r) => stateOf(r.key).ballast);
-  if (ballastPayIdx < 0 && !ballastOff && firstInclBallast && ballastBonusAmt > 0) ballastPayIdx = 0;
-  if (ballastOff || ballastBonusAmt <= 0 || !firstInclBallast) ballastPayIdx = -1;
+  if (ballastPayIdx < 0 && !ballastOff && firstInclBallast) ballastPayIdx = 0;
+  if (ballastOff || !firstInclBallast) ballastPayIdx = -1;
   rows.forEach((r, i) => { r.ballast = i === ballastPayIdx; });
   if (ballastPayIdx >= 0) rows[ballastPayIdx].amount += ballastBonusAmt;
   
@@ -3096,7 +3905,7 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
   let bunkerPayIdx = -1;
   let bunkerSettleIdx = -1;
   let bunkerRefund = 0;
-  if (firstInclBunkers && rows.length && (bodValue > 0 || borEstValue > 0)) {
+  if (firstInclBunkers && rows.length) {
     bunkerPayIdx = rows.findIndex((r) => stateOf(r.key).bunkerPay);
     if (bunkerPayIdx < 0) bunkerPayIdx = 0;
     // Add BOD to the designated BOD hire
@@ -3144,6 +3953,128 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
   const totalOnHireDays = rows.reduce((s, r) => s + r.onHire, 0);
   const totalOffHireDays = rows.reduce((s, r) => s + r.offHire, 0);
 
+  const charterHd = num(recap.charterHirePerDay || recap.hirePerDay);
+  const charterCur = recap.charterHireCurrency || 'USD';
+  const charterAccount = recap.charterers || '—';
+  const charterFirstPeriod = Math.max(1, num(recap.charterFirstHirePeriodDays) || 15);
+  const charterDueBank = Math.max(0, num(recap.charterFirstHireDays) || 3);
+  const charterSubPeriod = Math.max(1, num(recap.charterHireEveryDays) || 15);
+  const charterIncl = recap.charterFirstHireInclude || 'None';
+  const charterInclBallast = charterIncl === 'Ballast Bonus' || charterIncl === 'Both';
+  const charterInclBunkers = charterIncl === 'Bunkers' || charterIncl === 'Both';
+  const [charterManualExtra, setCharterManualExtra] = useState(0);
+
+  let charterRows: HireRow[] = [];
+  let charterCovered = 0;
+  let charterN = 1;
+  while (showDualHire && charterCovered < total - 0.01 && charterN <= 200) {
+    const key = String(charterN);
+    const e = charterStateOf(key);
+    const status = e.status as HireStatus;
+    const periodLen = charterN === 1 ? charterFirstPeriod : charterSubPeriod;
+    const days = Math.min(periodLen, total - charterCovered);
+    const locked = hireLocked(status);
+    const from = (locked && e.from) ? parseDMY(e.from) : (start ? addDays(start, charterCovered) : null);
+    const to = (locked && e.to) ? parseDMY(e.to) : (start ? addDays(start, charterCovered + days) : null);
+    const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : days;
+    const offHire = (e.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
+    const duePre = charterN === 1 ? (start ? addBankingDays(start, charterDueBank) : null) : from;
+    const due = moveOffWeekend(duePre);
+    let cumulativeOffHire = 0;
+    for (let k = 0; k < charterN; k++) {
+      const rKey = String(k + 1);
+      const rEntry = charterStateOf(rKey);
+      const offHireList = rEntry.offHire ?? [];
+      cumulativeOffHire += offHireList.reduce((s, o) => s + offHireDays(o), 0);
+    }
+    const cumulativeOnHire = to && start ? Math.max(0, (to.getTime() - start.getTime()) / 86_400_000) : 0;
+    const cumulativeGross = charterHd * cumulativeOnHire;
+    const cumulativeNett = Math.max(0, cumulativeOnHire - cumulativeOffHire);
+    const cumulativeCve = (num(recap.cve) / 30) * cumulativeNett;
+    const amount = cumulativeGross * (1 - dedPct / 100) + cumulativeCve;
+    charterRows.push({ key, name: `${ordinal(charterN)} Hire`, account: charterAccount, from, to, onHire, offHire, amount, due, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross });
+    charterCovered += days;
+    charterN += 1;
+  }
+  const charterAutoCount = charterRows.length;
+  let charterManualFrom: Date | null = charterRows.length ? charterRows[charterRows.length - 1].to : start;
+  for (let m = 0; showDualHire && m < charterManualExtra && charterN <= 200; m++) {
+    const key = String(charterN);
+    const e = charterStateOf(key);
+    const status = e.status as HireStatus;
+    const from = e.from ? parseDMY(e.from) : charterManualFrom;
+    const to = e.to ? parseDMY(e.to) : (from ? addDays(from, charterSubPeriod) : null);
+    const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : charterSubPeriod;
+    const offHire = (e.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
+    const cumulativeOnHire = to && start ? Math.max(0, (to.getTime() - start.getTime()) / 86_400_000) : 0;
+    let cumulativeOffHire = 0;
+    for (let k = 1; k <= charterRows.length + m + 1; k++) {
+      const rKey = String(k);
+      const rEntry = charterStateOf(rKey);
+      const offHireList = rEntry.offHire ?? [];
+      cumulativeOffHire += offHireList.reduce((s, o) => s + offHireDays(o), 0);
+    }
+    const cumulativeGross = charterHd * cumulativeOnHire;
+    const cumulativeNett = Math.max(0, cumulativeOnHire - cumulativeOffHire);
+    const cumulativeCve = (num(recap.cve) / 30) * cumulativeNett;
+    const amount = cumulativeGross * (1 - dedPct / 100) + cumulativeCve;
+    const dueMan = moveOffWeekend(from);
+    charterRows.push({ key, name: `${ordinal(charterN)} Hire`, account: charterAccount, from, to, onHire, offHire, amount, due: dueMan, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross });
+    charterManualFrom = to;
+    charterN += 1;
+  }
+
+  charterRows = charterRows.filter((r) => charterStateOf(r.key).deleted !== true);
+  for (let i = 0; i < charterRows.length; i++) {
+    const priorRows = charterRows.slice(0, i);
+    const priorPayments = priorRows.reduce((s, r) => {
+      const status = charterStateOf(r.key).status as HireStatus;
+      if (status === 'Draft') return s;
+      return s + r.amount;
+    }, 0);
+    charterRows[i].amount = Math.max(0, charterRows[i].amount - priorPayments);
+  }
+
+  const charterBallastOff = charterStateOf('1').ballastPayOff === true;
+  let charterBallastPayIdx = charterRows.findIndex((r) => charterStateOf(r.key).ballast);
+  if (charterBallastPayIdx < 0 && !charterBallastOff && charterInclBallast) charterBallastPayIdx = 0;
+  if (charterBallastOff || !charterInclBallast) charterBallastPayIdx = -1;
+  charterRows.forEach((r, i) => { r.ballast = i === charterBallastPayIdx; });
+  if (charterBallastPayIdx >= 0) charterRows[charterBallastPayIdx].amount += ballastBonusAmt;
+
+  let charterBunkerPayIdx = -1;
+  let charterBunkerSettleIdx = -1;
+  if (charterInclBunkers && charterRows.length) {
+    charterBunkerPayIdx = charterRows.findIndex((r) => charterStateOf(r.key).bunkerPay);
+    if (charterBunkerPayIdx < 0) charterBunkerPayIdx = 0;
+    charterRows[charterBunkerPayIdx].amount += bodValue;
+    charterBunkerSettleIdx = charterRows.findIndex((r) => charterStateOf(r.key).bunkerRev);
+    if (charterBunkerSettleIdx < 0) charterBunkerSettleIdx = charterRows.length - 1;
+    charterRows[charterBunkerSettleIdx].amount -= borEstValue;
+    charterRows.forEach((row, idx) => {
+      row.bunkers = bodValue;
+      row.bunkerCredit = idx === charterBunkerSettleIdx ? borEstValue : 0;
+    });
+  } else {
+    charterRows.forEach((row) => {
+      row.bunkers = bodValue;
+      row.bunkerCredit = borEstValue;
+    });
+  }
+
+  const charterFinalIdx = charterBunkerSettleIdx >= 0 ? charterBunkerSettleIdx : charterAutoCount - 1;
+  if (charterRows[charterFinalIdx]) {
+    const finalEntryCharter = charterStateOf(charterRows[charterFinalIdx].key);
+    if (finalEntryCharter.to) {
+      const savedTo = parseDMY(finalEntryCharter.to);
+      if (savedTo) charterRows[charterFinalIdx].to = savedTo;
+    }
+  }
+  charterRows.forEach((r) => { const en = charterStateOf(r.key).name; if (en) r.name = en; });
+  const charterTotalPayable = charterRows.reduce((s, r) => s + r.amount, 0);
+  const charterTotalOnHireDays = charterRows.reduce((s, r) => s + r.onHire, 0);
+  const charterTotalOffHireDays = charterRows.reduce((s, r) => s + r.offHire, 0);
+
   // Workflow transitions per installment.
   const advance = (key: string, to: HireStatus) => setState(key, { status: to });
   const setHireName = (key: string, name: string) => setState(key, { name: name.trim() || undefined });
@@ -3151,6 +4082,42 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
   const [editNameKey, setEditNameKey] = useState<string | null>(null);
   const [editNameVal, setEditNameVal] = useState('');
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [charterSoaRow, setCharterSoaRow] = useState<number | null>(null);
+  const [charterEditNameKey, setCharterEditNameKey] = useState<string | null>(null);
+  const [charterEditNameVal, setCharterEditNameVal] = useState('');
+  const [charterSelectedKeys, setCharterSelectedKeys] = useState<Set<string>>(new Set());
+  const [selClaims, setSelClaims] = useState<Set<string>>(new Set());
+  const [claimId, setClaimId] = useState<string | null>(null);
+  const [claimStatusOpen, setClaimStatusOpen] = useState(false);
+  const [claimStatusValue, setClaimStatusValue] = useState('Under Review');
+  const fmtAmt = (n: number) => n.toLocaleString('en-US');
+  const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
+
+  const addClaim = () => {
+    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Open', attachments: [] };
+    setSettlement({ claims: [...settlement.claims, row] });
+    setClaimId(row.id);
+  };
+  const saveClaim = (id: string, patch: Partial<ClaimRow>) => setSettlement({ claims: settlement.claims.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const deleteSelClaims = () => { setSettlement({ claims: settlement.claims.filter((x) => !selClaims.has(x.id)) }); setSelClaims(new Set()); };
+  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Open' }))] }); setSelClaims(new Set()); };
+  const updateSelClaimStatus = () => {
+    setClaimStatusValue('Under Review');
+    setClaimStatusOpen(true);
+  };
+  const applyClaimStatus = () => {
+    setSettlement({ claims: settlement.claims.map((x) => (selClaims.has(x.id) ? { ...x, status: claimStatusValue } : x)) });
+    setClaimStatusOpen(false);
+  };
+  const pdfSelClaims = () => {
+    const rowsSel = settlement.claims.filter((x) => selClaims.has(x.id));
+    if (rowsSel.length === 0) return;
+    const body = rowsSel.map((r) => `<tr><td>${esc(r.type)}</td><td>${esc(r.reference)}</td><td>${esc(claimChargeTo(r))}</td><td class="r">${fmtAmt(r.amount)}</td><td class="r">${fmtAmt(r.settlement)}</td><td class="r">${fmtAmt(r.amount - r.settlement)}</td><td>${esc(r.status)}</td></tr>`).join('');
+    printSections(`Claims — ${recap.vesselName}`, `<section><h1>Claims</h1><table><thead><tr><th>Type</th><th>Reference</th><th>Charge To</th><th class="r">Amount</th><th class="r">Settlement</th><th class="r">Balance</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></section>`);
+  };
+  const openClaim = settlement.claims.find((x) => x.id === claimId) ?? null;
+
   const toggleSelect = (key: string) => setSelectedKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const deleteSelected = () => {
     if (selectedKeys.size === 0) return;
@@ -3198,6 +4165,65 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
     </style></head><body>
       <h1>Hire Payment Schedule — ${sel.length} installment${sel.length > 1 ? 's' : ''}</h1>
       <p class="sub">${recap.vesselName} · Owners ${recap.owners || '—'} · CP ${recap.cpDate || '—'} · ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()}</p>
+      <table><thead><tr><th>Hire</th><th>Account</th><th>From</th><th>To</th><th class="r">On Hire (d)</th><th class="r">Off-Hire (d)</th><th class="r">Amount Payable</th><th>Due Date</th><th>Status</th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr><td colspan="6">Total</td><td class="r">${money(totalAmt)}</td><td colspan="2"></td></tr></tfoot></table>
+      <p class="sub">*E&amp;OE.</p>
+    </body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  const advanceCharter = (key: string, to: HireStatus) => setCharterState(key, { status: to });
+  const setCharterHireName = (key: string, name: string) => setCharterState(key, { name: name.trim() || undefined });
+  const toggleSelectCharter = (key: string) => setCharterSelectedKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
+  const deleteSelectedCharter = () => {
+    if (charterSelectedKeys.size === 0) return;
+    setRecap((r) => {
+      const next = { ...r.charterHirePayState };
+      charterSelectedKeys.forEach((key) => { next[key] = { ...charterStateOfRaw(r, key), deleted: true }; });
+      return { ...r, charterHirePayState: next };
+    });
+    setCharterSelectedKeys(new Set());
+  };
+  const duplicateSelectedCharter = () => {
+    if (charterSelectedKeys.size === 0) return;
+    const sel = charterRows.filter((r) => charterSelectedKeys.has(r.key));
+    const snapshots: HireDuplicate[] = sel.map((row) => ({
+      id: uid('dup'),
+      name: `${row.name} (copy)`,
+      account: row.account,
+      from: fmtDT(start),
+      to: fmtDT(row.to),
+      onHire: row.cumulativeOnHire ?? row.onHire,
+      offHire: row.offHire,
+      amount: row.amount,
+      due: fmtDate(row.due),
+      status: row.status,
+    }));
+    setRecap((r) => ({ ...r, charterHireDuplicates: [...(r.charterHireDuplicates ?? []), ...snapshots] }));
+    setCharterSelectedKeys(new Set());
+  };
+  const deleteCharterDuplicate = (id: string) => setRecap((r) => ({ ...r, charterHireDuplicates: (r.charterHireDuplicates ?? []).filter((d) => d.id !== id) }));
+  const exportSelectedCharterPdf = () => {
+    const sel = charterRows.filter((r) => charterSelectedKeys.has(r.key));
+    if (sel.length === 0) return;
+    const w = window.open('', '_blank', 'width=980,height=1100');
+    if (!w) return;
+    const p2 = (x: number) => String(x).padStart(2, '0');
+    const today = new Date();
+    const body = sel.map((r) => `<tr><td>${r.name}</td><td>${r.account}</td><td>${fmtDT(start)}</td><td>${fmtDT(r.to)}</td><td class="r">${fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td><td class="r">${fmt(r.offHire, 2)}</td><td class="r">${money(r.amount)}</td><td>${fmtDate(r.due)}</td><td>${r.status}</td></tr>`).join('');
+    const totalAmt = sel.reduce((s, r) => s + r.amount, 0);
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Charterers Hire Payments — ${recap.vesselName}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
+      h1{font-size:16px;margin:0 0 2px}.sub{color:#555;margin:0 0 14px;font-size:11px}
+      table{border-collapse:collapse;width:100%;margin:8px 0}
+      th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
+      th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}
+    </style></head><body>
+      <h1>Charterers Hire Payment Schedule — ${sel.length} installment${sel.length > 1 ? 's' : ''}</h1>
+      <p class="sub">${recap.vesselName} · Charterers ${recap.charterers || '—'} · CP ${recap.charterersCpDate || recap.cpDate || '—'} · ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()}</p>
       <table><thead><tr><th>Hire</th><th>Account</th><th>From</th><th>To</th><th class="r">On Hire (d)</th><th class="r">Off-Hire (d)</th><th class="r">Amount Payable</th><th>Due Date</th><th>Status</th></tr></thead>
       <tbody>${body}</tbody>
       <tfoot><tr><td colspan="6">Total</td><td class="r">${money(totalAmt)}</td><td colspan="2"></td></tr></tfoot></table>
@@ -3269,17 +4295,17 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
                         {r.ballast && <span className="fv-ops__hire-tag fv-ops__hire-tag--bb" title="Ballast bonus paid with this hire">+BB</span>}
                         {i === bunkerPayIdx && <span className="fv-ops__hire-tag" title="Bunkers on delivery (BOD) charged to owners on this hire">+BOD</span>}
                         {i === bunkerSettleIdx && <span className="fv-ops__hire-tag fv-ops__hire-tag--credit" title="Bunkers on redelivery (BOR) reversed to charterers on this hire — runs to actual redelivery">−BOR</span>}
-                        {firstInclBallast && ballastBonusAmt > 0 && !locked && (
+                        {firstInclBallast && !locked && (
                           <label className="fv-ops__hire-bb" title="Pay ballast bonus (BB) on this hire — untick to not pay it">
                             <input type="checkbox" checked={i === ballastPayIdx} onChange={(e) => setBallastPay(r.key, e.target.checked)} /> BB
                           </label>
                         )}
-                        {firstInclBunkers && bodValue > 0 && !locked && (
+                        {firstInclBunkers && !locked && (
                           <label className="fv-ops__hire-bb fv-ops__hire-bb--bnk" title="Charge bunkers on delivery (BOD) on this hire">
                             <input type="checkbox" checked={i === bunkerPayIdx} onChange={(e) => setBunkerPay(r.key, e.target.checked)} /> BOD
                           </label>
                         )}
-                        {firstInclBunkers && borEstValue > 0 && !locked && (
+                        {firstInclBunkers && !locked && (
                           <label className="fv-ops__hire-bb fv-ops__hire-bb--rev" title="Reverse bunkers on redelivery (BOR) on this hire — sets its Hire-to-date to actual redelivery">
                             <input type="checkbox" checked={i === bunkerSettleIdx} onChange={(e) => setBunkerAnchor(r.key, 'bunkerRev', e.target.checked)} /> BOR
                           </label>
@@ -3343,6 +4369,179 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
         <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → <b>Send for Approval &amp; Payment</b> → Manager <b>Approve</b> (→ Approved &amp; Sent for Payment, locked) → Accounts <b>Mark Paid</b> (→ Paid &amp; Locked). A locked installment can only be reopened via <b>Unlock</b> (manager). Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
       </p>
     </Card>
+
+    {showDualHire && (
+      <Card title="Charterers Hire Payment Schedule" icon="fa-handshake" right={
+        <div className="fv-ops__card-controls">
+          <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={() => setCharterManualExtra((x) => x + 1)} title="Add installment beyond estimated redelivery"><i className="fas fa-plus" aria-hidden="true" /> Add</button>
+          <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={duplicateSelectedCharter} disabled={charterSelectedKeys.size === 0} title="Duplicate the selected charterers hire payments"><i className="fas fa-copy" aria-hidden="true" /> Duplicate{charterSelectedKeys.size > 0 ? ` (${charterSelectedKeys.size})` : ''}</button>
+          <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={exportSelectedCharterPdf} disabled={charterSelectedKeys.size === 0} title="Generate a PDF of the selected charterers hire payments"><i className="fas fa-file-pdf" aria-hidden="true" /> PDF{charterSelectedKeys.size > 0 ? ` (${charterSelectedKeys.size})` : ''}</button>
+          <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={deleteSelectedCharter} disabled={charterSelectedKeys.size === 0} title="Delete the selected charterers hire payments"><i className="fas fa-trash" aria-hidden="true" /> Delete{charterSelectedKeys.size > 0 ? ` (${charterSelectedKeys.size})` : ''}</button>
+        </div>
+      }>
+        <div className="fv-ops__eta-scroll">
+          <table className="fv-ops__table fv-ops__hire">
+            <thead>
+              <tr>
+                <th className="fv-ops__hire-selcol">
+                  <input type="checkbox" aria-label="Select all charterers hire payments"
+                    checked={charterRows.length > 0 && charterRows.every((r) => charterSelectedKeys.has(r.key))}
+                    ref={(el) => { if (el) el.indeterminate = charterSelectedKeys.size > 0 && !charterRows.every((r) => charterSelectedKeys.has(r.key)); }}
+                    onChange={(e) => setCharterSelectedKeys(e.target.checked ? new Set(charterRows.map((r) => r.key)) : new Set())} />
+                </th>
+                <th>Hire Name</th>
+                <th>Account</th>
+                <th>From</th>
+                <th>To</th>
+                <th className="fv-ops__r">On Hire (days)</th>
+                <th className="fv-ops__r">Off-Hire (days)</th>
+                <th className="fv-ops__r">Amount Payable</th>
+                <th>Due Date</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {charterRows.length === 0 && <tr><td colSpan={11} className="fv-ops__vd-empty">Set delivery &amp; redelivery dates to build the schedule.</td></tr>}
+              {charterRows.map((r, i) => {
+                const locked = hireLocked(r.status);
+                return (
+                  <tr key={r.key}>
+                    <td className="fv-ops__hire-selcol">
+                      <input type="checkbox" aria-label={`Select ${r.name}`} checked={charterSelectedKeys.has(r.key)} onChange={() => toggleSelectCharter(r.key)} />
+                    </td>
+                    <td>
+                      <div className="fv-ops__hire-namecell">
+                        <div className="fv-ops__hire-nameleft">
+                          {charterEditNameKey === r.key
+                            ? <input autoFocus className="fv-ops__hire-namein" defaultValue={charterEditNameVal}
+                                onBlur={(e) => { setCharterHireName(r.key, e.target.value); setCharterEditNameKey(null); }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') { e.preventDefault(); setCharterHireName(r.key, (e.target as HTMLInputElement).value); setCharterEditNameKey(null); }
+                                  if (e.key === 'Escape') setCharterEditNameKey(null);
+                                }} />
+                            : <>
+                                <button type="button" className="fv-ops__hire-namebtn" onClick={() => setCharterSoaRow(i)} title={r.name === 'FHS' ? 'Final Hire Statement — settlement at actual redelivery' : 'Open Statement of Account'}>{r.name}</button>
+                                {!locked && <button type="button" className="fv-ops__hire-nameedit" title="Rename" onClick={() => { setCharterEditNameKey(r.key); setCharterEditNameVal(r.name); }}><i className="fas fa-pen" aria-hidden="true" /></button>}
+                              </>
+                          }
+                        </div>
+                        <div className="fv-ops__hire-nameright">
+                          {r.ballast && <span className="fv-ops__hire-tag fv-ops__hire-tag--bb" title="Ballast bonus paid with this hire">+BB</span>}
+                          {i === charterBunkerPayIdx && <span className="fv-ops__hire-tag" title="Bunkers on delivery (BOD) charged to charterers on this hire">+BOD</span>}
+                          {i === charterBunkerSettleIdx && <span className="fv-ops__hire-tag fv-ops__hire-tag--credit" title="Bunkers on redelivery (BOR) reversed on this hire — runs to actual redelivery">−BOR</span>}
+                          {charterInclBallast && !locked && (
+                            <label className="fv-ops__hire-bb" title="Pay ballast bonus (BB) on this hire — untick to not pay it">
+                              <input type="checkbox" checked={i === charterBallastPayIdx} onChange={(e) => setCharterBallastPay(r.key, e.target.checked)} /> BB
+                            </label>
+                          )}
+                          {charterInclBunkers && !locked && (
+                            <label className="fv-ops__hire-bb fv-ops__hire-bb--bnk" title="Charge bunkers on delivery (BOD) on this hire">
+                              <input type="checkbox" checked={i === charterBunkerPayIdx} onChange={(e) => setCharterBunkerPay(r.key, e.target.checked)} /> BOD
+                            </label>
+                          )}
+                          {charterInclBunkers && !locked && (
+                            <label className="fv-ops__hire-bb fv-ops__hire-bb--rev" title="Reverse bunkers on redelivery (BOR) on this hire">
+                              <input type="checkbox" checked={i === charterBunkerSettleIdx} onChange={(e) => setCharterBunkerAnchor(r.key, 'bunkerRev', e.target.checked)} /> BOR
+                            </label>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td>{r.account}</td>
+                    <td className="fv-ops__eta-dt">{fmtDT(start)}</td>
+                    <td className="fv-ops__eta-dt">{fmtDT(r.to)}</td>
+                    <td className="fv-ops__r">{fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td>
+                    <td className="fv-ops__r">{fmt(r.offHire, 2)}</td>
+                    <td className="fv-ops__r">{money(r.amount)}</td>
+                    <td>{fmtDate(r.due)}</td>
+                    <td>
+                      <span className={`fv-ops__pill fv-ops__pill--${hireStatusPill(r.status)}`}>{r.status}</span>
+                      {locked && <i className="fas fa-lock fv-ops__hire-lock" title="Locked — manager approval required to unlock" aria-hidden="true" />}
+                    </td>
+                    <td>
+                      <span className="fv-ops__hire-actions">
+                        {r.status === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval &amp; Payment</button>}
+                        {r.status === 'Sent For Approval' && <>
+                          <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceCharter(r.key, 'Approved & Sent for Payment')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
+                          <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Draft')}><i className="fas fa-rotate-left" aria-hidden="true" /> Reject</button>
+                        </>}
+                        {r.status === 'Approved & Sent for Payment' && <>
+                          <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceCharter(r.key, 'Paid & Locked')}><i className="fas fa-circle-check" aria-hidden="true" /> Mark Paid</button>
+                          <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Sent For Approval')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>
+                        </>}
+                        {r.status === 'Paid & Locked' && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Approved & Sent for Payment')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              <tr className="fv-ops__row-sub">
+                <td />
+                <td>Total Payable ({charterRows.length} installments)</td>
+                <td />
+                <td />
+                <td />
+                <td className="fv-ops__r">{fmt(charterTotalOnHireDays, 2)}</td>
+                <td className="fv-ops__r">{fmt(charterTotalOffHireDays, 2)}</td>
+                <td className="fv-ops__r">{money(charterTotalPayable)}</td>
+                <td />
+                <td colSpan={2} />
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="fv-ops__hint">
+          {charterCur} · Auto-built from CP terms: 1st hire {charterFirstPeriod} days including {charterIncl}, payable within {recap.charterFirstHireDays} {recap.charterFirstHireBasis}, then every {recap.charterHireEveryDays} days in advance until redelivery. Each hire = net hire + CVE; bunkers on delivery (BOD) and on redelivery (BOR) follow selected charterers clause anchors. Voyage {fmt(total, 2)} days — schedule &amp; due dates recompute as the redelivery date moves. Commissions {fmt(dedPct)}% deducted. Rename any hire using the pencil icon.
+        </p>
+        <p className="fv-ops__hint">
+          <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → <b>Send for Approval &amp; Payment</b> → Manager <b>Approve</b> (→ Approved &amp; Sent for Payment, locked) → Accounts <b>Mark Paid</b> (→ Paid &amp; Locked). A locked installment can only be reopened via <b>Unlock</b> (manager). Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
+        </p>
+      </Card>
+    )}
+
+    <Card
+      title="Claims & Expenses"
+      icon="fa-gavel"
+      wide
+      right={(
+        <span className="fv-ops__frl-secbtns">
+          <button type="button" className="fv-ops__btn" onClick={addClaim}><i className="fas fa-plus" aria-hidden="true" /> New</button>
+          <button type="button" className="fv-ops__btn" onClick={() => setClaimId(openFirstSelected(selClaims))} disabled={selClaims.size === 0}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>
+          <button type="button" className="fv-ops__btn" onClick={copySelClaims} disabled={selClaims.size === 0}><i className="fas fa-copy" aria-hidden="true" /> Copy</button>
+          <button type="button" className="fv-ops__btn" onClick={deleteSelClaims} disabled={selClaims.size === 0}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+          <button type="button" className="fv-ops__btn" onClick={pdfSelClaims} disabled={selClaims.size === 0}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
+          <button type="button" className="fv-ops__btn" onClick={updateSelClaimStatus} disabled={selClaims.size === 0}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+        </span>
+      )}
+    >
+      <table className="fv-ops__table">
+        <thead>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all claims" checked={settlement.claims.length > 0 && settlement.claims.every((x) => selClaims.has(x.id))} ref={(el) => { if (el) el.indeterminate = selClaims.size > 0 && !settlement.claims.every((x) => selClaims.has(x.id)); }} onChange={(e) => setSelClaims(e.target.checked ? new Set(settlement.claims.map((x) => x.id)) : new Set())} /></th><th>Type</th><th>Reference</th><th>Charge To</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Settlement</th><th className="fv-ops__r">Balance</th><th>Attachment</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          {settlement.claims.map((c) => {
+            const settled = c.settlement || 0;
+            const balance = c.amount - settled;
+            return (
+              <tr key={c.id}>
+                <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${c.reference || 'claim'}`} checked={selClaims.has(c.id)} onChange={() => setSelClaims((prev) => { const n = new Set(prev); n.has(c.id) ? n.delete(c.id) : n.add(c.id); return n; })} /></td>
+                <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setClaimId(c.id)}>{c.type || 'Open'}</button></td>
+                <td>{c.reference}</td>
+                <td>{claimChargeTo(c) || '—'}</td>
+                <td>{c.due || '—'}</td>
+                <td className="fv-ops__r">{fmtAmt(c.amount)}</td>
+                <td className="fv-ops__r">{fmtAmt(settled)}</td>
+                <td className={`fv-ops__r${balance > 0 ? ' fv-ops__neg' : ' fv-ops__pos'}`}>{fmtAmt(balance)}</td>
+                <td>{attachmentStatusLabel(c.attachments)}</td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${c.status === 'Settled' ? 'green' : 'amber'}`}>{c.status}</span></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </Card>
+
     {(recap.hireDuplicates ?? []).length > 0 && (
       <Card title="Duplicated Hire Payments" icon="fa-copy" right={
         <div className="fv-ops__card-controls">
@@ -3386,12 +4585,56 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
         <p className="fv-ops__hint">Independent snapshots created from the schedule above. These do not affect the live hire calculations or the next-hire addition.</p>
       </Card>
     )}
+    {showDualHire && (recap.charterHireDuplicates ?? []).length > 0 && (
+      <Card title="Duplicated Charterers Hire Payments" icon="fa-copy" right={
+        <div className="fv-ops__card-controls">
+          <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={() => setRecap((r) => ({ ...r, charterHireDuplicates: [] }))} title="Clear all duplicated charterers hire payments"><i className="fas fa-trash" aria-hidden="true" /> Clear All</button>
+        </div>
+      }>
+        <div className="fv-ops__eta-scroll">
+          <table className="fv-ops__table fv-ops__hire">
+            <thead>
+              <tr>
+                <th>Hire Name</th>
+                <th>Account</th>
+                <th>From</th>
+                <th>To</th>
+                <th className="fv-ops__r">On Hire (days)</th>
+                <th className="fv-ops__r">Off-Hire (days)</th>
+                <th className="fv-ops__r">Amount Payable</th>
+                <th>Due Date</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(recap.charterHireDuplicates ?? []).map((d) => (
+                <tr key={d.id}>
+                  <td>{d.name}</td>
+                  <td>{d.account}</td>
+                  <td className="fv-ops__eta-dt">{d.from}</td>
+                  <td className="fv-ops__eta-dt">{d.to}</td>
+                  <td className="fv-ops__r">{fmt(d.onHire, 2)}</td>
+                  <td className="fv-ops__r">{fmt(d.offHire, 2)}</td>
+                  <td className="fv-ops__r">{money(d.amount)}</td>
+                  <td>{d.due}</td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${hireStatusPill(d.status as HireStatus)}`}>{d.status}</span></td>
+                  <td><button type="button" className="fv-ops__bnk-rm" aria-label="Delete duplicate" onClick={() => deleteCharterDuplicate(d.id)}><i className="fas fa-trash" aria-hidden="true" /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="fv-ops__hint">Independent snapshots created from the charterers schedule above. These do not affect the live hire calculations or the next-hire addition.</p>
+      </Card>
+    )}
     {soaRow !== null && rows[soaRow] && (
       <HireSoaModal
         key={rows[soaRow].key}
         row={rows[soaRow]}
         entry={stateOf(rows[soaRow].key)}
         allRows={rows}
+        claims={settlement.claims}
         recap={recap}
         borRobV={borRob.v}
         borRobM={borRob.m}
@@ -3407,6 +4650,51 @@ function HireTab({ recap, setRecap, pnl }: { recap: Recap; setRecap: Dispatch<Se
         onClose={() => setSoaRow(null)}
       />
     )}
+    {charterSoaRow !== null && charterRows[charterSoaRow] && (
+      <HireSoaModal
+        key={`charter-${charterRows[charterSoaRow].key}`}
+        row={charterRows[charterSoaRow]}
+        entry={charterStateOf(charterRows[charterSoaRow].key)}
+        allRows={charterRows}
+        claims={settlement.claims}
+        recap={recap}
+        borRobV={borRob.v}
+        borRobM={borRob.m}
+        isLast={charterSoaRow === charterRows.length - 1}
+        cumulative={true}
+        bodCharged={charterBunkerPayIdx >= 0 && charterSoaRow === charterBunkerPayIdx}
+        borReversedToHere={charterRows[charterSoaRow].bunkerCredit}
+        priorOffHireDays={charterRows.slice(0, charterSoaRow).reduce((s, r) => s + r.offHire, 0)}
+        mode="charterers"
+        onSave={(recapPatch, entryPatch) => {
+          const key = charterRows[charterSoaRow].key;
+          setRecap((r) => ({ ...r, ...recapPatch, charterHirePayState: { ...r.charterHirePayState, [key]: { ...charterStateOfRaw(r, key), ...entryPatch } } }));
+        }}
+        onClose={() => setCharterSoaRow(null)}
+      />
+    )}
+    {openClaim && (
+      <ClaimModal
+        row={openClaim}
+        onSave={(patch) => saveClaim(openClaim.id, patch)}
+        onDelete={() => {
+          setSettlement({ claims: settlement.claims.filter((x) => x.id !== openClaim.id) });
+          setSelClaims((prev) => { const n = new Set(prev); n.delete(openClaim.id); return n; });
+          setClaimId(null);
+        }}
+        onClose={() => setClaimId(null)}
+      />
+    )}
+    {claimStatusOpen && (
+      <StatusPickerModal
+        title="Update Claim Status"
+        options={STATUS_OPTIONS_CLAIMS}
+        value={claimStatusValue}
+        onChange={setClaimStatusValue}
+        onApply={applyClaimStatus}
+        onClose={() => setClaimStatusOpen(false)}
+      />
+    )}
     </>
   );
 }
@@ -3417,16 +4705,19 @@ interface SoaDraft {
   cve: string; ilohc: string; ballastBonus: string;
   delV: string; delM: string; borV: string; borM: string; borFo: string; borDo: string;
   from: string; to: string; offHire: OffHireRow[]; extras: ExtraExpense[];
+  ownersClaimIds: string[];
   jointOn: string; jointOff: string;
   ilohcOn: boolean; ballastOn: boolean;
 }
 
 /** Statement of Account — detailed hire calculation for one installment. */
-function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cumulative, bodCharged, borReversedToHere, priorOffHireDays, onSave, onClose }: {
+function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, isLast, cumulative, bodCharged, borReversedToHere, priorOffHireDays, mode = 'owners', onSave, onClose }: {
   row: { key: string; name: string; from: Date | null; to: Date | null; onHire: number; offHire: number; amount: number; ballast: boolean; status: string; bunkers: number; bunkerCredit: number };
   entry: HirePayEntry;
   allRows: { key: string; name: string; amount: number; status: string }[];
+  claims: ClaimRow[];
   recap: Recap; borRobV: number; borRobM: number; isLast: boolean; cumulative: boolean; bodCharged: boolean; borReversedToHere: number; priorOffHireDays: number;
+  mode?: 'owners' | 'charterers';
   onSave: (recapPatch: Partial<Recap>, entryPatch: Partial<HirePayEntry>) => void;
   onClose: () => void;
 }) {
@@ -3436,9 +4727,12 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
   const toInput = (d: Date | null) => (d ? `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}` : '');
   const inputToDmy = (iso: string) => { const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/); return m ? `${m[3]}-${m[2]}-${m[1]} ${m[4]}:${m[5]}` : ''; };
   const today = new Date();
+  const isCharterMode = mode === 'charterers';
+  const cpCounterparty = isCharterMode ? (recap.charterers || '—') : (recap.owners || '—');
+  const cpDate = isCharterMode ? (recap.charterersCpDate || recap.cpDate || '—') : (recap.cpDate || '—');
 
   const mk = (): SoaDraft => ({
-    hirePerDay: recap.hirePerDay, adcom: recap.adcom, brokerage: recap.brokerage,
+    hirePerDay: isCharterMode ? (recap.charterHirePerDay || recap.hirePerDay) : recap.hirePerDay, adcom: recap.adcom, brokerage: recap.brokerage,
     foPrice: recap.foPrice, doPrice: recap.doPrice, cve: recap.cve, ilohc: recap.ilohc,
     ballastBonus: recap.ballastBonus,
     delV: recap.etaPlan.startRobVlsfo, delM: recap.etaPlan.startRobMgo,
@@ -3448,6 +4742,7 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
     from: (cumulative ? entry.from : null) ?? dmyOf(row.from),
     to: (cumulative ? entry.to : null) ?? dmyOf(row.to),
     offHire: entry.offHire ?? [], extras: entry.extraExpenses ?? [],
+    ownersClaimIds: entry.ownersClaimIds ?? [],
     jointOn: entry.jointOn ?? '0', jointOff: entry.jointOff ?? '0',
     ilohcOn: entry.ilohcOn ?? isLast, ballastOn: row.ballast,
   });
@@ -3542,11 +4837,22 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
   const delExtra = (i: number) => setD({ extras: extras.filter((_, idx) => idx !== i) });
   const extrasOwners = extras.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0);
   const extrasCharterers = extras.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0);
+  const claimRowsOwners = claims.filter((c) => draft.ownersClaimIds.includes(c.id) && claimForOwners(c));
+  const claimsOwnersValue = claimRowsOwners.reduce((s, c) => s + claimOutstanding(c), 0);
+  const ownerClaimsChoices = claims.filter((c) => claimForOwners(c));
+  const ownerClaimChoicesUnselected = ownerClaimsChoices.filter((c) => !draft.ownersClaimIds.includes(c.id));
+  const [ownerClaimPick, setOwnerClaimPick] = useState('');
+  const addOwnerClaim = (id: string) => {
+    if (!id || draft.ownersClaimIds.includes(id)) return;
+    setD({ ownersClaimIds: [...draft.ownersClaimIds, id] });
+    setOwnerClaimPick('');
+  };
+  const removeOwnerClaim = (id: string) => setD({ ownersClaimIds: draft.ownersClaimIds.filter((x) => x !== id) });
 
   // The column Sums must match the bunker values shown in the rows (full BOD / BOR), so they
   // cancel for the estimate. bunkDelivery / bunkRedelivery remain for the settlement notes only.
   const owners = hireAmt + bb + row.bunkers + cve + extrasOwners;
-  const charterers = address + brokerage + row.bunkerCredit + ilohc + surveys + extrasCharterers;
+  const charterers = address + brokerage + row.bunkerCredit + ilohc + surveys + extrasCharterers + claimsOwnersValue;
   const totalPayable = owners - charterers;
 
   // Current Hire Payable = Net Cumulative Hire - all prior hire statements (paid or draft).
@@ -3561,9 +4867,12 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
     // redelivery time. Interim hires always derive dates from the clause, so saving them back
     // would lock them and prevent the clause from re-computing on future renders.
     const datePatch = cumulative ? { from: draft.from, to: draft.to } : {};
+    const recapPatch = isCharterMode
+      ? { charterHirePerDay: draft.hirePerDay, adcom: draft.adcom, brokerage: draft.brokerage, foPrice: draft.foPrice, doPrice: draft.doPrice, cve: draft.cve, ilohc: draft.ilohc, ballastBonus: draft.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: draft.delV, startRobMgo: draft.delM } }
+      : { hirePerDay: draft.hirePerDay, adcom: draft.adcom, brokerage: draft.brokerage, foPrice: draft.foPrice, doPrice: draft.doPrice, cve: draft.cve, ilohc: draft.ilohc, ballastBonus: draft.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: draft.delV, startRobMgo: draft.delM } };
     onSave(
-      { hirePerDay: draft.hirePerDay, adcom: draft.adcom, brokerage: draft.brokerage, foPrice: draft.foPrice, doPrice: draft.doPrice, cve: draft.cve, ilohc: draft.ilohc, ballastBonus: draft.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: draft.delV, startRobMgo: draft.delM } },
-      { ...datePatch, offHire: draft.offHire, ballast: draft.ballastOn, jointOn: draft.jointOn, jointOff: draft.jointOff, ilohcOn: draft.ilohcOn, borV: draft.borV, borM: draft.borM, borFo: draft.borFo, borDo: draft.borDo, extraExpenses: draft.extras },
+      recapPatch,
+      { ...datePatch, offHire: draft.offHire, ballast: draft.ballastOn, jointOn: draft.jointOn, jointOff: draft.jointOff, ilohcOn: draft.ilohcOn, borV: draft.borV, borM: draft.borM, borFo: draft.borFo, borDo: draft.borDo, extraExpenses: draft.extras, ownersClaimIds: draft.ownersClaimIds },
     );
     setEditing(false);
   };
@@ -3585,6 +4894,7 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
       li(9, 'Joint On-Hire Survey (÷2)', 0, num(draft.jointOn) / 2),
       li(10, 'Joint Off-Hire Survey (÷2)', 0, num(draft.jointOff) / 2),
       ...extras.map((ex, i) => li(11 + i, ex.desc || 'Other expense', ex.due === 'Owners' ? num(ex.amount) : 0, ex.due !== 'Owners' ? num(ex.amount) : 0)),
+      ...claimRowsOwners.map((c, i) => li(11 + extras.length + i, `Claim (${claimChargeTo(c)}): ${c.reference || c.type || 'Claim'}`, 0, claimOutstanding(c))),
     ].join('');
     const allPriorHtml = priorRows.map((x) => `<tr><td>Less: ${x.name} — ${x.status}</td><td class="r">-${money(x.amount)}</td></tr>`).join('');
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>SOA ${row.name} — ${recap.vesselName}</title><style>
@@ -3596,7 +4906,7 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
       .tot{font-size:13px}
     </style></head><body>
       <h1>Statement of Account — ${row.name}</h1>
-      <p class="sub">${recap.vesselName} · CP ${recap.cpDate || '—'} · Owners ${recap.owners || '—'} · SOA ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()} · Status ${row.status}</p>
+      <p class="sub">${recap.vesselName} · CP ${cpDate} · ${isCharterMode ? 'Charterers' : 'Owners'} ${cpCounterparty} · SOA ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()} · Status ${row.status}</p>
       <p class="sub">On-Hire ${fmtDT(fromD)} → ${fmtDT(toD)} · Days ${fmt(onHire, 2)} · Off-Hire ${fmt(offTotal, 2)} · Nett ${fmt(nett, 2)}</p>
       <table><thead><tr><th>No</th><th>Description</th><th class="r">Due Owners</th><th class="r">Due Charterers</th></tr></thead>
       <tbody>${body}</tbody>
@@ -3623,7 +4933,7 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
         <div className="fv-ops__soa-head">
           <div>
             <h2>{row.name} SOA</h2>
-            <span className="fv-ops__soa-sub">{recap.vesselName} · {recap.owners || '—'} · CP {recap.cpDate || '—'} · SOA {p2(today.getDate())}-{p2(today.getMonth() + 1)}-{today.getFullYear()} · <span className={`fv-ops__pill fv-ops__pill--${hireStatusPill(row.status as HireStatus)}`}>{row.status}</span>{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
+            <span className="fv-ops__soa-sub">{recap.vesselName} · {cpCounterparty} · CP {cpDate} · SOA {p2(today.getDate())}-{p2(today.getMonth() + 1)}-{today.getFullYear()} · <span className={`fv-ops__pill fv-ops__pill--${hireStatusPill(row.status as HireStatus)}`}>{row.status}</span>{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
             {!editing && <button type="button" className="fv-ops__btn" onClick={() => setEditing(true)}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>}
@@ -3677,8 +4987,39 @@ function HireSoaModal({ row, entry, allRows, recap, borRobV, borRobM, isLast, cu
                   <td className="fv-ops__r">{ex.due !== 'Owners' ? cCol(num(ex.amount)) : ''}</td>
                 </tr>
               ))}
+              {claimRowsOwners.map((c, i) => (
+                <tr key={`clm-own-${c.id}`}>
+                  <td>{11 + extras.length + i}</td>
+                  <td>
+                    Claim ({claimChargeTo(c)}): {c.reference || c.type || 'Claim'}
+                    {editing && (
+                      <button type="button" className="fv-ops__bnk-rm" aria-label="Remove linked claim" onClick={() => removeOwnerClaim(c.id)}>
+                        <i className="fas fa-xmark" aria-hidden="true" />
+                      </button>
+                    )}
+                  </td>
+                  <td className="fv-ops__r" />
+                  <td className="fv-ops__r">{money(claimOutstanding(c))}</td>
+                </tr>
+              ))}
               {editing && (
-                <tr><td /><td colSpan={3}><button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addExtra}><i className="fas fa-plus" aria-hidden="true" /> Add expense</button></td></tr>
+                <tr>
+                  <td />
+                  <td colSpan={3}>
+                    <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addExtra}><i className="fas fa-plus" aria-hidden="true" /> Add expense</button>
+                    <span className="fv-ops__soa-extra" style={{ marginLeft: 8 }}>
+                      <select className="fv-ops__eta-sel" value={ownerClaimPick} onChange={(e) => setOwnerClaimPick(e.target.value)}>
+                        <option value="">Link Owners claim…</option>
+                        {ownerClaimChoicesUnselected.map((c) => (
+                          <option key={c.id} value={c.id}>{`${c.reference || c.type || 'Claim'} · ${money(claimOutstanding(c))}`}</option>
+                        ))}
+                      </select>
+                      <button type="button" className="fv-ops__btn fv-ops__soa-add" disabled={!ownerClaimPick} onClick={() => addOwnerClaim(ownerClaimPick)}>
+                        <i className="fas fa-link" aria-hidden="true" /> Add Claim
+                      </button>
+                    </span>
+                  </td>
+                </tr>
               )}
             </tbody>
             <tfoot>
@@ -3762,27 +5103,86 @@ function ordinal(n: number): string {
   return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`;
 }
 
+function buildHireCashflowRows({
+  days,
+  perDay,
+  dedPct,
+  firstPeriod,
+  everyPeriod,
+  label,
+}: {
+  days: number;
+  perDay: number;
+  dedPct: number;
+  firstPeriod: number;
+  everyPeriod: number;
+  label: string;
+}): CashflowRow[] {
+  const rows: CashflowRow[] = [];
+  let covered = 0;
+  let n = 1;
+  while (covered < days - 0.01 && n <= 60) {
+    const d = Math.min(n === 1 ? firstPeriod : everyPeriod, days - covered);
+    rows.push({
+      id: uid('cfp'),
+      date: '',
+      label: `${ordinal(n)} ${label}`,
+      amount: String(Math.round(perDay * d * (1 - dedPct / 100))),
+    });
+    covered += d;
+    n += 1;
+  }
+  return rows;
+}
+
 /** Build the estimated voyage cash flow (receivables + payables) from the recap figures. */
 function seedCashflow(recap: Recap): CashflowData {
   const pnl = computePnl(recap);
-  const receivables: CashflowRow[] = [
-    { id: uid('cfr'), date: '', label: `Freight (${recap.charterers || 'Charterers'})`, amount: String(Math.round(pnl.freight)) },
-  ];
-  if (pnl.demDespatch > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Demurrage', amount: String(Math.round(pnl.demDespatch)) });
+  const voyageType = (recap.voyageFixType || '').toUpperCase();
+  const [inType = '', outType = ''] = voyageType.split('-');
+  const inIsTime = inType === 'TCIN' || inType === 'TCTIN';
+  const outIsTime = outType === 'TCOUT' || outType === 'TCTOUT';
+  const outIsVoyage = outType === 'VOUT';
+
+  const receivables: CashflowRow[] = [];
+  if (outIsVoyage) {
+    receivables.push({ id: uid('cfr'), date: '', label: `Freight (${recap.charterers || 'Charterers'})`, amount: String(Math.round(pnl.freight)) });
+  }
+  if (outIsTime) {
+    const charterHd = num(recap.charterHirePerDay || recap.hirePerDay);
+    const dedPct = num(recap.adcom) + num(recap.brokerage);
+    const first = Math.max(1, num(recap.charterFirstHirePeriodDays) || 15);
+    const every = Math.max(1, num(recap.charterHireEveryDays) || 15);
+    receivables.push(
+      ...buildHireCashflowRows({
+        days: pnl.days,
+        perDay: charterHd,
+        dedPct,
+        firstPeriod: first,
+        everyPeriod: every,
+        label: 'Sub-Hire',
+      }),
+    );
+  }
+  if (outIsVoyage && pnl.demDespatch > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Demurrage', amount: String(Math.round(pnl.demDespatch)) });
   if (pnl.miscIncome > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Misc Income', amount: String(Math.round(pnl.miscIncome)) });
 
   const payables: CashflowRow[] = [];
-  const hd = num(recap.hirePerDay);
-  const dedPct = num(recap.adcom) + num(recap.brokerage);
-  const first = Math.max(1, num(recap.firstHirePeriodDays) || 15);
-  const every = Math.max(1, num(recap.hireEveryDays) || 15);
-  let covered = 0;
-  let n = 1;
-  while (covered < pnl.days - 0.01 && n <= 60) {
-    const d = Math.min(n === 1 ? first : every, pnl.days - covered);
-    payables.push({ id: uid('cfp'), date: '', label: `${ordinal(n)} Hire`, amount: String(Math.round(hd * d * (1 - dedPct / 100))) });
-    covered += d;
-    n += 1;
+  if (inIsTime) {
+    const hd = num(recap.hirePerDay);
+    const dedPct = num(recap.adcom) + num(recap.brokerage);
+    const first = Math.max(1, num(recap.firstHirePeriodDays) || 15);
+    const every = Math.max(1, num(recap.hireEveryDays) || 15);
+    payables.push(
+      ...buildHireCashflowRows({
+        days: pnl.days,
+        perDay: hd,
+        dedPct,
+        firstPeriod: first,
+        everyPeriod: every,
+        label: 'Hire',
+      }),
+    );
   }
   if (pnl.portLoad > 0) payables.push({ id: uid('cfp'), date: '', label: 'Load Port DA', amount: String(Math.round(pnl.portLoad)) });
   if (pnl.portDisch > 0) payables.push({ id: uid('cfp'), date: '', label: 'Disch Port DA', amount: String(Math.round(pnl.portDisch)) });
@@ -3798,11 +5198,20 @@ function VoyageCashflowCard({ recap, setRecap }: { recap: Recap; setRecap: Dispa
   const stored = recap.cashflow;
   const valid = !!stored && Array.isArray(stored.receivables) && Array.isArray(stored.payables);
   const cf = valid ? (stored as CashflowData) : seedCashflow(recap);
+  const lastVoyageTypeRef = useRef(recap.voyageFixType || '');
 
   useEffect(() => {
     if (!valid) setRecap((r) => ({ ...r, cashflow: seedCashflow(r) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [valid]);
+
+  useEffect(() => {
+    const nowType = recap.voyageFixType || '';
+    if (nowType === lastVoyageTypeRef.current) return;
+    lastVoyageTypeRef.current = nowType;
+    // Voyage type changes can switch between Hire/Freight/Service cashflow logic.
+    setRecap((r) => ({ ...r, cashflow: seedCashflow(r) }));
+  }, [recap.voyageFixType, setRecap]);
 
   const setCF = (patch: Partial<CashflowData>) => setRecap((r) => ({ ...r, cashflow: { ...(r.cashflow ?? seedCashflow(r)), ...patch } }));
   const setRow = (side: 'receivables' | 'payables', id: string, patch: Partial<CashflowRow>) =>
@@ -3921,7 +5330,7 @@ function VoyageCashflowCard({ recap, setRecap }: { recap: Recap; setRecap: Dispa
           </tfoot>
         </table>
       </div>
-      <p className="fv-ops__hint">Estimated inflows &amp; outflows derived from the voyage recap (freight, hire installments, port DA, bunkers). Edit dates / amounts, add lines, then export to <b>Excel</b> or <b>PDF</b>. *E&amp;OE.</p>
+      <p className="fv-ops__hint">Estimated inflows &amp; outflows are auto-adjusted by voyage type (Voyage freight legs vs time-charter hire legs) and derived from the recap (hire/freight, port DA, bunkers, CVE, ILOHC). Edit dates / amounts, add lines, then export to <b>Excel</b> or <b>PDF</b>. *E&amp;OE.</p>
     </Card>
   );
 }
@@ -4100,8 +5509,36 @@ function seedFreightLaytime(recap: Recap): FreightLaytimeData {
       loadPortDA: String(num(recap.portDaLoad)),
       dischPortDA: String(num(recap.portDaDisch)),
       includeDemurrage: false,
+      claimIds: [],
     }],
     laytimes,
+  };
+}
+
+function seedFreightSettlement(voyage: Voyage): FreightSettlementData {
+  const load = voyage.portFrom || 'Richards Bay';
+  const disch = voyage.portTo || 'Qingdao';
+  return {
+    pda: [
+      { id: uid('pda'), port: load, agent: 'Sturrock Grindrod', due: '', currency: 'USD', estimated: 128500, advance: 120000, fdaFinal: 131240, status: 'FDA Received', approval: 'Approved', attachments: [] },
+      { id: uid('pda'), port: 'Singapore (Bunker)', agent: 'Inchcape', due: '', currency: 'USD', estimated: 18400, advance: 18400, fdaFinal: 17950, status: 'FDA Received', approval: 'Approved', attachments: [] },
+      { id: uid('pda'), port: disch, agent: 'Wilhelmsen', due: '', currency: 'USD', estimated: 96200, advance: 90000, fdaFinal: 0, status: 'PDA Approved', approval: 'Pending', attachments: [] },
+    ],
+    agentInvoices: [
+      { id: uid('agi'), invoiceNo: 'AGT-24118', vendor: 'Sturrock Grindrod', category: 'FDA - Port', port: load, due: '18 Jul 2026', currency: 'USD', amount: 131240, approved: 131240, paid: 120000, dept: 'Approved', accounts: 'Pending', status: 'Open', attachments: [] },
+      { id: uid('agi'), invoiceNo: 'AGT-24119', vendor: 'Inchcape', category: 'FDA - Bunker Port', port: 'Singapore', due: '19 Jul 2026', currency: 'USD', amount: 17950, approved: 17950, paid: 18400, dept: 'Approved', accounts: 'Paid', status: 'Closed', attachments: [] },
+      { id: uid('agi'), invoiceNo: 'SRV-5521', vendor: 'Ocean Towage', category: 'Towage', port: disch, due: '20 Jul 2026', currency: 'USD', amount: 14800, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Open', attachments: [] },
+    ],
+    services: [
+      { id: uid('srv'), service: 'Launch Boat', vendor: 'Harbour Craft', invoice: 'LB-771', currency: 'USD', cost: 2400, tax: 0, reason: 'Crew & stores transfer at anchorage', status: 'Approved', attachments: [] },
+      { id: uid('srv'), service: 'Fresh Water', vendor: 'Aqua Marine', invoice: 'FW-210', currency: 'USD', cost: 1850, tax: 0, reason: '120 MT fresh water supply', status: 'Approved', attachments: [] },
+      { id: uid('srv'), service: 'Crew Change', vendor: 'Wilhelmsen', invoice: 'CC-455', currency: 'USD', cost: 8600, tax: 430, reason: '3 officers sign off / on', status: 'Pending', attachments: [] },
+    ],
+    claims: [
+      { id: uid('clm'), type: 'Demurrage Claim', reference: 'DEM-2606-01', chargeTo: 'Charterers', owner: 'Charterer', due: '', currency: 'USD', amount: 96600, settlement: 0, status: 'Under Review', attachments: [] },
+      { id: uid('clm'), type: 'Cargo Claim', reference: 'CGO-2606-04', chargeTo: 'Receiver', owner: 'Receiver', due: '', currency: 'USD', amount: 22000, settlement: 0, status: 'Open', attachments: [] },
+      { id: uid('clm'), type: 'Offhire Claim', reference: 'OFF-2606-02', chargeTo: 'Owners', owner: 'Owner', due: '', currency: 'USD', amount: 14500, settlement: 12000, status: 'Settled', attachments: [] },
+    ],
   };
 }
 
@@ -4109,7 +5546,7 @@ interface InvoiceLine { desc: string; amount: number; sign: 1 | -1 }
 interface InvoiceResult { lines: InvoiceLine[]; total: number }
 
 /** Compute an invoice's line items and total from the recap + laytime results. */
-function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[]): InvoiceResult {
+function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[], claims?: ClaimRow[]): InvoiceResult {
   const results = laytimes.map((p) => calcLaytime(p));
   const totalDemurrage = results.reduce((s, r) => s + r.demurrageAmt, 0);
   const totalDespatch = results.reduce((s, r) => s + r.despatchAmt, 0);
@@ -4123,6 +5560,11 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[])
     });
     const adcomDem = totalDemurrage * adcomPct;
     if (adcomDem > 0) lines.push({ desc: `Less: Address commission on demurrage @ ${fmt(adcomPct * 100, 3)}%`, amount: adcomDem, sign: -1 });
+    const linked = (inv.claimIds ?? []).map((id) => claims?.find((c) => c.id === id)).filter((c): c is ClaimRow => !!c && claimForCharterers(c));
+    linked.forEach((c) => {
+      const amt = claimOutstanding(c);
+      if (amt > 0) lines.push({ desc: `Add: Claim (${claimChargeTo(c)}) ${c.reference || c.type || 'Claim'}`, amount: amt, sign: 1 });
+    });
     const total = lines.reduce((s, l) => s + l.sign * l.amount, 0);
     return { lines, total };
   }
@@ -4148,6 +5590,11 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[])
     if (totalDespatch > 0) lines.push({ desc: 'Less: Total despatch (all ports)', amount: totalDespatch, sign: -1 });
   }
   if (num(inv.initialFreightReceived) > 0) lines.push({ desc: 'Less: Initial freight received', amount: num(inv.initialFreightReceived), sign: -1 });
+  const linked = (inv.claimIds ?? []).map((id) => claims?.find((c) => c.id === id)).filter((c): c is ClaimRow => !!c && claimForCharterers(c));
+  linked.forEach((c) => {
+    const amt = claimOutstanding(c);
+    if (amt > 0) lines.push({ desc: `Add: Claim (${claimChargeTo(c)}) ${c.reference || c.type || 'Claim'}`, amount: amt, sign: 1 });
+  });
   const total = lines.reduce((s, l) => s + l.sign * l.amount, 0);
   return { lines, total };
 }
@@ -4159,8 +5606,8 @@ function freightStatusPill(s: string): string {
 }
 
 /** HTML body for one invoice (used by the modal and bulk PDF export). */
-function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, laytimes: LaytimePort[]): string {
-  const { lines, total } = calcInvoice(inv, recap, laytimes);
+function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, laytimes: LaytimePort[], claims?: ClaimRow[]): string {
+  const { lines, total } = calcInvoice(inv, recap, laytimes, claims);
   const rows = lines.map((l) => `<tr><td>${l.desc}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
   return `<section>
     <h1>${inv.kind === 'Freight' ? `${inv.freightType} Freight Invoice` : inv.title}</h1>
@@ -4459,6 +5906,9 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
   const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
+  const voyageType = (recap.voyageFixType || '').toUpperCase();
+  const [inType = '', outType = ''] = voyageType.split('-');
+  const hasVoyageLeg = inType === 'VIN' || outType === 'VOUT';
 
   // Seed (or migrate a legacy shape) the first time the tab is opened.
   useEffect(() => {
@@ -4499,6 +5949,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
       freightDifferential: '0', pctFreightDue: '100', initialFreightReceived: '0',
       loadPortDA: String(num(recap.portDaLoad)), dischPortDA: String(num(recap.portDaDisch)),
       includeDemurrage: kind === 'Demurrage',
+      claimIds: [],
     };
     setFL({ invoices: [...fl.invoices, inv] });
     setInvoiceId(inv.id);
@@ -4515,7 +5966,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
   const pdfSelInvoices = () => {
     const sel = fl.invoices.filter((x) => selInvoices.has(x.id));
     if (sel.length === 0) return;
-    printSections(`Invoices — ${recap.vesselName}`, sel.map((x) => invoicePdfSection(x, recap, voyage, fl.laytimes)).join(''));
+    printSections(`Invoices — ${recap.vesselName}`, sel.map((x) => invoicePdfSection(x, recap, voyage, fl.laytimes, settlement.claims)).join(''));
   };
 
   // --- Laytime list operations ---
@@ -4550,11 +6001,139 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
   const openInvoice = fl.invoices.find((x) => x.id === invoiceId) ?? null;
   const openLaytime = fl.laytimes.find((x) => x.id === laytimeId) ?? null;
 
+  const seededSettlement = useMemo(() => seedFreightSettlement(voyage), [voyage.id, voyage.portFrom, voyage.portTo]);
+  const settlement = fl.settlement ?? seededSettlement;
+  useEffect(() => {
+    if (!fl.settlement) setFL({ settlement: seededSettlement });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fl.settlement, seededSettlement]);
+
+  const setSettlement = (patch: Partial<FreightSettlementData>) => setFL({ settlement: { ...settlement, ...patch } });
+
+  const [selPda, setSelPda] = useState<Set<string>>(new Set());
+  const [selAgentInv, setSelAgentInv] = useState<Set<string>>(new Set());
+  const [selServices, setSelServices] = useState<Set<string>>(new Set());
+  const [pdaId, setPdaId] = useState<string | null>(null);
+  const [agentInvId, setAgentInvId] = useState<string | null>(null);
+  const [serviceId, setServiceId] = useState<string | null>(null);
+  const [pdaStatusOpen, setPdaStatusOpen] = useState(false);
+  const [pdaStatusValue, setPdaStatusValue] = useState('PDA Approved');
+  const [agentServiceStatusOpen, setAgentServiceStatusOpen] = useState(false);
+  const [agentServiceStatusValue, setAgentServiceStatusValue] = useState('Open');
+
+  const fmtAmt = (n: number) => n.toLocaleString('en-US');
+  const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const pdaTotal = settlement.pda.reduce((s, x) => s + x.estimated, 0);
+  const fdaTotal = settlement.pda.reduce((s, x) => s + (x.fdaFinal || x.estimated), 0);
+  const servicesTotal = settlement.services.reduce((s, x) => s + x.cost + x.tax, 0);
+
+  const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
+
+  const addPda = () => {
+    const row: PdaRow = { id: uid('pda'), port: '', agent: '', due: '', currency: 'USD', estimated: 0, advance: 0, fdaFinal: 0, status: 'PDA Draft', approval: 'Pending', attachments: [] };
+    setSettlement({ pda: [...settlement.pda, row] });
+    setPdaId(row.id);
+  };
+  const savePda = (id: string, patch: Partial<PdaRow>) => setSettlement({ pda: settlement.pda.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const deleteSelPda = () => { setSettlement({ pda: settlement.pda.filter((x) => !selPda.has(x.id)) }); setSelPda(new Set()); };
+  const copySelPda = () => { setSettlement({ pda: [...settlement.pda, ...settlement.pda.filter((x) => selPda.has(x.id)).map((x) => ({ ...x, id: uid('pda'), status: 'PDA Draft', approval: 'Pending' }))] }); setSelPda(new Set()); };
+  const updateSelPdaStatus = () => {
+    setPdaStatusValue('PDA Approved');
+    setPdaStatusOpen(true);
+  };
+  const applySelPdaStatus = () => {
+    setSettlement({ pda: settlement.pda.map((x) => (selPda.has(x.id) ? { ...x, status: pdaStatusValue } : x)) });
+    setPdaStatusOpen(false);
+  };
+  const pdfSelPda = () => {
+    const rows = settlement.pda.filter((x) => selPda.has(x.id));
+    if (rows.length === 0) return;
+    const body = rows.map((r) => `<tr><td>${esc(r.port)}</td><td>${esc(r.agent)}</td><td>${esc(r.currency)}</td><td class="r">${fmtAmt(r.estimated)}</td><td class="r">${fmtAmt(r.advance)}</td><td class="r">${fmtAmt(r.fdaFinal)}</td><td>${esc(r.status)}</td><td>${esc(r.approval)}</td></tr>`).join('');
+    printSections(`PDA-FDA — ${recap.vesselName}`, `<section><h1>PDA / FDA</h1><table><thead><tr><th>Port</th><th>Agent</th><th>Cur</th><th class="r">PDA</th><th class="r">Advance</th><th class="r">FDA</th><th>Status</th><th>Approval</th></tr></thead><tbody>${body}</tbody></table></section>`);
+  };
+
+  const addAgentInv = () => {
+    const row: AgentInvoiceRow = { id: uid('agi'), invoiceNo: '', vendor: '', category: '', port: '', due: '', currency: 'USD', amount: 0, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Open', attachments: [] };
+    setSettlement({ agentInvoices: [...settlement.agentInvoices, row] });
+    setAgentInvId(row.id);
+  };
+  const saveAgentInv = (id: string, patch: Partial<AgentInvoiceRow>) => setSettlement({ agentInvoices: settlement.agentInvoices.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const copySelAgentInv = () => { setSettlement({ agentInvoices: [...settlement.agentInvoices, ...settlement.agentInvoices.filter((x) => selAgentInv.has(x.id)).map((x) => ({ ...x, id: uid('agi'), status: 'Open' }))] }); setSelAgentInv(new Set()); };
+
+  const addService = () => {
+    const row: ServiceRow = { id: uid('srv'), service: '', vendor: '', invoice: '', currency: 'USD', cost: 0, tax: 0, reason: '', status: 'Pending', attachments: [] };
+    setSettlement({ services: [...settlement.services, row] });
+    setServiceId(row.id);
+  };
+  const saveService = (id: string, patch: Partial<ServiceRow>) => setSettlement({ services: settlement.services.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const copySelServices = () => { setSettlement({ services: [...settlement.services, ...settlement.services.filter((x) => selServices.has(x.id)).map((x) => ({ ...x, id: uid('srv'), status: 'Pending' }))] }); setSelServices(new Set()); };
+
+  const hasAgentServiceSelection = selAgentInv.size > 0 || selServices.size > 0;
+  const addAgentService = () => {
+    const picked = window.prompt('Create new row in: Agent Invoices or Services?', 'Agent Invoices');
+    if (!picked) return;
+    if (/service/i.test(picked)) addService();
+    else addAgentInv();
+  };
+  const editAgentService = () => {
+    if (selAgentInv.size > 0) { setAgentInvId(openFirstSelected(selAgentInv)); return; }
+    if (selServices.size > 0) { setServiceId(openFirstSelected(selServices)); }
+  };
+  const copyAgentService = () => {
+    if (selAgentInv.size > 0) copySelAgentInv();
+    if (selServices.size > 0) copySelServices();
+  };
+  const deleteAgentService = () => {
+    if (selAgentInv.size > 0) {
+      setSettlement({ agentInvoices: settlement.agentInvoices.filter((x) => !selAgentInv.has(x.id)) });
+      setSelAgentInv(new Set());
+    }
+    if (selServices.size > 0) {
+      setSettlement({ services: settlement.services.filter((x) => !selServices.has(x.id)) });
+      setSelServices(new Set());
+    }
+  };
+  const updateAgentServiceStatus = () => {
+    setAgentServiceStatusValue('Open');
+    setAgentServiceStatusOpen(true);
+  };
+  const applyAgentServiceStatus = () => {
+    if (selAgentInv.size > 0) {
+      setSettlement({ agentInvoices: settlement.agentInvoices.map((x) => (selAgentInv.has(x.id) ? { ...x, status: agentServiceStatusValue } : x)) });
+    }
+    if (selServices.size > 0) {
+      setSettlement({ services: settlement.services.map((x) => (selServices.has(x.id) ? { ...x, status: agentServiceStatusValue } : x)) });
+    }
+    setAgentServiceStatusOpen(false);
+  };
+  const pdfAgentService = () => {
+    const invRows = settlement.agentInvoices.filter((x) => selAgentInv.has(x.id));
+    const srvRows = settlement.services.filter((x) => selServices.has(x.id));
+    if (invRows.length === 0 && srvRows.length === 0) return;
+    const invBody = invRows.map((r) => `<tr><td>${esc(r.invoiceNo)}</td><td>${esc(r.vendor)}</td><td>${esc(r.category)}</td><td>${esc(r.port)}</td><td class="r">${fmtAmt(r.amount)}</td><td class="r">${fmtAmt(r.approved)}</td><td class="r">${fmtAmt(r.paid)}</td><td>${esc(r.status)}</td></tr>`).join('');
+    const srvBody = srvRows.map((r) => `<tr><td>${esc(r.service)}</td><td>${esc(r.vendor)}</td><td>${esc(r.invoice)}</td><td class="r">${fmtAmt(r.cost)}</td><td class="r">${fmtAmt(r.tax)}</td><td class="r">${fmtAmt(r.cost + r.tax)}</td><td>${esc(r.status)}</td></tr>`).join('');
+    const sections = `${invRows.length > 0 ? `<section><h1>Agent Invoices</h1><table><thead><tr><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th class="r">Amount</th><th class="r">Approved</th><th class="r">Paid</th><th>Status</th></tr></thead><tbody>${invBody}</tbody></table></section>` : ''}${srvRows.length > 0 ? `<section><h1>Additional Services</h1><table><thead><tr><th>Service</th><th>Vendor</th><th>Invoice</th><th class="r">Cost</th><th class="r">Tax</th><th class="r">Total</th><th>Status</th></tr></thead><tbody>${srvBody}</tbody></table></section>` : ''}`;
+    printSections(`Agent Invoices & Services — ${recap.vesselName}`, sections);
+  };
+
+  const openPda = settlement.pda.find((x) => x.id === pdaId) ?? null;
+  const openAgentInv = settlement.agentInvoices.find((x) => x.id === agentInvId) ?? null;
+  const openService = settlement.services.find((x) => x.id === serviceId) ?? null;
+
+  useEffect(() => {
+    if (hasVoyageLeg) return;
+    setInvoiceId(null);
+    setLaytimeId(null);
+    setSelInvoices(new Set());
+    setSelLaytimes(new Set());
+  }, [hasVoyageLeg]);
+
   return (
     <>
     <div className="fv-ops__frl">
       {/* ---------------------------------------------------------- Invoices list */}
-      <Card title="Invoices" icon="fa-file-invoice-dollar" wide
+      {hasVoyageLeg && <Card title="Invoices" icon="fa-file-invoice-dollar" wide
         right={
           <span className="fv-ops__frl-secbtns">
             <button type="button" className="fv-ops__btn" onClick={() => addInvoice('Freight')}><i className="fas fa-plus" aria-hidden="true" /> Freight Invoice</button>
@@ -4579,7 +6158,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
           <tbody>
             {fl.invoices.length === 0 && <tr><td colSpan={8} className="fv-ops__vd-empty">No invoices yet. Use “Freight Invoice” or “Demurrage Invoice” to add one.</td></tr>}
             {fl.invoices.map((inv) => {
-              const { total } = calcInvoice(inv, recap, fl.laytimes);
+              const { total } = calcInvoice(inv, recap, fl.laytimes, settlement.claims);
               return (
                 <tr key={inv.id}>
                   <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${inv.title}`} checked={selInvoices.has(inv.id)} onChange={() => toggleInv(inv.id)} /></td>
@@ -4600,10 +6179,10 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
             })}
           </tbody>
         </table>
-      </Card>
+      </Card>}
 
       {/* --------------------------------------------------- Laytime Calculations */}
-      <Card title="Laytime Calculations" icon="fa-hourglass-half" wide
+      {hasVoyageLeg && <Card title="Laytime Calculations" icon="fa-hourglass-half" wide
         right={
           <span className="fv-ops__frl-secbtns">
             <button type="button" className="fv-ops__btn" onClick={() => addLaytime('Load')}><i className="fas fa-plus" aria-hidden="true" /> Load Port</button>
@@ -4655,29 +6234,179 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
             </tr>
           </tfoot>
         </table>
+      </Card>}
+
+      <Card
+        title="PDA / FDA"
+        icon="fa-file-circle-check"
+        wide
+        right={(
+          <span className="fv-ops__frl-secbtns">
+            <button type="button" className="fv-ops__btn" onClick={addPda}><i className="fas fa-plus" aria-hidden="true" /> New</button>
+            <button type="button" className="fv-ops__btn" onClick={() => setPdaId(openFirstSelected(selPda))} disabled={selPda.size === 0}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>
+            <button type="button" className="fv-ops__btn" onClick={copySelPda} disabled={selPda.size === 0}><i className="fas fa-copy" aria-hidden="true" /> Copy</button>
+            <button type="button" className="fv-ops__btn" onClick={deleteSelPda} disabled={selPda.size === 0}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__btn" onClick={pdfSelPda} disabled={selPda.size === 0}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
+            <button type="button" className="fv-ops__btn" onClick={updateSelPdaStatus} disabled={selPda.size === 0}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+          </span>
+        )}
+      >
+        <div className="fv-ops__frl-box">
+          <div className="fv-ops__frl-box-title">PDA Summary</div>
+          <table className="fv-ops__table">
+          <thead>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all PDA rows" checked={settlement.pda.length > 0 && settlement.pda.every((x) => selPda.has(x.id))} ref={(el) => { if (el) el.indeterminate = selPda.size > 0 && !settlement.pda.every((x) => selPda.has(x.id)); }} onChange={(e) => setSelPda(e.target.checked ? new Set(settlement.pda.map((x) => x.id)) : new Set())} /></th><th>Port</th><th>Agent</th><th>Due</th><th>Cur.</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">Advance</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Status</th><th>Approval</th></tr>
+          </thead>
+          <tbody>
+            {settlement.pda.map((p) => (
+              <tr key={p.id}>
+                <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${p.port || 'PDA row'}`} checked={selPda.has(p.id)} onChange={() => setSelPda((prev) => { const n = new Set(prev); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n; })} /></td>
+                <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setPdaId(p.id)}>{p.port || 'Open'}</button></td>
+                <td>{p.agent}</td>
+                <td>{p.due || '—'}</td>
+                <td>{p.currency}</td>
+                <td className="fv-ops__r">{fmtAmt(p.estimated)}</td>
+                <td className="fv-ops__r">{fmtAmt(p.advance)}</td>
+                <td className="fv-ops__r">{fmtAmt(p.estimated - p.advance)}</td>
+                <td>{attachmentStatusLabel(p.attachments)}</td>
+                <td><span className="fv-ops__pill fv-ops__pill--blue">{p.status}</span></td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${p.approval === 'Approved' ? 'green' : 'amber'}`}>{p.approval}</span></td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="fv-ops__row-sub"><td colSpan={5}>Total PDA</td><td className="fv-ops__r">{fmtAmt(pdaTotal)}</td><td className="fv-ops__r">{fmtAmt(settlement.pda.reduce((s, p) => s + p.advance, 0))}</td><td colSpan={4} /></tr>
+          </tfoot>
+          </table>
+        </div>
+        <div className="fv-ops__frl-box fv-ops__frl-box--spaced">
+          <div className="fv-ops__frl-box-title">FDA Variance</div>
+          <table className="fv-ops__table">
+          <thead>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all FDA rows" checked={settlement.pda.length > 0 && settlement.pda.every((x) => selPda.has(x.id))} ref={(el) => { if (el) el.indeterminate = selPda.size > 0 && !settlement.pda.every((x) => selPda.has(x.id)); }} onChange={(e) => setSelPda(e.target.checked ? new Set(settlement.pda.map((x) => x.id)) : new Set())} /></th><th>Port</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">FDA</th><th className="fv-ops__r">Variance</th><th className="fv-ops__r">Balance</th><th>Attachment</th></tr>
+          </thead>
+          <tbody>
+            {settlement.pda.map((p) => {
+              const fda = p.fdaFinal || 0;
+              const variance = fda ? fda - p.estimated : 0;
+              const balance = fda ? fda - p.advance : 0;
+              return (
+                <tr key={`${p.id}-fda`}>
+                  <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${p.port || 'FDA row'}`} checked={selPda.has(p.id)} onChange={() => setSelPda((prev) => { const n = new Set(prev); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n; })} /></td>
+                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setPdaId(p.id)}>{p.port || 'Open'}</button></td>
+                  <td className="fv-ops__r">{fmtAmt(p.estimated)}</td>
+                  <td className="fv-ops__r">{fda ? fmtAmt(fda) : '-'}</td>
+                  <td className={`fv-ops__r${variance > 0 ? ' fv-ops__neg' : variance < 0 ? ' fv-ops__pos' : ''}`}>{fda ? `${variance >= 0 ? '+' : ''}${fmtAmt(variance)}` : '-'}</td>
+                  <td className={`fv-ops__r${balance < 0 ? ' fv-ops__neg' : ''}`}>{fda ? fmtAmt(balance) : '-'}</td>
+                  <td>{attachmentStatusLabel(p.attachments)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="fv-ops__row-sub"><td colSpan={2}>FDA Total</td><td className="fv-ops__r">{fmtAmt(pdaTotal)}</td><td className="fv-ops__r">{fmtAmt(fdaTotal)}</td><td colSpan={3} /></tr>
+          </tfoot>
+          </table>
+        </div>
       </Card>
 
-      <div className="fv-ops__laytime-actions">
+      <Card
+        title="Agent Invoice & Services"
+        icon="fa-file-invoice-dollar"
+        wide
+        right={(
+          <span className="fv-ops__frl-secbtns">
+            <button type="button" className="fv-ops__btn" onClick={addAgentService}><i className="fas fa-plus" aria-hidden="true" /> New</button>
+            <button type="button" className="fv-ops__btn" onClick={editAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>
+            <button type="button" className="fv-ops__btn" onClick={copyAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-copy" aria-hidden="true" /> Copy</button>
+            <button type="button" className="fv-ops__btn" onClick={deleteAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__btn" onClick={pdfAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
+            <button type="button" className="fv-ops__btn" onClick={updateAgentServiceStatus} disabled={!hasAgentServiceSelection}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+          </span>
+        )}
+      >
+        <div className="fv-ops__frl-box">
+          <div className="fv-ops__frl-box-title">Agent Invoices</div>
+          <table className="fv-ops__table">
+          <thead>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all agent invoices" checked={settlement.agentInvoices.length > 0 && settlement.agentInvoices.every((x) => selAgentInv.has(x.id))} ref={(el) => { if (el) el.indeterminate = selAgentInv.size > 0 && !settlement.agentInvoices.every((x) => selAgentInv.has(x.id)); }} onChange={(e) => setSelAgentInv(e.target.checked ? new Set(settlement.agentInvoices.map((x) => x.id)) : new Set())} /></th><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Approved</th><th className="fv-ops__r">Paid</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Dept</th><th>Accounts</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {settlement.agentInvoices.map((i) => {
+              const outstanding = (i.approved || i.amount) - i.paid;
+              return (
+                <tr key={i.id}>
+                  <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${i.invoiceNo || 'invoice'}`} checked={selAgentInv.has(i.id)} onChange={() => setSelAgentInv((prev) => { const n = new Set(prev); n.has(i.id) ? n.delete(i.id) : n.add(i.id); return n; })} /></td>
+                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setAgentInvId(i.id)}>{i.invoiceNo || 'Open'}</button></td>
+                  <td>{i.vendor}</td>
+                  <td>{i.category}</td>
+                  <td>{i.port}</td>
+                  <td>{i.due}</td>
+                  <td className="fv-ops__r">{fmtAmt(i.amount)}</td>
+                  <td className="fv-ops__r">{fmtAmt(i.approved)}</td>
+                  <td className="fv-ops__r">{fmtAmt(i.paid)}</td>
+                  <td className={`fv-ops__r${outstanding > 0 ? ' fv-ops__neg' : ''}`}>{fmtAmt(outstanding)}</td>
+                  <td>{attachmentStatusLabel(i.attachments)}</td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${i.dept === 'Approved' ? 'green' : 'amber'}`}>{i.dept}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${i.accounts === 'Paid' ? 'green' : i.accounts === 'Pending' ? 'amber' : 'blue'}`}>{i.accounts}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${i.status === 'Closed' ? 'green' : 'amber'}`}>{i.status}</span></td>
+                </tr>
+              );
+            })}
+          </tbody>
+          </table>
+        </div>
+        <div className="fv-ops__frl-box fv-ops__frl-box--spaced">
+          <div className="fv-ops__frl-box-title">Services</div>
+          <table className="fv-ops__table">
+          <thead>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all services" checked={settlement.services.length > 0 && settlement.services.every((x) => selServices.has(x.id))} ref={(el) => { if (el) el.indeterminate = selServices.size > 0 && !settlement.services.every((x) => selServices.has(x.id)); }} onChange={(e) => setSelServices(e.target.checked ? new Set(settlement.services.map((x) => x.id)) : new Set())} /></th><th>Service</th><th>Vendor</th><th>Invoice</th><th>Reason</th><th className="fv-ops__r">Cost</th><th className="fv-ops__r">Tax</th><th className="fv-ops__r">Total</th><th>Attachment</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {settlement.services.map((s) => (
+              <tr key={s.id}>
+                <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${s.service || 'service'}`} checked={selServices.has(s.id)} onChange={() => setSelServices((prev) => { const n = new Set(prev); n.has(s.id) ? n.delete(s.id) : n.add(s.id); return n; })} /></td>
+                <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setServiceId(s.id)}>{s.service || 'Open'}</button></td>
+                <td>{s.vendor}</td>
+                <td>{s.invoice}</td>
+                <td>{s.reason}</td>
+                <td className="fv-ops__r">{fmtAmt(s.cost)}</td>
+                <td className="fv-ops__r">{fmtAmt(s.tax)}</td>
+                <td className="fv-ops__r">{fmtAmt(s.cost + s.tax)}</td>
+                <td>{attachmentStatusLabel(s.attachments)}</td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${s.status === 'Approved' ? 'green' : 'amber'}`}>{s.status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="fv-ops__row-sub"><td colSpan={8}>Additional Services Total</td><td className="fv-ops__r">{fmtAmt(servicesTotal)}</td><td /></tr>
+          </tfoot>
+          </table>
+        </div>
+      </Card>
+
+      {hasVoyageLeg && <div className="fv-ops__laytime-actions">
         <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={copyToPostfix} disabled={copied}>
           <i className={`fas ${copied ? 'fa-circle-check' : 'fa-share-from-square'}`} aria-hidden="true" />{' '}
           {copied ? 'Copied to Postfix' : 'Copy Laytime to Postfix'}
         </button>
-      </div>
+      </div>}
     </div>
 
-    {openInvoice && (
+    {hasVoyageLeg && openInvoice && (
       <FreightInvoiceModal
         key={openInvoice.id}
         inv={openInvoice}
         recap={recap}
         voyage={voyage}
         laytimes={fl.laytimes}
+        claims={settlement.claims}
         onSave={(patch) => saveInvoice(openInvoice.id, patch)}
         onDelete={() => { delInvoice(openInvoice.id); setInvoiceId(null); }}
         onClose={() => setInvoiceId(null)}
       />
     )}
-    {openLaytime && (
+    {hasVoyageLeg && openLaytime && (
       <LaytimeModal
         key={openLaytime.id}
         port={openLaytime}
@@ -4688,20 +6417,381 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
         onClose={() => setLaytimeId(null)}
       />
     )}
+    {openPda && (
+      <PdaModal
+        row={openPda}
+        onSave={(patch) => savePda(openPda.id, patch)}
+        onDelete={() => {
+          setSettlement({ pda: settlement.pda.filter((x) => x.id !== openPda.id) });
+          setSelPda((prev) => { const n = new Set(prev); n.delete(openPda.id); return n; });
+          setPdaId(null);
+        }}
+        onClose={() => setPdaId(null)}
+      />
+    )}
+    {openAgentInv && (
+      <AgentInvoiceModal
+        row={openAgentInv}
+        onSave={(patch) => saveAgentInv(openAgentInv.id, patch)}
+        onDelete={() => {
+          setSettlement({ agentInvoices: settlement.agentInvoices.filter((x) => x.id !== openAgentInv.id) });
+          setSelAgentInv((prev) => { const n = new Set(prev); n.delete(openAgentInv.id); return n; });
+          setAgentInvId(null);
+        }}
+        onClose={() => setAgentInvId(null)}
+      />
+    )}
+    {openService && (
+      <ServiceModal
+        row={openService}
+        onSave={(patch) => saveService(openService.id, patch)}
+        onDelete={() => {
+          setSettlement({ services: settlement.services.filter((x) => x.id !== openService.id) });
+          setSelServices((prev) => { const n = new Set(prev); n.delete(openService.id); return n; });
+          setServiceId(null);
+        }}
+        onClose={() => setServiceId(null)}
+      />
+    )}
+    {pdaStatusOpen && (
+      <StatusPickerModal
+        title="Update PDA / FDA Status"
+        options={STATUS_OPTIONS_PDA}
+        value={pdaStatusValue}
+        onChange={setPdaStatusValue}
+        onApply={applySelPdaStatus}
+        onClose={() => setPdaStatusOpen(false)}
+      />
+    )}
+    {agentServiceStatusOpen && (
+      <StatusPickerModal
+        title="Update Agent / Service Status"
+        options={STATUS_OPTIONS_AGENT_SERVICE}
+        value={agentServiceStatusValue}
+        onChange={setAgentServiceStatusValue}
+        onApply={applyAgentServiceStatus}
+        onClose={() => setAgentServiceStatusOpen(false)}
+      />
+    )}
     </>
   );
 }
 
+function attachmentStatusLabel(attachments?: SettlementAttachment[]): string {
+  const count = attachments?.length ?? 0;
+  return count > 0 ? `Yes (${count})` : 'No';
+}
+
+function claimChargeTo(row: ClaimRow): string {
+  return row.chargeTo || row.owner || '';
+}
+
+function claimOutstanding(row: ClaimRow): number {
+  return Math.max(0, row.amount - row.settlement);
+}
+
+function claimForOwners(row: ClaimRow): boolean {
+  return /owner/i.test(claimChargeTo(row));
+}
+
+function claimForCharterers(row: ClaimRow): boolean {
+  return /charter/i.test(claimChargeTo(row));
+}
+
+function StatusPickerModal({
+  title,
+  options,
+  value,
+  onChange,
+  onApply,
+  onClose,
+}: {
+  title: string;
+  options: string[];
+  value: string;
+  onChange: (v: string) => void;
+  onApply: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fv-ops__modal-overlay" onClick={onClose}>
+      <div className="fv-ops__soa" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-ops__soa-head">
+          <div>
+            <h2>{title}</h2>
+            <span className="fv-ops__soa-sub">Select a status and apply to selected rows.</span>
+          </div>
+          <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={onApply}><i className="fas fa-check" aria-hidden="true" /> Apply</button>
+            <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
+          </div>
+        </div>
+        <div className="fv-ops__soa-body">
+          <div className="fv-ops__vd-fields">
+            <label className="fv-ops__vd-field">
+              <span>Status</span>
+              <select className="fv-ops__vd-in" value={value} onChange={(e) => onChange(e.target.value)}>
+                {options.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AttachmentEditor({ attachments, onChange }: { attachments: SettlementAttachment[]; onChange: (next: SettlementAttachment[]) => void }) {
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const addFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const now = new Date().toISOString();
+    const added = Array.from(files).map((f) => ({
+      id: uid('att'),
+      name: f.name,
+      sizeKb: Math.max(1, Math.round(f.size / 1024)),
+      at: now,
+    }));
+    onChange([...attachments, ...added]);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+  const remove = (id: string) => onChange(attachments.filter((a) => a.id !== id));
+
+  return (
+    <div className="fv-ops__col">
+      <div className="fv-ops__card-controls">
+        <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={() => fileRef.current?.click()}>
+          <i className="fas fa-paperclip" aria-hidden="true" /> Attach File
+        </button>
+        <input ref={fileRef} type="file" multiple hidden onChange={(e) => addFiles(e.target.files)} />
+      </div>
+      <table className="fv-ops__table">
+        <thead>
+          <tr><th>File</th><th className="fv-ops__r">Size (KB)</th><th aria-label="Remove" /></tr>
+        </thead>
+        <tbody>
+          {attachments.length === 0 && <tr><td colSpan={3} className="fv-ops__vd-empty">No attachments</td></tr>}
+          {attachments.map((a) => (
+            <tr key={a.id}>
+              <td>{a.name}</td>
+              <td className="fv-ops__r">{a.sizeKb}</td>
+              <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label={`Remove ${a.name}`} onClick={() => remove(a.id)}><i className="fas fa-trash" aria-hidden="true" /></button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function PdaModal({ row, onSave, onDelete, onClose }: {
+  row: PdaRow;
+  onSave: (patch: Partial<PdaRow>) => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<PdaRow>(row);
+  const setD = (patch: Partial<PdaRow>) => setDraft((d) => ({ ...d, ...patch }));
+  const outstanding = draft.estimated - draft.advance;
+  const variance = draft.fdaFinal - draft.estimated;
+  const balance = draft.fdaFinal - draft.advance;
+  return (
+    <div className="fv-ops__modal-overlay" onClick={onClose}>
+      <div className="fv-ops__soa" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-ops__soa-head">
+          <div>
+            <h2>PDA / FDA Details</h2>
+            <span className="fv-ops__soa-sub">{draft.port || 'Port'} · {draft.agent || 'Agent'} · {draft.currency}</span>
+          </div>
+          <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
+          </div>
+        </div>
+        <div className="fv-ops__soa-body">
+          <div className="fv-ops__vd-fields">
+            <VdField label="Port" value={draft.port} onChange={(v) => setD({ port: v })} />
+            <VdField label="Agent" value={draft.agent} onChange={(v) => setD({ agent: v })} />
+            <VdField label="Due Date" value={draft.due || ''} onChange={(v) => setD({ due: v })} />
+            <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
+            <VdField label="Estimated PDA" value={String(draft.estimated)} onChange={(v) => setD({ estimated: num(v) })} num />
+            <VdField label="Advance Paid" value={String(draft.advance)} onChange={(v) => setD({ advance: num(v) })} num />
+            <VdField label="FDA Final" value={String(draft.fdaFinal)} onChange={(v) => setD({ fdaFinal: num(v) })} num />
+            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+            <VdField label="Approval" value={draft.approval} onChange={(v) => setD({ approval: v })} />
+          </div>
+          <div className="fv-ops__vd-sub">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+          </div>
+          <div className="fv-ops__frl-voy">
+            <span><b>Outstanding:</b> {money(outstanding)}</span>
+            <span><b>Variance:</b> {money(variance)}</span>
+            <span><b>Balance:</b> {money(balance)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentInvoiceModal({ row, onSave, onDelete, onClose }: {
+  row: AgentInvoiceRow;
+  onSave: (patch: Partial<AgentInvoiceRow>) => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<AgentInvoiceRow>(row);
+  const setD = (patch: Partial<AgentInvoiceRow>) => setDraft((d) => ({ ...d, ...patch }));
+  const outstanding = (draft.approved || draft.amount) - draft.paid;
+  return (
+    <div className="fv-ops__modal-overlay" onClick={onClose}>
+      <div className="fv-ops__soa" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-ops__soa-head">
+          <div>
+            <h2>Agent Invoice Details</h2>
+            <span className="fv-ops__soa-sub">{draft.invoiceNo || 'Invoice'} · {draft.vendor || 'Vendor'} · {draft.currency}</span>
+          </div>
+          <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
+          </div>
+        </div>
+        <div className="fv-ops__soa-body">
+          <div className="fv-ops__vd-fields">
+            <VdField label="Invoice No" value={draft.invoiceNo} onChange={(v) => setD({ invoiceNo: v })} />
+            <VdField label="Vendor" value={draft.vendor} onChange={(v) => setD({ vendor: v })} />
+            <VdField label="Category" value={draft.category} onChange={(v) => setD({ category: v })} />
+            <VdField label="Port" value={draft.port} onChange={(v) => setD({ port: v })} />
+            <VdField label="Due Date" value={draft.due} onChange={(v) => setD({ due: v })} />
+            <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
+            <VdField label="Amount" value={String(draft.amount)} onChange={(v) => setD({ amount: num(v) })} num />
+            <VdField label="Approved" value={String(draft.approved)} onChange={(v) => setD({ approved: num(v) })} num />
+            <VdField label="Paid" value={String(draft.paid)} onChange={(v) => setD({ paid: num(v) })} num />
+            <VdField label="Dept" value={draft.dept} onChange={(v) => setD({ dept: v })} />
+            <VdField label="Accounts" value={draft.accounts} onChange={(v) => setD({ accounts: v })} />
+            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+          </div>
+          <div className="fv-ops__vd-sub">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+          </div>
+          <div className="fv-ops__frl-voy">
+            <span><b>Outstanding:</b> {money(outstanding)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ServiceModal({ row, onSave, onDelete, onClose }: {
+  row: ServiceRow;
+  onSave: (patch: Partial<ServiceRow>) => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<ServiceRow>(row);
+  const setD = (patch: Partial<ServiceRow>) => setDraft((d) => ({ ...d, ...patch }));
+  const total = draft.cost + draft.tax;
+  return (
+    <div className="fv-ops__modal-overlay" onClick={onClose}>
+      <div className="fv-ops__soa" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-ops__soa-head">
+          <div>
+            <h2>Service Details</h2>
+            <span className="fv-ops__soa-sub">{draft.service || 'Service'} · {draft.vendor || 'Vendor'} · {draft.currency}</span>
+          </div>
+          <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
+          </div>
+        </div>
+        <div className="fv-ops__soa-body">
+          <div className="fv-ops__vd-fields">
+            <VdField label="Service" value={draft.service} onChange={(v) => setD({ service: v })} />
+            <VdField label="Vendor" value={draft.vendor} onChange={(v) => setD({ vendor: v })} />
+            <VdField label="Invoice" value={draft.invoice} onChange={(v) => setD({ invoice: v })} />
+            <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
+            <VdField label="Cost" value={String(draft.cost)} onChange={(v) => setD({ cost: num(v) })} num />
+            <VdField label="Tax" value={String(draft.tax)} onChange={(v) => setD({ tax: num(v) })} num />
+            <VdField label="Reason" value={draft.reason} onChange={(v) => setD({ reason: v })} />
+            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+          </div>
+          <div className="fv-ops__vd-sub">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+          </div>
+          <div className="fv-ops__frl-voy">
+            <span><b>Total:</b> {money(total)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClaimModal({ row, onSave, onDelete, onClose }: {
+  row: ClaimRow;
+  onSave: (patch: Partial<ClaimRow>) => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<ClaimRow>(row);
+  const setD = (patch: Partial<ClaimRow>) => setDraft((d) => ({ ...d, ...patch }));
+  const balance = draft.amount - draft.settlement;
+  const chargeToValue = draft.chargeTo || draft.owner || '';
+  return (
+    <div className="fv-ops__modal-overlay" onClick={onClose}>
+      <div className="fv-ops__soa" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-ops__soa-head">
+          <div>
+            <h2>Claim Details</h2>
+            <span className="fv-ops__soa-sub">{draft.reference || 'Claim'} · {chargeToValue || 'Charge To'} · {draft.currency}</span>
+          </div>
+          <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
+          </div>
+        </div>
+        <div className="fv-ops__soa-body">
+          <div className="fv-ops__vd-fields">
+            <VdField label="Type" value={draft.type} onChange={(v) => setD({ type: v })} />
+            <VdField label="Reference" value={draft.reference} onChange={(v) => setD({ reference: v })} />
+            <VdCombo label="Charge To" value={chargeToValue} onChange={(v) => setD({ chargeTo: v, owner: v })} options={CLAIM_CHARGE_TO_OPTIONS} listId="claim-charge-to" />
+            <VdField label="Due Date" value={draft.due || ''} onChange={(v) => setD({ due: v })} />
+            <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
+            <VdField label="Amount" value={String(draft.amount)} onChange={(v) => setD({ amount: num(v) })} num />
+            <VdField label="Settlement" value={String(draft.settlement)} onChange={(v) => setD({ settlement: num(v) })} num />
+            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+          </div>
+          <div className="fv-ops__vd-sub">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+          </div>
+          <div className="fv-ops__frl-voy">
+            <span><b>Balance:</b> {money(balance)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Freight / demurrage invoice editor — mirrors the SOA modal (edit / save / pdf). */
-function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, onClose }: {
-  inv: FreightInvoice; recap: Recap; voyage: Voyage; laytimes: LaytimePort[];
+function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onDelete, onClose }: {
+  inv: FreightInvoice; recap: Recap; voyage: Voyage; laytimes: LaytimePort[]; claims: ClaimRow[];
   onSave: (patch: Partial<FreightInvoice>) => void; onDelete: () => void; onClose: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<FreightInvoice>(inv);
   const setD = (patch: Partial<FreightInvoice>) => setDraft((d) => ({ ...d, ...patch }));
   const view = editing ? draft : inv;
-  const { lines, total } = calcInvoice(view, recap, laytimes);
+  const { lines, total } = calcInvoice(view, recap, laytimes, claims);
   const effBlQty = view.blQtyOverride?.trim() ? num(view.blQtyOverride) : num(recap.finalQtyLoaded);
   const effFreight = view.freightRateOverride?.trim() ? num(view.freightRateOverride) : num(recap.freightPerMt);
   const effAdcom = view.adcomOverride?.trim() ? num(view.adcomOverride) : num(recap.adcom);
@@ -4714,6 +6804,16 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, o
   const inp = (val: string, on: (v: string) => void, w?: number, ph?: string) => (
     <input className="fv-ops__vd-in" style={w ? { width: w } : undefined} value={val} placeholder={ph} disabled={!editing} onChange={(e) => on(e.target.value)} />
   );
+  const linkedClaimIds = view.claimIds ?? [];
+  const linkedClaims = linkedClaimIds.map((id) => claims.find((c) => c.id === id)).filter((c): c is ClaimRow => !!c && claimForCharterers(c));
+  const claimChoices = claims.filter((c) => claimForCharterers(c) && !(view.claimIds ?? []).includes(c.id));
+  const [claimPick, setClaimPick] = useState('');
+  const addClaimToInvoice = (id: string) => {
+    if (!id || linkedClaimIds.includes(id)) return;
+    setD({ claimIds: [...linkedClaimIds, id] });
+    setClaimPick('');
+  };
+  const removeClaimFromInvoice = (id: string) => setD({ claimIds: linkedClaimIds.filter((x) => x !== id) });
 
   const exportPdf = () => {
     const w = window.open('', '_blank', 'width=900,height=1100');
@@ -4828,6 +6928,38 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, onSave, onDelete, o
               {view.freightType === 'Final' && <label className="fv-ops__frl-chk"><input type="checkbox" checked={view.includeDemurrage} onChange={(e) => setD({ includeDemurrage: e.target.checked })} /> Include demurrage / despatch</label>}
             </div>
           )}
+          <div className="fv-ops__vd-sub">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-link" aria-hidden="true" /> Linked Claims (Charge To Charterers)</div>
+            {editing && (
+              <div className="fv-ops__frl-adj">
+                <label>
+                  Add Claim
+                  <select className="fv-ops__eta-sel" value={claimPick} onChange={(e) => setClaimPick(e.target.value)}>
+                    <option value="">Select claim…</option>
+                    {claimChoices.map((c) => (
+                      <option key={c.id} value={c.id}>{`${c.reference || c.type || 'Claim'} · ${money(claimOutstanding(c))}`}</option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="fv-ops__btn" disabled={!claimPick} onClick={() => addClaimToInvoice(claimPick)}><i className="fas fa-plus" aria-hidden="true" /> Add Claim</button>
+              </div>
+            )}
+            <table className="fv-ops__soa-tbl">
+              <thead><tr><th>Reference</th><th>Type</th><th>Charge To</th><th className="fv-ops__r">Amount</th>{editing && <th aria-label="Remove" />}</tr></thead>
+              <tbody>
+                {linkedClaims.length === 0 && <tr><td colSpan={editing ? 5 : 4} className="fv-ops__vd-empty">No linked claims.</td></tr>}
+                {linkedClaims.map((c) => (
+                  <tr key={c.id}>
+                    <td>{c.reference || '—'}</td>
+                    <td>{c.type || '—'}</td>
+                    <td>{claimChargeTo(c) || '—'}</td>
+                    <td className="fv-ops__r">{money(claimOutstanding(c))}</td>
+                    {editing && <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label="Remove linked claim" onClick={() => removeClaimFromInvoice(c.id)}><i className="fas fa-xmark" aria-hidden="true" /></button></td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <table className="fv-ops__soa-tbl fv-ops__soa-tbl--inv">
             <thead>
               <tr><th>Description</th><th className="fv-ops__r">Amount (US$)</th></tr>
@@ -5315,6 +7447,27 @@ function AlertsPanel({ alerts }: { alerts: Alert[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function DueAlertsPopup({ items, onClose }: { items: DuePopupItem[]; onClose: () => void }) {
+  return (
+    <div className="fv-ops__due-popup" role="status" aria-live="polite">
+      <div className="fv-ops__due-popup-head">
+        <strong><i className="fas fa-bell" aria-hidden="true" /> Due Alerts</strong>
+        <button type="button" className="fv-ops__icon-btn" aria-label="Close due alerts" onClick={onClose}>
+          <i className="fas fa-xmark" aria-hidden="true" />
+        </button>
+      </div>
+      <ul className="fv-ops__due-popup-list">
+        {items.map((it) => (
+          <li key={it.id} className={`fv-ops__due-popup-item fv-ops__due-popup-item--${it.level}`}>
+            {it.text}
+          </li>
+        ))}
+      </ul>
+      <p className="fv-ops__due-popup-note">This alert will reappear after 3 hours if still due.</p>
+    </div>
   );
 }
 

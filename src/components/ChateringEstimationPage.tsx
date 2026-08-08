@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import type { Voyage } from '../data/voyages';
-import { VOYAGES, makeBlankVoyage } from '../data/voyages';
+import { VOYAGES, makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { useWorldPorts, resolveWorldPort } from '../data/ports';
 import { accountNames } from '../data/clients';
 import { VesselSearchInput } from './VesselSearchInput';
@@ -226,6 +226,40 @@ interface EstimateResult {
   perLeg: LegCalc[];
 }
 
+interface ParsedPasteDraft {
+  vesselName?: string;
+  vesselType?: string;
+  built?: number;
+  dwt?: number;
+  draft?: number;
+  tpc?: number;
+  cargoName?: string;
+  quantity?: number;
+  laycanStart?: string;
+  laycanEnd?: string;
+  loadPort?: string;
+  dischargePorts: string[];
+  loadRate?: number;
+  dischargeRates: Record<string, number>;
+  freightRate?: number;
+  demurrage?: number;
+  despatch?: number;
+  serviceLadenSpeed?: number;
+  serviceBallastSpeed?: number;
+  serviceLadenFo?: number;
+  serviceBallastFo?: number;
+  serviceLadenMgo?: number;
+  serviceBallastMgo?: number;
+  ecoLadenSpeed?: number;
+  ecoBallastSpeed?: number;
+  ecoLadenFo?: number;
+  ecoBallastFo?: number;
+  ecoLadenMgo?: number;
+  ecoBallastMgo?: number;
+  inPortIdleFo?: number;
+  inPortWorkFo?: number;
+}
+
 /** A comparison scenario: same estimate with a vessel or cargo override. */
 type CompareBasis = 'vessel' | 'cargo';
 interface Scenario {
@@ -348,6 +382,155 @@ function cpddToIso(cpdd: string): string {
 }
 function uid(p: string): string {
   return `${p}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function readNumber(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const v = Number.parseFloat(raw.replace(/,/g, '').trim());
+  return Number.isFinite(v) ? v : undefined;
+}
+
+function keyPortName(port: string): string {
+  return port.replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+function prettyPortName(raw: string): string {
+  const cleaned = raw
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(?:CHOPS|ECI|MPT|SP|SB|PORT\s+DISCHARGE\s+BASIS|SINGLE\s+PORT\s+DISCHARGE\s+BASIS)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned
+    .toLowerCase()
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function squeezePortName(line: string): string {
+  const noMarks = line.replace(/\*/g, '').replace(/\([^)]*\)/g, ' ');
+  const parts = noMarks.split(',').map((x) => x.trim()).filter(Boolean);
+  const ignored = /^(?:\d+\s*SP.*|\d+\/?\d*\s*SB.*|MPT|ECI|CHOPS|SOUTH AFRICA|INDIA)$/i;
+  const pick = parts.find((p) => /[A-Za-z]/.test(p) && !ignored.test(p));
+  return prettyPortName(pick ?? parts[0] ?? noMarks);
+}
+
+function parseDateWithMonthToken(token: string): { y: number; m: number; d: number } | null {
+  const m = token.match(/(\d{1,2})(?:ST|ND|RD|TH)?\s*([A-Z]{3,9})\s*(\d{4})/i);
+  if (!m) return null;
+  const months: Record<string, number> = {
+    JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6,
+    JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12,
+  };
+  const day = Number(m[1]);
+  const mon = months[m[2].slice(0, 3).toUpperCase()] ?? 0;
+  const year = Number(m[3]);
+  if (!day || !mon || !year) return null;
+  return { y: year, m: mon, d: day };
+}
+
+function toIsoDateTime(part: { y: number; m: number; d: number }, hhmm = '0000'): string {
+  const hh = hhmm.padStart(4, '0').slice(0, 2);
+  const mm = hhmm.padStart(4, '0').slice(2, 4);
+  return `${String(part.y).padStart(4, '0')}-${String(part.m).padStart(2, '0')}-${String(part.d).padStart(2, '0')}T${hh}:${mm}`;
+}
+
+function parseLadenBallastPair(section: string): {
+  ladenSpeed?: number;
+  ladenFo?: number;
+  ladenMgo?: number;
+  ballastSpeed?: number;
+  ballastFo?: number;
+  ballastMgo?: number;
+} {
+  const laden = section.match(/LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[^\n]*ON\s*ABOUT\s*([\d.]+)\s*MT[^\n]*\+\s*ABOUT\s*([\d.]+)\s*MT/i);
+  const ballast = section.match(/BALLAST\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[^\n]*ON\s*ABOUT\s*([\d.]+)\s*MT[^\n]*\+\s*ABOUT\s*([\d.]+)\s*MT/i);
+  return {
+    ladenSpeed: readNumber(laden?.[1]),
+    ladenFo: readNumber(laden?.[2]),
+    ladenMgo: readNumber(laden?.[3]),
+    ballastSpeed: readNumber(ballast?.[1]),
+    ballastFo: readNumber(ballast?.[2]),
+    ballastMgo: readNumber(ballast?.[3]),
+  };
+}
+
+function parseEstimatePaste(text: string): ParsedPasteDraft {
+  const src = text.replace(/\r/g, '').replace(/\*/g, '');
+  const upper = src.toUpperCase();
+  const out: ParsedPasteDraft = {
+    dischargePorts: [],
+    dischargeRates: {},
+  };
+
+  const vesselName = src.match(/\n\s*([A-Z][A-Z0-9 .'-]{2,})\s*\n\s*BUILT\b/i)?.[1]?.trim();
+  if (vesselName) out.vesselName = vesselName;
+  out.built = readNumber(src.match(/\bBUILT\s*(\d{4})\b/i)?.[1]);
+  out.vesselType = src.match(/\bTYPE\s*:\s*([^\n]+)/i)?.[1]?.trim();
+  out.tpc = readNumber(src.match(/\bTPC\s*:\s*([\d.,]+)/i)?.[1]);
+  const dwtDraft = src.match(/\bDWA?T\/?SSW\s*:\s*([\d.,]+)\s*MT\s*ON\s*([\d.]+)\s*M/i);
+  out.dwt = readNumber(dwtDraft?.[1]);
+  out.draft = readNumber(dwtDraft?.[2]);
+
+  const serviceBlock = upper.match(/SERVICE\s+SPEED([\s\S]*?)ECO\s+SPEED/i)?.[1] ?? '';
+  const ecoBlock = upper.match(/ECO\s+SPEED([\s\S]*?)IN\s+PORT/i)?.[1] ?? '';
+  const service = parseLadenBallastPair(serviceBlock);
+  const eco = parseLadenBallastPair(ecoBlock);
+  out.serviceLadenSpeed = service.ladenSpeed;
+  out.serviceBallastSpeed = service.ballastSpeed;
+  out.serviceLadenFo = service.ladenFo;
+  out.serviceBallastFo = service.ballastFo;
+  out.serviceLadenMgo = service.ladenMgo;
+  out.serviceBallastMgo = service.ballastMgo;
+  out.ecoLadenSpeed = eco.ladenSpeed;
+  out.ecoBallastSpeed = eco.ballastSpeed;
+  out.ecoLadenFo = eco.ladenFo;
+  out.ecoBallastFo = eco.ballastFo;
+  out.ecoLadenMgo = eco.ladenMgo;
+  out.ecoBallastMgo = eco.ballastMgo;
+  out.inPortIdleFo = readNumber(src.match(/\bIDLE\s*:\s*ABOUT\s*([\d.]+)\s*MT/i)?.[1]);
+  out.inPortWorkFo = readNumber(src.match(/\bWORK\s*:\s*ABOUT\s*([\d.]+)\s*MT/i)?.[1]);
+
+  const laycanBlock = src.match(/LAYCAN\s*:\s*([\s\S]{0,220})/i)?.[1] ?? '';
+  const dateMatches = [...laycanBlock.matchAll(/\d{1,2}(?:ST|ND|RD|TH)?\s*[A-Z]{3,9}\s*\d{4}/gi)].map((m) => m[0]);
+  const timeMatches = [...laycanBlock.matchAll(/(\d{3,4})\s*HRS/gi)].map((m) => m[1]);
+  const firstDate = dateMatches[0] ? parseDateWithMonthToken(dateMatches[0]) : null;
+  const lastDate = dateMatches[1] ? parseDateWithMonthToken(dateMatches[1]) : null;
+  if (firstDate) out.laycanStart = toIsoDateTime(firstDate, timeMatches[0] ?? '0001');
+  if (lastDate) out.laycanEnd = toIsoDateTime(lastDate, timeMatches[1] ?? '2359');
+
+  const cargoLine = src.match(/CARGO\s*&\s*QTY\s*:\s*([^\n]+)/i)?.[1]?.trim();
+  if (cargoLine) out.cargoName = cargoLine.replace(/\s+/g, ' ');
+  out.quantity = readNumber(src.match(/\b(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*\+\/-\s*\d+(?:\.\d+)?%/i)?.[1]);
+
+  const loadPortLine = src.match(/LOAD\s+PORT\s*:\s*([^\n]+)/i)?.[1] ?? '';
+  const loadPort = squeezePortName(loadPortLine);
+  if (loadPort) out.loadPort = loadPort;
+
+  const dischPortOptions = [...src.matchAll(/[A-Z]\)\s*[^\n\-]*-\s*([^\n]+)/gi)].map((m) => squeezePortName(m[1])).filter(Boolean);
+  out.dischargePorts = Array.from(new Set(dischPortOptions));
+
+  out.loadRate = readNumber(src.match(/LOAD\s+RATE[\s\S]{0,140}?-\s*([\d,]+(?:\.\d+)?)\s*MT/i)?.[1]);
+  for (const m of src.matchAll(/\b(PARADIP|GOPALPUR|GANGAVARAM)\s*-\s*([\d,]+(?:\.\d+)?)\s*MT/gi)) {
+    out.dischargeRates[keyPortName(prettyPortName(m[1]))] = readNumber(m[2]) ?? 0;
+  }
+
+  out.freightRate = readNumber(src.match(/FREIGHT\s+RATE[^\n:]*:\s*[^\d\n]*([\d]+(?:\.\d+)?)/i)?.[1]);
+  out.demurrage = readNumber(src.match(/DEM\/?DSP[^\n:]*:\s*USD\s*([\d,]+(?:\.\d+)?)/i)?.[1]);
+  if (typeof out.demurrage === 'number' && out.demurrage > 0) out.despatch = out.demurrage / 2;
+
+  return out;
+}
+
+function isBlankEstimationDraft(inputs: EstimateInputs, vessel: VesselParticular): boolean {
+  const hasVessel = Boolean(vessel.name.trim()) || vessel.dwt > 0 || vessel.built > 0 || vessel.tpc > 0;
+  const hasCargo = inputs.cargoes.some((c) =>
+    c.name.trim() || c.loadPort.trim() || c.dischPort.trim() || c.quantity > 0 || c.frt > 0,
+  );
+  const hasPorts = inputs.ports.some((p) => p.port.trim() || p.distance > 0 || p.ldRate > 0);
+  return !hasVessel && !hasCargo && !hasPorts;
 }
 
 /** Great-circle distance between two lat/lon points, in nautical miles. */
@@ -886,6 +1069,9 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const [canalsOpen, setCanalsOpen] = useState(false);
   const canalsRef = useRef<HTMLDivElement | null>(null);
   const [gettingDist, setGettingDist] = useState(false);
+  const [quickPasteText, setQuickPasteText] = useState('');
+  const [quickPasteMsg, setQuickPasteMsg] = useState('');
+  const [quickPasteOpen, setQuickPasteOpen] = useState(createMode);
   // Header tool popups (Loadable Qty / Result Plus / Remark).
   const [lqOpen, setLqOpen] = useState(false);
   const [tplOpen, setTplOpen] = useState(false);
@@ -1008,6 +1194,7 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     const tf = inputs.cargoes.reduce((s, c) => s + c.quantity * c.frt, 0);
     return { qty, tf, frtAvg: qty > 0 ? tf / qty : 0 };
   }, [inputs.cargoes]);
+  const blankDraft = useMemo(() => isBlankEstimationDraft(inputs, vessel), [inputs, vessel]);
 
   if (!voyage) return <NoVesselSelected />;
 
@@ -1062,6 +1249,221 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       ],
     });
   const removePort = (id: string) => patch({ ports: inputs.ports.filter((r) => r.id !== id) });
+
+  const applyQuickPaste = () => {
+    if (locked) return;
+    const body = quickPasteText.trim();
+    if (!body) {
+      setQuickPasteMsg('Paste vessel/cargo details first, then click Apply.');
+      return;
+    }
+    const parsed = parseEstimatePaste(body);
+    const applied: string[] = [];
+
+    const nextVessel: VesselParticular = { ...vessel };
+    if (parsed.vesselName) {
+      nextVessel.name = parsed.vesselName;
+      applied.push('vessel name');
+    }
+    if (typeof parsed.vesselType === 'string' && parsed.vesselType.trim()) {
+      nextVessel.type = parsed.vesselType.trim();
+      applied.push('vessel type');
+    }
+    if (typeof parsed.built === 'number' && parsed.built > 0) {
+      nextVessel.built = parsed.built;
+      applied.push('built year');
+    }
+    if (typeof parsed.dwt === 'number' && parsed.dwt > 0) {
+      nextVessel.dwt = parsed.dwt;
+      applied.push('DWT');
+    }
+    if (typeof parsed.draft === 'number' && parsed.draft > 0) {
+      nextVessel.draft = parsed.draft;
+      applied.push('draft');
+    }
+    if (typeof parsed.tpc === 'number' && parsed.tpc > 0) {
+      nextVessel.tpc = parsed.tpc;
+      applied.push('TPC');
+    }
+
+    const nextInputs: EstimateInputs = {
+      ...inputs,
+      cargoes: [...inputs.cargoes],
+      ports: [...inputs.ports],
+      perf: {
+        ...inputs.perf,
+        full: { ...inputs.perf.full },
+        eco: { ...inputs.perf.eco },
+        mainNormal: { ...inputs.perf.mainNormal },
+        mainEca: { ...inputs.perf.mainEca },
+        subNormal: { ...inputs.perf.subNormal },
+        subEca: { ...inputs.perf.subEca },
+      },
+      commercial: { ...inputs.commercial },
+    };
+
+    if (typeof parsed.serviceBallastSpeed === 'number' && parsed.serviceBallastSpeed > 0) {
+      nextInputs.perf.full.ballast = parsed.serviceBallastSpeed;
+      applied.push('service ballast speed');
+    }
+    if (typeof parsed.serviceLadenSpeed === 'number' && parsed.serviceLadenSpeed > 0) {
+      nextInputs.perf.full.laden = parsed.serviceLadenSpeed;
+      applied.push('service laden speed');
+    }
+    if (typeof parsed.ecoBallastSpeed === 'number' && parsed.ecoBallastSpeed > 0) {
+      nextInputs.perf.eco.ballast = parsed.ecoBallastSpeed;
+      applied.push('eco ballast speed');
+    }
+    if (typeof parsed.ecoLadenSpeed === 'number' && parsed.ecoLadenSpeed > 0) {
+      nextInputs.perf.eco.laden = parsed.ecoLadenSpeed;
+      applied.push('eco laden speed');
+    }
+    if (typeof parsed.serviceBallastFo === 'number' && parsed.serviceBallastFo > 0) {
+      nextInputs.perf.mainNormal.ballast = parsed.serviceBallastFo;
+      nextInputs.perf.mainEca.ballast = parsed.serviceBallastFo;
+      applied.push('service FO ballast');
+    }
+    if (typeof parsed.serviceLadenFo === 'number' && parsed.serviceLadenFo > 0) {
+      nextInputs.perf.mainNormal.laden = parsed.serviceLadenFo;
+      nextInputs.perf.mainEca.laden = parsed.serviceLadenFo;
+      applied.push('service FO laden');
+    }
+    if (typeof parsed.inPortIdleFo === 'number' && parsed.inPortIdleFo > 0) {
+      nextInputs.perf.mainNormal.idle = parsed.inPortIdleFo;
+      nextInputs.perf.mainEca.idle = parsed.inPortIdleFo;
+      applied.push('in-port idle FO');
+    }
+    if (typeof parsed.inPortWorkFo === 'number' && parsed.inPortWorkFo > 0) {
+      nextInputs.perf.mainNormal.work = parsed.inPortWorkFo;
+      nextInputs.perf.mainEca.work = parsed.inPortWorkFo;
+      applied.push('in-port work FO');
+    }
+    const serviceMgo = [parsed.serviceLadenMgo, parsed.serviceBallastMgo].filter((v): v is number => typeof v === 'number' && v >= 0);
+    if (serviceMgo.length > 0) {
+      const seaMgo = round(serviceMgo.reduce((s, v) => s + v, 0) / serviceMgo.length, 3);
+      nextInputs.perf.subNormal.sea = seaMgo;
+      nextInputs.perf.subEca.sea = seaMgo;
+      applied.push('service MGO sea');
+    }
+
+    if (parsed.laycanStart) {
+      nextInputs.startDate = parsed.laycanStart;
+      applied.push('laycan start');
+    }
+    const cargoNameParts = (parsed.cargoName ?? '')
+      .split(/\bOR\b/i)[0]
+      ?.split('+')
+      .map((s) => s.replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim())
+      .filter(Boolean) ?? [];
+    const inferredCargoNames = cargoNameParts.length > 0 ? cargoNameParts : (parsed.cargoName ? [parsed.cargoName] : []);
+    const targetCargoCount = Math.max(1, inferredCargoNames.length);
+    const baseCargo = nextInputs.cargoes[0] ?? {
+      id: uid('cg'),
+      account: '',
+      name: '',
+      loadPort: '',
+      dischPort: '',
+      quantity: 0,
+      unit: defaultQtyUnitForVessel(nextVessel.type),
+      frt: 0,
+      frtUnit: defaultFreightUnit(defaultQtyUnitForVessel(nextVessel.type)),
+      term: 'FIO',
+      aCommPct: 3.75,
+      brkgPct: 1.25,
+      frtTaxPct: 0,
+      linerTerm: 0,
+    } as Cargo;
+    const nextCargoes = [...nextInputs.cargoes];
+    while (nextCargoes.length < targetCargoCount) {
+      nextCargoes.push({ ...baseCargo, id: uid('cg') });
+    }
+    const splitQty = typeof parsed.quantity === 'number' && parsed.quantity > 0 && targetCargoCount > 1
+      ? round(parsed.quantity / targetCargoCount, 0)
+      : undefined;
+    for (let idx = 0; idx < targetCargoCount; idx += 1) {
+      const curr = nextCargoes[idx];
+      const cargoName = inferredCargoNames[idx] ?? curr.name;
+      const dischPort = parsed.dischargePorts[idx] ?? parsed.dischargePorts[0] ?? curr.dischPort;
+      nextCargoes[idx] = {
+        ...curr,
+        name: cargoName,
+        quantity: typeof parsed.quantity === 'number' && parsed.quantity > 0 ? (splitQty ?? parsed.quantity) : curr.quantity,
+        loadPort: parsed.loadPort ?? curr.loadPort,
+        dischPort,
+        frt: typeof parsed.freightRate === 'number' && parsed.freightRate > 0 ? parsed.freightRate : curr.frt,
+      };
+    }
+    nextInputs.cargoes = nextCargoes;
+    if (inferredCargoNames.length > 0) applied.push(inferredCargoNames.length > 1 ? 'cargoes' : 'cargo name');
+    if (typeof parsed.quantity === 'number' && parsed.quantity > 0) applied.push('cargo quantity');
+    if (parsed.loadPort) applied.push('load port (cargo)');
+    if (parsed.dischargePorts.length > 0) applied.push('discharge port (cargo)');
+    if (typeof parsed.freightRate === 'number' && parsed.freightRate > 0) {
+      applied.push('freight rate');
+      const totalQty = nextInputs.cargoes.reduce((s, c) => s + c.quantity, 0);
+      nextInputs.commercial.freightIn = round(totalQty * parsed.freightRate, 0);
+    }
+
+    const basePorts = nextInputs.ports.length > 0 ? [...nextInputs.ports] : seedInputs(voyage, true).ports;
+    const findRowIndex = (type: string, from = 0) => basePorts.findIndex((p, idx) => idx >= from && p.type === type);
+    let loadIdx = findRowIndex('Loading');
+    if (loadIdx < 0) {
+      basePorts.unshift({ id: uid('pr'), type: 'Loading', port: '', distance: 0, ecaDistance: 0, wf: 5, speed: nextInputs.perf.full.laden, ldRate: 0, idle: 0.5, work: 0, seaManual: 0, dem: 0, des: 0, portCharge: 0, laytimeTerm: 'SHINC', rateUnit: 'MT/Day' });
+      loadIdx = 0;
+    }
+    if (parsed.loadPort) {
+      basePorts[loadIdx] = { ...basePorts[loadIdx], port: parsed.loadPort };
+      applied.push('load port (rotation)');
+    }
+    if (typeof parsed.loadRate === 'number' && parsed.loadRate > 0) {
+      basePorts[loadIdx] = { ...basePorts[loadIdx], ldRate: parsed.loadRate };
+      applied.push('load rate');
+    }
+
+    const dischTargets = parsed.dischargePorts.length > 0 ? parsed.dischargePorts : [];
+    const dischIndexes = basePorts
+      .map((p, idx) => ({ p, idx }))
+      .filter((x) => x.p.type === 'Discharging')
+      .map((x) => x.idx);
+    const dischTemplate = dischIndexes.length > 0
+      ? { ...basePorts[dischIndexes[0]] }
+      : { id: uid('pr'), type: 'Discharging', port: '', distance: 0, ecaDistance: 0, wf: 5, speed: nextInputs.perf.full.laden, ldRate: 0, idle: 0.5, work: 0, seaManual: 0, dem: 0, des: 0, portCharge: 0, laytimeTerm: 'SHINC', rateUnit: 'MT/Day' };
+
+    while (dischIndexes.length < dischTargets.length) {
+      const row: PortRow = { ...dischTemplate, id: uid('pr') };
+      basePorts.push(row);
+      dischIndexes.push(basePorts.length - 1);
+    }
+    dischTargets.forEach((portName, idx) => {
+      const di = dischIndexes[idx];
+      if (di == null) return;
+      const rate = parsed.dischargeRates[keyPortName(portName)] ?? basePorts[di].ldRate;
+      basePorts[di] = { ...basePorts[di], port: portName, ldRate: rate > 0 ? rate : basePorts[di].ldRate };
+    });
+    if (dischTargets.length > 0) applied.push('discharge options');
+    if (Object.keys(parsed.dischargeRates).length > 0) applied.push('discharge rates');
+
+    if (typeof parsed.demurrage === 'number' && parsed.demurrage > 0) {
+      const des = typeof parsed.despatch === 'number' && parsed.despatch > 0 ? parsed.despatch : parsed.demurrage / 2;
+      basePorts.forEach((p, idx) => {
+        if (p.type === 'Loading' || p.type === 'Discharging') {
+          basePorts[idx] = { ...p, dem: parsed.demurrage ?? p.dem, des };
+        }
+      });
+      applied.push('demurrage/despatch');
+    }
+
+    nextInputs.ports = basePorts;
+
+    setVessel(nextVessel);
+    setInputs(nextInputs);
+    touch();
+    setQuickPasteMsg(
+      applied.length > 0
+        ? `Applied ${Array.from(new Set(applied)).length} sections from pasted details.`
+        : 'No recognizable vessel/cargo fields found. Paste a recap-like block and try again.',
+    );
+  };
 
   // Resolve a port/landmark name to coordinates for auto-distance.
   const resolvePortCoord = (name: string): { lat: number; lon: number } | null => {
@@ -1154,6 +1556,7 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     setLocked(false);
     setFixtureNo(null);
     setScenarios([]);
+    setQuickPasteOpen(true);
   };
   // Apply a standard vessel-size template: fill the vessel particulars +
   // performance profile, keeping the (searched) vessel name intact.
@@ -1189,8 +1592,39 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       savedAt: new Date().toLocaleString(),
       data: { inputs, vessel },
     });
+    if (createMode && vessel.name.trim()) {
+      const firstLoad = inputs.ports.find((p) => p.type === 'Loading')?.port ?? '';
+      const firstDisch = inputs.ports.find((p) => p.type === 'Discharging')?.port ?? '';
+      upsertCreatedVoyage({
+        vessel: vessel.name.trim(),
+        vesselType: vessel.type || '',
+        dwt: vessel.dwt > 0 ? String(Math.round(vessel.dwt)) : '',
+        built: vessel.built || 0,
+        client: voyage.client || '',
+        clientEmail: voyage.clientEmail || '',
+        service: 'PMO',
+        status: 'At Sea',
+        portFrom: firstLoad,
+        portTo: firstDisch,
+        cpSpeed: inputs.perf.full.laden || 0,
+        cpCons: inputs.perf.mainNormal.laden || 0,
+        instSpeed: inputs.perf.eco.laden || 0,
+        instCons: inputs.perf.mainNormal.laden || 0,
+        price: inputs.commercial.dailyHire || 0,
+        pricingBasis: 'Per Day',
+        costPerDay: inputs.commercial.dailyHire || 0,
+        foCost: inputs.commercial.vlsfoPrice || 0,
+        goCost: inputs.commercial.mgoPrice || 0,
+        euaCost: 0,
+        pic: voyage.pic || 'You',
+        open: 'OPEN',
+        health: 74,
+        seed: Date.now() % 10_000,
+      });
+    }
     addNotification(`Estimate saved — ${label} (${money(result.profit)} profit)`, 'Chartering');
   };
+  const discard = () => newEstimate();
   // Build and print a PDF report. When Compare is open with variants, the
   // report is the comparison table; otherwise it is the single-estimate sheet.
   const exportPdf = () => {
@@ -1311,8 +1745,39 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   // Hand the fixed voyage over to Operations and notify the team to assign a PIC.
   const copyToOperations = () => {
     if (!voyage || status !== 'Fixed') return;
-    handoverToOperations(voyage.id);
-    addNotification(`New voyage ${voyage.id} — ${voyage.vessel} fixed & sent to Operations. Please assign a PIC.`, 'Operations');
+    const firstLoad = inputs.ports.find((p) => p.type === 'Loading')?.port ?? voyage.portFrom ?? '';
+    const firstDisch = inputs.ports.find((p) => p.type === 'Discharging')?.port ?? voyage.portTo ?? '';
+    const saved = upsertCreatedVoyage({
+      id: voyage.id,
+      vessel: vessel.name.trim() || voyage.vessel || 'New Voyage',
+      imo: voyage.imo || '',
+      vesselType: vessel.type || voyage.vesselType || '',
+      dwt: vessel.dwt > 0 ? String(Math.round(vessel.dwt)) : (voyage.dwt || ''),
+      built: vessel.built || voyage.built || 0,
+      client: voyage.client || '',
+      clientEmail: voyage.clientEmail || '',
+      pic: voyage.pic || 'You',
+      service: voyage.service || 'PMO',
+      status: 'At Sea',
+      portFrom: firstLoad,
+      portTo: firstDisch,
+      cpSpeed: inputs.perf.full.laden || voyage.cpSpeed || 0,
+      cpCons: inputs.perf.mainNormal.laden || voyage.cpCons || 0,
+      instSpeed: inputs.perf.eco.laden || voyage.instSpeed || 0,
+      instCons: inputs.perf.mainNormal.laden || voyage.instCons || 0,
+      price: inputs.commercial.dailyHire || voyage.price || 0,
+      pricingBasis: voyage.pricingBasis || 'Per Day',
+      costPerDay: inputs.commercial.dailyHire || voyage.costPerDay || 0,
+      foCost: inputs.commercial.vlsfoPrice || voyage.foCost || 0,
+      goCost: inputs.commercial.mgoPrice || voyage.goCost || 0,
+      euaCost: voyage.euaCost || 0,
+      openTasks: voyage.openTasks || 0,
+      open: voyage.open || 'OPEN',
+      health: voyage.health || 74,
+      seed: voyage.seed || (Date.now() % 10_000),
+    });
+    handoverToOperations(saved.id);
+    addNotification(`New voyage ${saved.id} — ${saved.vessel} fixed & sent to Operations. Please assign a PIC.`, 'Operations');
   };
 
   /* -------- compare scenarios -------- */
@@ -1512,9 +1977,17 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
 
         <div className="fv-ce__actions">
           <button type="button" className="fv-ce__btn" onClick={newEstimate}><i className="fas fa-plus" /> New</button>
+          <button
+            type="button"
+            className={`fv-ce__btn${quickPasteOpen ? ' fv-ce__btn--on' : ''}`}
+            onClick={() => setQuickPasteOpen((v) => !v)}
+          >
+            <i className="fas fa-paste" /> {quickPasteOpen ? 'Hide Paste Box' : 'Paste Details'}
+          </button>
           <button type="button" className="fv-ce__btn" onClick={addCargoVariant}><i className="fas fa-clone" /> Duplicate</button>
           <button type="button" className={`fv-ce__btn${compareOpen ? ' fv-ce__btn--on' : ''}`} onClick={() => setCompareOpen((v) => !v)}><i className="fas fa-scale-balanced" /> Compare</button>
           <button type="button" className="fv-ce__btn fv-ce__btn--primary" onClick={save}><i className="fas fa-floppy-disk" /> Save</button>
+          <button type="button" className="fv-ce__btn" onClick={discard}><i className="fas fa-rotate-left" /> Discard</button>
           <button type="button" className="fv-ce__btn" onClick={() => setTplOpen(true)}><i className="fas fa-file-lines" /> Template</button>
           <button type="button" className="fv-ce__btn" onClick={exportPdf}><i className="fas fa-file-pdf" /> PDF</button>
           <button type="button" className="fv-ce__btn fv-ce__btn--amber" onClick={() => changeStatus('On Subs')} disabled={locked}><i className="fas fa-hourglass-half" /> On Subs</button>
@@ -1530,6 +2003,30 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
           )}
         </div>
       </header>
+
+      {(blankDraft || quickPasteOpen) && (
+        <section className="fv-ce__quickfill">
+          <div className="fv-ce__quickfill-head">
+            <h3>Paste Vessel & Cargo Details</h3>
+            <p>Paste recap/fixture text and auto-fill vessel particulars, cargo, laycan, ports, rates, freight and demurrage fields.</p>
+          </div>
+          <textarea
+            className="fv-ce__quickfill-input"
+            value={quickPasteText}
+            onChange={(e) => setQuickPasteText(e.target.value)}
+            placeholder="Paste charter recap / vessel details here..."
+          />
+          <div className="fv-ce__quickfill-actions">
+            <button type="button" className="fv-ce__btn fv-ce__btn--primary" onClick={applyQuickPaste} disabled={!quickPasteText.trim() || locked}>
+              <i className="fas fa-wand-magic-sparkles" /> Apply to Estimation
+            </button>
+            <button type="button" className="fv-ce__btn" onClick={() => { setQuickPasteText(''); setQuickPasteMsg(''); }} disabled={locked}>
+              <i className="fas fa-eraser" /> Clear
+            </button>
+            {quickPasteMsg && <span className="fv-ce__quickfill-msg">{quickPasteMsg}</span>}
+          </div>
+        </section>
+      )}
 
       {/* ===================== COMPARISON (toggle) ===================== */}
       {compareOpen && (

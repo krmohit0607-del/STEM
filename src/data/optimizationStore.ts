@@ -20,6 +20,23 @@ export interface OptimizationRun {
   market: MarketFactors;
   etd: string;
   targetEta?: string | null;
+  customSimulation?: {
+    speedKn: number;
+    consumptionPerDay: number;
+    rta?: string | null;
+    rpmMin?: string;
+    rpmMax?: string;
+    mcrMin?: string;
+    mcrMax?: string;
+    draft?: string;
+    displacement?: string;
+    gm?: string;
+    ecaFractionPct?: number;
+  } | null;
+  startAnchor?: {
+    source: 'report' | 'ais' | 'none';
+    startVertexIndex: number;
+  } | null;
 }
 
 export type PanelViewRequest = 'tracksheet' | 'simulator' | 'optimization' | null;

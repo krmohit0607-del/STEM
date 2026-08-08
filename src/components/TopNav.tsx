@@ -39,11 +39,15 @@ export function TopNav() {
     return () => document.removeEventListener('mousedown', onDoc);
   }, [createOpen]);
 
-  const startCreate = (type: 'estimation' | 'operations' | 'performance') => {
+  const startCreate = (type: 'estimation' | 'operations' | 'performance' | 'bunker' | 'postfix' | 'emissions' | 'accounts') => {
     setCreateOpen(false);
-    if (type === 'estimation') navigate('/chartering?new=1');
-    else if (type === 'operations') navigate('/operations?new=1');
-    else navigate('/voyage/new?type=performance');
+    if (type === 'estimation') navigate('/chartering?new=1', { state: { fleetMenuModule: 'Chartering' } });
+    else if (type === 'operations') navigate('/operations?new=1', { state: { fleetMenuModule: 'Operations' } });
+    else if (type === 'performance') navigate('/voyage/new?type=performance', { state: { fleetMenuModule: 'Performance' } });
+    else if (type === 'bunker') navigate('/bunker?new=1', { state: { fleetMenuModule: 'Bunker' } });
+    else if (type === 'postfix') navigate('/postfix?new=1', { state: { fleetMenuModule: 'Postfix' } });
+    else if (type === 'emissions') navigate('/emissions?new=1', { state: { fleetMenuModule: 'Emissions' } });
+    else navigate('/accounts?new=1', { state: { fleetMenuModule: 'Accounts' } });
   };
 
   useEffect(() => {
@@ -124,11 +128,27 @@ export function TopNav() {
               </button>
               <button type="button" role="menuitem" onClick={() => startCreate('operations')}>
                 <i className="fas fa-clipboard-list" aria-hidden="true" />
-                <span>{t('createOperations', 'Under Operations')}</span>
+                <span>{t('createOperations', 'Operations')}</span>
               </button>
               <button type="button" role="menuitem" onClick={() => startCreate('performance')}>
                 <i className="fas fa-gauge-high" aria-hidden="true" />
                 <span>{t('createPerformance', 'Performance')}</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => startCreate('bunker')}>
+                <i className="fas fa-gas-pump" aria-hidden="true" />
+                <span>{t('createBunker', 'Bunker')}</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => startCreate('postfix')}>
+                <i className="fas fa-file-signature" aria-hidden="true" />
+                <span>{t('createPostfix', 'Postfix')}</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => startCreate('emissions')}>
+                <i className="fas fa-leaf" aria-hidden="true" />
+                <span>{t('createEmissions', 'Emissions')}</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => startCreate('accounts')}>
+                <i className="fas fa-building-columns" aria-hidden="true" />
+                <span>{t('createAccounts', 'Accounts')}</span>
               </button>
             </div>
           )}

@@ -25,6 +25,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { fetchPointWeatherAt } from '../data/openMeteo';
 import { setVesselPosition } from '../data/vesselPosition';
+import { setRouteReportMarkers } from '../data/routeReportMarkers';
+import { useActiveSimRoute } from '../data/routeSimulatorStore';
 import { loadVoyageShared } from '../data/voyageOverrides';
 import {
   fromDateInput,
@@ -262,6 +264,17 @@ const RT_LABELS: Record<string, string> = {
   R: 'Resume',
 };
 
+const RT_COLORS: Record<string, string> = {
+  D: '#3fb950',
+  A: '#58a6ff',
+  N: '#f59e0b',
+  FC: '#ff7b72',
+  SC: '#a371f7',
+  BS: '#39c5cf',
+  S: '#d29922',
+  R: '#2ea043',
+};
+
 function rtShort(value: string): string {
   if (!value) return '—';
   return value;
@@ -390,6 +403,40 @@ function compass16(deg: number | null): string {
   return COMPASS16[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
 }
 
+/** Great-circle distance between two positions in nautical miles. */
+function distanceNm(aLat: number, aLon: number, bLat: number, bLon: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 3440.065;
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLon - aLon);
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)));
+}
+
+/** Nearest route vertex to a coordinate. */
+function nearestRouteVertex(
+  path: Array<[number, number]>,
+  lat: number,
+  lon: number,
+): { pos: [number, number]; distNm: number } | null {
+  if (path.length === 0) return null;
+  let bestPos = path[0];
+  let bestDist = distanceNm(lat, lon, bestPos[0], bestPos[1]);
+  for (let i = 1; i < path.length; i += 1) {
+    const p = path[i];
+    const d = distanceNm(lat, lon, p[0], p[1]);
+    if (d < bestDist) {
+      bestDist = d;
+      bestPos = p;
+    }
+  }
+  return { pos: bestPos, distNm: bestDist };
+}
+
+const REPORT_ROUTE_SNAP_MAX_NM = 160;
+
 /** Beaufort force from wind speed (knots). */
 function beaufort(kn: number): number {
   const thresholds = [1, 4, 7, 11, 17, 22, 28, 34, 41, 48, 56, 64];
@@ -481,6 +528,7 @@ function parseCsv(text: string): string[][] {
 
 export function TracksheetGrid() {
   const selectedVoyage = useSelectedVoyage();
+  const activeRoute = useActiveSimRoute();
   const vesselName = selectedVoyage?.vessel ?? 'MV Atlantic Voyager';
   const routeLabel = selectedVoyage
     ? `${selectedVoyage.portFrom} → ${selectedVoyage.portTo}`
@@ -677,6 +725,60 @@ export function TracksheetGrid() {
       setVesselPosition({ lat, lon, label: vesselName });
     }
   }, [rows, vesselName]);
+
+  // Keep received report positions on the current active route. This preserves
+  // sailed geometry up to each saved report unless that report is edited/deleted.
+  useEffect(() => {
+    const routePath = activeRoute?.path ?? [];
+    if (routePath.length < 2) return;
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((row) => {
+        if (!row.rt.trim()) return row;
+        const lat = parseCoord(row.lat);
+        const lon = parseCoord(row.lng);
+        if (lat == null || lon == null) return row;
+        const nearest = nearestRouteVertex(routePath, lat, lon);
+        if (!nearest || nearest.distNm > REPORT_ROUTE_SNAP_MAX_NM) return row;
+        const alignedLat = toCoord(nearest.pos[0], true);
+        const alignedLon = toCoord(nearest.pos[1], false);
+        if (alignedLat === row.lat && alignedLon === row.lng) return row;
+        changed = true;
+        return { ...row, lat: alignedLat, lng: alignedLon };
+      });
+      return changed ? next : prev;
+    });
+  }, [activeRoute?.id]);
+
+  // Publish tracksheet reports (D/A/N/SC/FC/...) plus validated in-between
+  // 6-hour breakup points so the active route map can render them.
+  useEffect(() => {
+    const markers = rows
+      .map((row, i) => {
+        const lat = parseCoord(row.lat);
+        const lon = parseCoord(row.lng);
+        if (lat == null || lon == null) return null;
+        const code = (row.rt || '6H').trim().toUpperCase();
+        const isInterpolated = row.rt.trim() === '';
+        const epoch = rowEpoch(row.date, row.time);
+        const iso = epoch != null ? new Date(epoch).toISOString() : undefined;
+        return {
+          id: row.id || `track-${i}`,
+          pos: [lat, lon] as [number, number],
+          reportCode: code,
+          reportType: isInterpolated ? 'Validated 6-hour position' : RT_LABELS[code] ?? code,
+          dateTimeIso: iso,
+          dateTimeText: `${row.date} ${row.time} UTC`,
+          speedKts: row.avgSpeedO,
+          distanceNm: row.distO ?? row.distR,
+          isInterpolated,
+          color: isInterpolated ? '#b8c4d6' : RT_COLORS[code] ?? '#58a6ff',
+        };
+      })
+      .filter((m): m is NonNullable<typeof m> => m != null);
+    setRouteReportMarkers(markers);
+    return () => setRouteReportMarkers([]);
+  }, [rows]);
 
   const exportCsv = () => {
     const header = CSV_COLS.map((c) => String(c.key)).join(',');

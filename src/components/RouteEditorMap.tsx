@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useRef } from 'react';
+import { Fragment, useEffect, useState, useRef } from 'react';
 import {
   MapContainer,
   Marker,
+  Popup,
   Polyline,
   TileLayer,
   Tooltip,
@@ -15,6 +16,7 @@ import { WeatherFieldControl } from './WeatherFieldControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { MapCursorPosition } from './MapCursorPosition';
+import { MapLayersControl, readMapLayerId, type MapLayerId } from './MapLayersControl';
 
 const toRad = (d: number) => (d * Math.PI) / 180;
 const toDeg = (r: number) => (r * 180) / Math.PI;
@@ -113,6 +115,8 @@ export interface EditorPoint {
   distFromPrev: number;
   /** Cumulative distance from departure (NM). */
   distFromStart: number;
+  /** True when this waypoint is anchored by a received report and fixed. */
+  locked?: boolean;
 }
 
 /** An animated vessel marker moving along a candidate route during playback. */
@@ -131,6 +135,29 @@ export interface ShipMarker {
   heading?: number;
 }
 
+export interface ReportMarker {
+  id: string;
+  pos: [number, number];
+  reportCode: string;
+  reportType: string;
+  dateTimeIso?: string;
+  dateTimeText?: string;
+  speedKts?: number | null;
+  distanceNm?: number | null;
+  isInterpolated?: boolean;
+  color?: string;
+  selectedSpeedLabel?: string;
+  selectedSpeedKts?: number;
+  selectedFuelType?: string;
+}
+
+export interface ReportSpeedOption {
+  id: string;
+  label: string;
+  speedKts: number;
+  isDefault?: boolean;
+}
+
 interface RouteEditorMapProps {
   points: EditorPoint[];
   plotMode: boolean;
@@ -143,6 +170,18 @@ interface RouteEditorMapProps {
   selectedRouteId?: string | null;
   /** Vessel markers animated along the routes during route-simulator playback. */
   shipMarkers?: ShipMarker[];
+  /** Route report positions (departure/noon/speed-change/fuel-change/...). */
+  reportMarkers?: ReportMarker[];
+  /** Speed profile choices shown on report-marker right click. */
+  reportSpeedOptions?: ReportSpeedOption[];
+  /** Fuel type choices shown on report-marker right click. */
+  reportFuelOptions?: string[];
+  /** Default fuel type taken from the leg's selected speed/cons profile. */
+  defaultReportFuelType?: string;
+  /** Called when a speed profile is selected for a report marker. */
+  onSetReportSpeed?: (reportId: string, option: ReportSpeedOption) => void;
+  /** Called when a fuel type is selected for a report marker. */
+  onSetReportFuel?: (reportId: string, fuelType: string) => void;
   /** Colour of the planned route legs (black when it is the active route). */
   plannedRouteColor?: string;
   /** Route waypoint vertices to render as coloured dots. */
@@ -234,6 +273,21 @@ function wpDotIcon(color: string): L.DivIcon {
   return icon;
 }
 
+/** Pale dot icon for validated in-between (6-hour) breakup points. */
+const reportGapDotCache = new Map<string, L.DivIcon>();
+function reportGapDotIcon(color: string): L.DivIcon {
+  const cached = reportGapDotCache.get(color);
+  if (cached) return cached;
+  const icon = L.divIcon({
+    className: 'fv-route-map__pin-wrap',
+    iconSize: [10, 10],
+    iconAnchor: [5, 5],
+    html: `<span class="fv-route-map__report-gap-dot" style="background:${color}"></span>`,
+  });
+  reportGapDotCache.set(color, icon);
+  return icon;
+}
+
 /** Captures map clicks while in plot mode. */
 function ClickCapture({
   plotMode,
@@ -308,6 +362,12 @@ export function RouteEditorMap({
   routes = [],
   selectedRouteId,
   shipMarkers = [],
+  reportMarkers = [],
+  reportSpeedOptions = [],
+  reportFuelOptions = [],
+  defaultReportFuelType,
+  onSetReportSpeed,
+  onSetReportFuel,
   plannedRouteColor = '#58a6ff',
   activeWaypoints = [],
   onSelectRoute,
@@ -316,6 +376,69 @@ export function RouteEditorMap({
   onMovePoint,
   onDeletePoint,
 }: RouteEditorMapProps) {
+  const [baseLayer, setBaseLayer] = useState<MapLayerId>(() => readMapLayerId());
+  const dragFrameByIdRef = useRef(new Map<string, number>());
+  const [editingReportId, setEditingReportId] = useState<string | null>(null);
+  const [editingSpeedId, setEditingSpeedId] = useState<string>('');
+  const [editingFuelType, setEditingFuelType] = useState<string>('');
+
+  useEffect(() => {
+    return () => {
+      dragFrameByIdRef.current.forEach((rafId) => {
+        window.cancelAnimationFrame(rafId);
+      });
+      dragFrameByIdRef.current.clear();
+    };
+  }, []);
+
+  const scheduleDragMove = (id: string, lat: number, lon: number) => {
+    const pending = dragFrameByIdRef.current.get(id);
+    if (pending !== undefined) window.cancelAnimationFrame(pending);
+    const rafId = window.requestAnimationFrame(() => {
+      dragFrameByIdRef.current.delete(id);
+      onMovePoint(id, lat, lon);
+    });
+    dragFrameByIdRef.current.set(id, rafId);
+  };
+
+  const cancelDragMove = (id: string) => {
+    const pending = dragFrameByIdRef.current.get(id);
+    if (pending !== undefined) {
+      window.cancelAnimationFrame(pending);
+      dragFrameByIdRef.current.delete(id);
+    }
+  };
+
+  const openReportEditor = (report: ReportMarker) => {
+    const defaultSpeedOpt = reportSpeedOptions.find((o) => o.isDefault) ?? reportSpeedOptions[0];
+    const speedOpt =
+      reportSpeedOptions.find((o) => o.label === report.selectedSpeedLabel) ??
+      (report.selectedSpeedKts != null
+        ? reportSpeedOptions.find(
+            (o) => Math.abs(o.speedKts - report.selectedSpeedKts!) < 0.01,
+          )
+        : undefined) ??
+      (report.speedKts != null
+        ? reportSpeedOptions.find((o) => Math.abs(o.speedKts - report.speedKts!) < 0.01)
+        : undefined) ??
+      defaultSpeedOpt;
+    setEditingSpeedId(speedOpt?.id ?? '');
+    setEditingFuelType(report.selectedFuelType ?? defaultReportFuelType ?? reportFuelOptions[0] ?? '');
+    setEditingReportId(report.id);
+  };
+
+  const applyReportEditor = () => {
+    if (!editingReportId) return;
+    if (onSetReportSpeed && editingSpeedId) {
+      const opt = reportSpeedOptions.find((o) => o.id === editingSpeedId);
+      if (opt) onSetReportSpeed(editingReportId, opt);
+    }
+    if (onSetReportFuel && editingFuelType) {
+      onSetReportFuel(editingReportId, editingFuelType);
+    }
+    setEditingReportId(null);
+  };
+
   return (
     <MapContainer
       className="fv-route-map__canvas"
@@ -326,15 +449,31 @@ export function RouteEditorMap({
       scrollWheelZoom
       doubleClickZoom={false}
     >
-      <TileLayer
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        attribution="&copy; OpenStreetMap contributors"
-        crossOrigin="anonymous"
-      />
-      <TileLayer
-        url="https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png"
-        attribution="&copy; OpenSeaMap"
-      />
+      {baseLayer === 'satellite' && (
+        <TileLayer
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+          attribution="Tiles &copy; Esri"
+        />
+      )}
+      {baseLayer === 'dark' && (
+        <TileLayer
+          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          attribution="&copy; OpenStreetMap contributors &copy; CARTO"
+        />
+      )}
+      {(baseLayer === 'nautical' || baseLayer === 'standard') && (
+        <TileLayer
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution="&copy; OpenStreetMap contributors"
+          crossOrigin="anonymous"
+        />
+      )}
+      {baseLayer === 'nautical' && (
+        <TileLayer
+          url="https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png"
+          attribution="&copy; OpenSeaMap"
+        />
+      )}
 
       <ClickCapture plotMode={plotMode} onAddPoint={onAddPoint} />
       <FitBounds points={points} />
@@ -399,14 +538,15 @@ export function RouteEditorMap({
           );
         })}
 
-      {/* Markers render from the committed `points`; the position is a stable
-          tuple (`latLng`) so unrelated re-renders never call setLatLng and the
-          drag is left entirely to Leaflet. The move is committed on drop. */}
+        {/* Markers render from committed `points`; the position is a stable
+          tuple (`latLng`) so unrelated re-renders never call setLatLng.
+          During drag, updates are streamed to the parent (throttled to one
+          update per animation frame) so the route line moves with the marker. */}
       {points.map((p, idx) => (
         <Marker
           key={p.id}
           position={p.latLng}
-          draggable={editable}
+          draggable={editable && !p.locked}
           icon={waypointIcon({
             kind: p.isPort
               ? idx === 0
@@ -419,13 +559,18 @@ export function RouteEditorMap({
           })}
           eventHandlers={{
             click: () => {
-              if (editable && !p.isPort) onDeletePoint(p.id);
+              if (editable && !p.isPort && !p.locked) onDeletePoint(p.id);
             },
             dblclick: (e) => {
               if (e.originalEvent) L.DomEvent.stop(e.originalEvent);
-              if (editable && !p.isPort) onDeletePoint(p.id);
+              if (editable && !p.isPort && !p.locked) onDeletePoint(p.id);
+            },
+            drag: (e) => {
+              const ll = (e.target as L.Marker).getLatLng();
+              scheduleDragMove(p.id, ll.lat, ll.lng);
             },
             dragend: (e) => {
+              cancelDragMove(p.id);
               const ll = (e.target as L.Marker).getLatLng();
               onMovePoint(p.id, ll.lat, ll.lng);
             },
@@ -469,6 +614,136 @@ export function RouteEditorMap({
         />
       ))}
 
+      {/* Received reports on the active route (departure/arrival/noon/speed/fuel
+          changes), plus light validated 6-hour breakup points between them. */}
+      {reportMarkers.map((r) => {
+        const isInterpolated = !!r.isInterpolated;
+        const color = r.color ?? (isInterpolated ? '#b8c4d6' : '#f59e0b');
+        return (
+          <Marker
+            key={`report-${r.id}`}
+            position={r.pos}
+            icon={
+              isInterpolated
+                ? reportGapDotIcon(color)
+                : shipDivIcon(color, false, 0)
+            }
+            eventHandlers={
+              isInterpolated
+                ? undefined
+                : {
+                    contextmenu: (e) => {
+                      if (e.originalEvent) L.DomEvent.stop(e.originalEvent);
+                      openReportEditor(r);
+                      const marker = e.target as L.Marker;
+                      window.setTimeout(() => marker.openPopup(), 0);
+                    },
+                    popupclose: () => {
+                      setEditingReportId((cur) => (cur === r.id ? null : cur));
+                    },
+                  }
+            }
+          >
+            {!isInterpolated && (
+              <Popup
+                className="fv-route-map__report-popup"
+                closeButton
+                autoClose={false}
+                closeOnEscapeKey
+              >
+                <div className="fv-route-map__report-card">
+                  <h4 className="fv-route-map__report-title">Report Criteria</h4>
+                  <p className="fv-route-map__report-meta">
+                    {r.reportType} · {r.dateTimeText || 'Position update'}
+                  </p>
+                  <label className="fv-route-map__report-field">
+                    <span>Speed profile</span>
+                    <select
+                      value={editingSpeedId}
+                      onChange={(e) => setEditingSpeedId(e.target.value)}
+                    >
+                      {reportSpeedOptions.map((opt) => (
+                        <option key={opt.id} value={opt.id}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="fv-route-map__report-field">
+                    <span>Fuel type</span>
+                    <select
+                      value={editingFuelType}
+                      onChange={(e) => setEditingFuelType(e.target.value)}
+                    >
+                      {reportFuelOptions.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="fv-route-map__report-actions">
+                    <button
+                      type="button"
+                      className="fv-route-map__report-btn"
+                      onClick={() => setEditingReportId(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="fv-route-map__report-btn fv-route-map__report-btn--primary"
+                      onClick={applyReportEditor}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </Popup>
+            )}
+            <Tooltip direction="top" offset={[0, -14]}>
+              <div className="fv-route-map__tip">
+                <strong className="fv-route-map__tip-title">{r.reportType}</strong>
+                <span>
+                  <i className="fas fa-calendar-day" aria-hidden="true" />{' '}
+                  {r.dateTimeIso
+                    ? new Date(r.dateTimeIso).toLocaleString()
+                    : r.dateTimeText || '—'}
+                </span>
+                <span>
+                  <i className="fas fa-gauge-high" aria-hidden="true" />{' '}
+                  Spd: {r.speedKts != null ? `${r.speedKts.toFixed(1)} kt` : '—'}
+                </span>
+                <span>
+                  <i className="fas fa-ruler-horizontal" aria-hidden="true" />{' '}
+                  Dist: {r.distanceNm != null ? `${r.distanceNm.toFixed(1)} NM` : '—'}
+                </span>
+                {!isInterpolated && (
+                  <span>
+                    <i className="fas fa-list-check" aria-hidden="true" />{' '}
+                    Speed profile:{' '}
+                    {r.selectedSpeedLabel
+                      ? `${r.selectedSpeedLabel}${
+                          r.selectedSpeedKts != null
+                            ? ` (${r.selectedSpeedKts.toFixed(1)} kt)`
+                            : ''
+                        }`
+                      : 'Not selected'}
+                  </span>
+                )}
+                {!isInterpolated && (
+                  <span>
+                    <i className="fas fa-gas-pump" aria-hidden="true" /> Fuel:{' '}
+                    {r.selectedFuelType || 'Not selected'}
+                  </span>
+                )}
+              </div>
+            </Tooltip>
+          </Marker>
+        );
+      })}
+
+      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} />
       <AreaConstraintsControl position="topright" />
       <WeatherFieldControl position="topright" />
       <WeatherPointControl position="topright" />

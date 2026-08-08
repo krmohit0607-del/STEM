@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
-import { VOYAGES, type Voyage } from '../data/voyages';
+import { useVoyages, type Voyage } from '../data/voyages';
 import {
   writeSelectedVoyageId,
   useSelectedVoyageId,
@@ -61,6 +61,35 @@ const MODULES = [
  * estimation. The rest are placeholders for future roles/access.
  */
 const ACTIVE_MODULES = new Set(['Performance', 'Chartering', 'Operations', 'Bunker', 'Postfix', 'Emissions', 'Accounts']);
+
+type ModuleName =
+  | 'Chartering'
+  | 'Operations'
+  | 'Bunker'
+  | 'Postfix'
+  | 'Emissions'
+  | 'Performance'
+  | 'Accounts';
+
+interface FleetMenuNavState {
+  fleetMenuModule?: ModuleName;
+}
+
+function isModuleName(value: string | undefined): value is ModuleName {
+  return typeof value === 'string' && ACTIVE_MODULES.has(value);
+}
+
+function moduleFromPath(pathname: string): ModuleName | null {
+  if (pathname.startsWith('/chartering')) return 'Chartering';
+  if (pathname.startsWith('/operations')) return 'Operations';
+  if (pathname.startsWith('/bunker')) return 'Bunker';
+  if (pathname.startsWith('/postfix')) return 'Postfix';
+  if (pathname.startsWith('/emissions')) return 'Emissions';
+  if (pathname.startsWith('/accounts')) return 'Accounts';
+  // Performance workspaces all sit on the "voyage" family of routes.
+  if (pathname.startsWith('/voyage')) return 'Performance';
+  return null;
+}
 
 type Lifecycle = 'active' | 'complete' | 'closed';
 
@@ -160,6 +189,7 @@ export function FleetMenu() {
   };
   const navigate = useNavigate();
   const location = useLocation();
+  const voyages = useVoyages();
   const selectedId = useSelectedVoyageId();
   const selectedBunkerId = useSelectedBunkerId();
   const bunkerAll = useBunkerRequirements();
@@ -173,7 +203,7 @@ export function FleetMenu() {
   const fixtureNos = useFixtureNumbers();
   const savedEstimates = useSavedEstimates();
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
-  const [module, setModule] = useState<string>('Performance');
+  const [module, setModule] = useState<ModuleName>('Performance');
   const [pic, setPic] = useState('All');
   const [voyageType, setVoyageType] = useState('All');
   const [status, setStatus] = useState<string>('active');
@@ -184,21 +214,38 @@ export function FleetMenu() {
   const isChartering = module === 'Chartering';
   const isOperations = module === 'Operations';
 
-  // Keep the sidebar module in sync with the active route (deep links / dropdown).
+  const applyModule = (next: ModuleName, forceReset = false) => {
+    if (next !== module) {
+      setModule(next);
+    } else if (!forceReset) {
+      return;
+    }
+    // Create-mode should always start from a visible, unfiltered fleet list.
+    setPic('All');
+    setStatus((MODULE_STATUSES[next] ?? MODULE_STATUSES.Performance)[0].key);
+    setVoyageType('All');
+    setQuery('');
+  };
+
+  // Keep the sidebar module in sync with create-intent and active route.
   useEffect(() => {
-    const p = location.pathname;
-    const routed = p.startsWith('/bunker') ? 'Bunker' : p.startsWith('/operations') ? 'Operations' : p.startsWith('/chartering') ? 'Chartering' : p.startsWith('/postfix') ? 'Postfix' : p.startsWith('/emissions') ? 'Emissions' : p.startsWith('/accounts') ? 'Accounts' : null;
-    if (routed && routed !== module) {
-      setModule(routed);
-      setStatus((MODULE_STATUSES[routed] ?? MODULE_STATUSES.Performance)[0].key);
-      setVoyageType('All');
+    const inCreateMode = new URLSearchParams(location.search).get('new') === '1';
+    const routed = moduleFromPath(location.pathname);
+    if (routed) {
+      applyModule(routed, inCreateMode);
+      return;
+    }
+    const state = location.state as FleetMenuNavState | null;
+    const hinted = state?.fleetMenuModule;
+    if (isModuleName(hinted)) {
+      applyModule(hinted, inCreateMode);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname]);
+  }, [location.pathname, location.search, location.state]);
 
   const pics = useMemo(
-    () => ['All', ...Array.from(new Set(VOYAGES.map((v) => v.pic))).sort()],
-    [],
+    () => ['All', ...Array.from(new Set(voyages.map((v) => v.pic).filter(Boolean))).sort()],
+    [voyages],
   );
   const types = useMemo(
     () =>
@@ -210,8 +257,8 @@ export function FleetMenu() {
             ? ['All', ...FIX_TYPE_FILTER_OPTIONS]
             : isOperations
               ? ['All', ...FIX_TYPE_FILTER_OPTIONS, 'At Sea', 'At Port']
-              : ['All', ...Array.from(new Set(VOYAGES.map((v) => v.service))).sort()],
-    [isBunker, isAccounts, isChartering, isOperations],
+              : ['All', ...Array.from(new Set(voyages.map((v) => v.service).filter(Boolean))).sort()],
+    [isBunker, isAccounts, isChartering, isOperations, voyages],
   );
 
   const rows = useMemo(() => {
@@ -231,7 +278,7 @@ export function FleetMenu() {
       if (module === 'Performance' && handedOver.includes(v.id)) return 'active';
       return lifecycleOf(v);
     };
-    return VOYAGES.filter((v) => {
+    return voyages.filter((v) => {
       if (pic !== 'All' && v.pic !== pic) return false;
       if (voyageType !== 'All') {
         if (voyageType === 'At Sea' || voyageType === 'At Port') {
@@ -252,7 +299,7 @@ export function FleetMenu() {
         return false;
       return true;
     });
-  }, [module, isChartering, isOperations, pic, voyageType, status, query, estStatuses, estFixTypes, handedOver, moduleLifecycles, postfixHanded]);
+  }, [module, voyages, isChartering, isOperations, pic, voyageType, status, query, estStatuses, estFixTypes, handedOver, moduleLifecycles, postfixHanded]);
 
   // Saved estimates (from the estimation page's Save button) surface at the top
   // of the Chartering list. Their status maps onto the same three buckets.
@@ -349,7 +396,7 @@ export function FleetMenu() {
 
   // Switching module clears the active vessel so the details area starts blank;
   // data only reappears once the user picks a vessel from the list.
-  const changeModule = (next: string) => {
+  const changeModule = (next: ModuleName) => {
     setModule(next);
     setStatus((MODULE_STATUSES[next] ?? MODULE_STATUSES.Performance)[0].key);
     setVoyageType('All');
@@ -383,7 +430,9 @@ export function FleetMenu() {
         <select
           className="fv-fleetmenu__module"
           value={module}
-          onChange={(e) => changeModule(e.target.value)}
+          onChange={(e) => {
+            if (isModuleName(e.target.value)) changeModule(e.target.value);
+          }}
           aria-label={t('module', 'Module')}
         >
           {MODULES.map((m) => (

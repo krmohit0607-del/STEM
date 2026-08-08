@@ -26,6 +26,27 @@ export interface VoyageSharedFields {
   wslMaxWindsLaden: string;
   wslMaxSeaStateBallast: string;
   wslMaxSeaStateLaden: string;
+  // Per-leg speed/cons profiles used by voyage details and route report defaults.
+  legSpeedProfiles?: VoyageLegSpeedProfile[];
+}
+
+export interface VoyageLegSpeedConsRow {
+  isDefault?: boolean;
+  description: string;
+  speed: string;
+  fuelType1: string;
+  dailyCons1: string;
+  fuelType2: string;
+  dailyCons2: string;
+  fuelType3: string;
+  dailyCons3: string;
+}
+
+export interface VoyageLegSpeedProfile {
+  legNo: string;
+  legName: string;
+  status: string;
+  speedCons: VoyageLegSpeedConsRow[];
 }
 
 export const SHARED_FIELD_KEYS: (keyof VoyageSharedFields)[] = [

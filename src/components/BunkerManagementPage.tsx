@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { FUEL_TYPE_OPTIONS } from './voyage/types';
 
@@ -885,13 +886,20 @@ function NewRequirementModal({ onClose, onCreated }: { onClose: () => void; onCr
 
 /* ============================================================ main page */
 
-export function BunkerManagementPage() {
+export function BunkerManagementPage({ mode }: { mode?: 'create' } = {}) {
+  const [searchParams] = useSearchParams();
+  const createMode = mode === 'create' || searchParams.get('new') === '1';
   const data = useBunkerRequirements();
-  const selectedId = useSelectedBunkerId() ?? null;
+  const selectedId = createMode ? null : (useSelectedBunkerId() ?? null);
   const [tab, setTab] = useState<WsTab>('order');
   const [compareId, setCompareId] = useState<string | null>(null);
   const [rail, setRail] = useState<RailPanel>('notif');
   const [newOpen, setNewOpen] = useState(false);
+
+  useEffect(() => {
+    if (!createMode) return;
+    clearSelectedBunkerId();
+  }, [createMode]);
 
   const kpi = useMemo(() => {
     const by = (fn: (r: BunkerRequirement) => boolean) => data.filter(fn);

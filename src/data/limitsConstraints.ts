@@ -21,6 +21,9 @@ export interface WeatherSafetyLimits {
   maxSeaState: string;
   maxRollPeriod: string;
   maxSwell: string;
+  draft: string;
+  displacement: string;
+  gm: string;
 }
 
 export interface RtaConstraint {
@@ -42,9 +45,26 @@ export interface SpeedConsConstraint {
   maxGoPerDay: string;
 }
 
+/**
+ * Optimization criteria entered in the Limits & Constraints UI.
+ * These are the primary user-facing knobs used before running optimization.
+ */
+export interface OptimizationConstraints {
+  speedMin: string;
+  speedMax: string;
+  consumption: string;
+  /** `YYYY-MM-DDTHH:mm` (local input format). */
+  rta: string;
+  rpmMin: string;
+  rpmMax: string;
+  mcrMin: string;
+  mcrMax: string;
+}
+
 export interface VoyageLimits {
   marketFactors: MarketFactors;
   weatherLimits: WeatherSafetyLimits;
+  constraints: OptimizationConstraints;
   rta: RtaConstraint;
   speedCons: SpeedConsConstraint;
   requirements: string;
@@ -84,6 +104,19 @@ export const DEFAULT_LIMITS: VoyageLimits = {
     maxSeaState: '5',
     maxRollPeriod: '',
     maxSwell: '3.0',
+    draft: '',
+    displacement: '',
+    gm: '',
+  },
+  constraints: {
+    speedMin: '9.5',
+    speedMax: '13.0',
+    consumption: '24',
+    rta: '2026-07-08T06:00',
+    rpmMin: '',
+    rpmMax: '',
+    mcrMin: '',
+    mcrMax: '',
   },
   rta: {
     enabled: true,
@@ -111,6 +144,20 @@ function mergeWithDefaults(parsed: Partial<VoyageLimits> | undefined): VoyageLim
   return {
     marketFactors: { ...DEFAULT_LIMITS.marketFactors, ...parsed.marketFactors },
     weatherLimits: { ...DEFAULT_LIMITS.weatherLimits, ...parsed.weatherLimits },
+    constraints: {
+      ...DEFAULT_LIMITS.constraints,
+      speedMin: parsed.constraints?.speedMin ?? parsed.speedCons?.minSpeed ?? DEFAULT_LIMITS.constraints.speedMin,
+      speedMax: parsed.constraints?.speedMax ?? parsed.speedCons?.maxSpeed ?? DEFAULT_LIMITS.constraints.speedMax,
+      consumption:
+        parsed.constraints?.consumption ??
+        parsed.speedCons?.maxFoPerDay ??
+        DEFAULT_LIMITS.constraints.consumption,
+      rta: parsed.constraints?.rta ?? parsed.rta?.value ?? DEFAULT_LIMITS.constraints.rta,
+      rpmMin: parsed.constraints?.rpmMin ?? parsed.speedCons?.minRpm ?? DEFAULT_LIMITS.constraints.rpmMin,
+      rpmMax: parsed.constraints?.rpmMax ?? parsed.speedCons?.maxRpm ?? DEFAULT_LIMITS.constraints.rpmMax,
+      mcrMin: parsed.constraints?.mcrMin ?? DEFAULT_LIMITS.constraints.mcrMin,
+      mcrMax: parsed.constraints?.mcrMax ?? DEFAULT_LIMITS.constraints.mcrMax,
+    },
     rta: { ...DEFAULT_LIMITS.rta, ...parsed.rta },
     speedCons: { ...DEFAULT_LIMITS.speedCons, ...parsed.speedCons },
     requirements: parsed.requirements ?? DEFAULT_LIMITS.requirements,
@@ -123,13 +170,7 @@ export function loadLimits(): VoyageLimits {
     if (raw) {
       const parsed = JSON.parse(raw);
       // Merge with defaults so newly added fields don't break older saves.
-      return {
-        marketFactors: { ...DEFAULT_LIMITS.marketFactors, ...parsed.marketFactors },
-        weatherLimits: { ...DEFAULT_LIMITS.weatherLimits, ...parsed.weatherLimits },
-        rta: { ...DEFAULT_LIMITS.rta, ...parsed.rta },
-        speedCons: { ...DEFAULT_LIMITS.speedCons, ...parsed.speedCons },
-        requirements: parsed.requirements ?? DEFAULT_LIMITS.requirements,
-      };
+      return mergeWithDefaults(parsed);
     }
   } catch {
     /* fall back to defaults */
@@ -199,6 +240,7 @@ export function diffLimits(a: VoyageLimits, b: VoyageLimits): string[] {
   const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
   if (!eq(a.marketFactors, b.marketFactors)) changed.push('Market Factors');
   if (!eq(a.weatherLimits, b.weatherLimits)) changed.push('Weather Safety Limits');
+  if (!eq(a.constraints, b.constraints)) changed.push('Constraints');
   if (!eq(a.rta, b.rta)) changed.push('RTA Constraint');
   if (!eq(a.speedCons, b.speedCons)) changed.push('Speed / Cons Constraint');
   if (a.requirements !== b.requirements) changed.push('Requirements');
@@ -218,6 +260,17 @@ function flattenLimits(l: VoyageLimits): Record<string, string> {
     'Weather · Max Sea State': l.weatherLimits.maxSeaState,
     'Weather · Max Swell': l.weatherLimits.maxSwell,
     'Weather · Max Roll Period': l.weatherLimits.maxRollPeriod,
+    'Weather · Draft': l.weatherLimits.draft,
+    'Weather · Displacement': l.weatherLimits.displacement,
+    'Weather · GM': l.weatherLimits.gm,
+    'Constraints · Speed Min': l.constraints.speedMin,
+    'Constraints · Speed Max': l.constraints.speedMax,
+    'Constraints · Consumption': l.constraints.consumption,
+    'Constraints · RTA': l.constraints.rta,
+    'Constraints · RPM Min': l.constraints.rpmMin,
+    'Constraints · RPM Max': l.constraints.rpmMax,
+    'Constraints · MCR Min': l.constraints.mcrMin,
+    'Constraints · MCR Max': l.constraints.mcrMax,
     'RTA · Enabled': l.rta.enabled ? 'Yes' : 'No',
     'RTA · Entered In': l.rta.mode,
     'RTA · Value': l.rta.value,
