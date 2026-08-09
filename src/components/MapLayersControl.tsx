@@ -115,7 +115,7 @@ export function MapLayersControl({
   onChange: (id: MapLayerId) => void;
   overlayLayers?: OverlayLayerId[];
   onOverlayToggle?: (layers: OverlayLayerId[]) => void;
-} = {}) {
+}) {
   const [open, setOpen] = useState(false);
 
   const select = (id: MapLayerId) => {

@@ -6,7 +6,6 @@ import type { PathOptions } from 'leaflet';
 import {
   LOAD_LINE_ZONES,
   type LoadLineZone,
-  getLoadLineZoneStyle,
   segmentToLineString,
   toLeafletCoords,
 } from '../data/loadLineZones';

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, CircleMarker, Polygon, Marker, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, Polygon, Marker, useMapEvents } from 'react-leaflet';
 import L, { type LatLngBoundsLiteral, type Map as LeafletMap } from 'leaflet';
 
 import { useL } from '../i18n/LocalizationProvider';
