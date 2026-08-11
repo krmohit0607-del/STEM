@@ -525,7 +525,7 @@ export function FleetMenu() {
                   {r.route}
                 </div>
                 <div className="fv-fleetmenu__item-meta">
-                  <span className="fv-fleetmenu__charter">{r.leg} · {r.fuelType}</span>
+                  <span className="fv-fleetmenu__charter">{r.leg} · {(r.fuelLines?.length ?? 0) > 1 ? r.fuelLines!.map(f => f.fuel).join(' + ') : r.fuelType}</span>
                   <span className={`fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--${STATUS_TONE[r.status]}`}>
                     {r.status}
                   </span>

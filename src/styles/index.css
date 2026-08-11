@@ -8,6 +8,59 @@
   box-sizing: border-box;
 }
 
+/* Page-level error fallback (shown by ErrorBoundary instead of a blank page). */
+.fv-errboundary {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: #0b1220;
+  color: #e6edf3;
+}
+.fv-errboundary__card {
+  max-width: 520px;
+  width: 100%;
+  text-align: center;
+  background: #0e1626;
+  border: 1px solid #2a3447;
+  border-radius: 12px;
+  padding: 28px 24px;
+}
+.fv-errboundary__icon { font-size: 34px; color: #f0a020; margin-bottom: 10px; }
+.fv-errboundary__card h1 { font-size: 18px; margin: 6px 0; }
+.fv-errboundary__card p { color: #8b949e; font-size: 13px; margin: 0 0 14px; }
+.fv-errboundary__msg {
+  text-align: left;
+  background: #0b1220;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #ff9f9f;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
+.fv-errboundary__actions { display: flex; gap: 10px; justify-content: center; margin-top: 16px; }
+.fv-errboundary__actions button {
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid #2a3447;
+  background: transparent;
+  color: #e6edf3;
+  cursor: pointer;
+  font-size: 13px;
+}
+.fv-errboundary__actions .fv-errboundary__primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+.fv-light .fv-errboundary { background: #f4f6fb; color: #1b2430; }
+.fv-light .fv-errboundary__card { background: #fff; border-color: #d7dde8; }
+.fv-light .fv-errboundary__card p { color: #5b6675; }
+.fv-light .fv-errboundary__msg { background: #fbecec; border-color: #f0c9c9; color: #b42318; }
+.fv-light .fv-errboundary__actions button { border-color: #d7dde8; color: #1b2430; }
+.fv-light .fv-errboundary__actions .fv-errboundary__primary { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+
 /* Remove native number-input spinner arrows app-wide (still fully editable). */
 input[type='number']::-webkit-outer-spin-button,
 input[type='number']::-webkit-inner-spin-button {
@@ -1510,6 +1563,10 @@ a {
 .fv-ce__table .fv-ce__cell-auto { width: auto; min-width: 0 !important; padding-left: 4px; padding-right: 4px; text-align: right; }
 /* Port-name cell: input fills the column so there's no trailing gap. */
 .fv-ce__port-name-cell .fv-ce__cell-input { width: 100%; }
+/* Themed autocomplete wrapper: transparent to layout so the input keeps its
+   normal cell/field sizing; the dropdown is fixed-positioned in JS. */
+.fv-ce__combo { display: contents; }
+.fv-ce__combo-list { right: auto; }
 .fv-ce__cell-input:hover,
 .fv-ce__cell-num:hover,
 .fv-ce__cell-select:hover { border-color: var(--ce-muted); }
@@ -2500,6 +2557,8 @@ a {
 }
 .fv-ops__vd-in:focus { outline: none; border-color: #1f6feb; }
 .fv-ops__vd-in--accent { font-weight: 700; }
+/* Themed autocomplete wrapper (accounts / ports / service providers). */
+.fv-ops__vd-combo { position: relative; width: 100%; min-width: 0; }
 /* Compact date-time input so date + time fit the normal field width. */
 .fv-ops__vd-in--dt { font-size: 12px; padding: 6px 7px; width: 100%; box-sizing: border-box; min-width: 0; letter-spacing: 0; }
 .fv-ops__vd-in--dt::-webkit-datetime-edit { padding: 0; }
@@ -3383,6 +3442,9 @@ a {
 .fv-ops__bnkreq-done { text-align: center; padding: 20px 10px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .fv-ops__bnkreq-done i { color: var(--o-good); font-size: 30px; }
 .fv-ops__bnkreq-done p { margin: 0; color: var(--o-text); font-size: 13px; max-width: 380px; }
+/* Multi-port bunker request block */
+.fv-ops__bnkreq-port-block { border: 1px solid var(--o-border-soft); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; background: rgba(255,255,255,0.02); }
+.fv-ops__bnkreq-port-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--o-faint); margin-bottom: 8px; }
 
 /* ---- Operations Tools tab (sub-tabs + launcher) ---- */
 .fv-ops__subtabs { margin-bottom: 4px; }

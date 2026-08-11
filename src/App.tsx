@@ -1,8 +1,10 @@
-import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useSearchParams, useLocation } from 'react-router-dom';
+import type { ReactNode } from 'react';
 
 import { FleetViewProvider } from './context/FleetViewContext';
 import { LocalizationProvider } from './i18n/LocalizationProvider';
 import { Layout } from './components/Layout';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { FleetListPage } from './components/FleetListPage';
 import { InterimDashboardPage } from './components/InterimDashboardPage';
 import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
@@ -59,6 +61,7 @@ export function App() {
     <FleetViewProvider>
       <LocalizationProvider>
           <BrowserRouter>
+            <RoutedErrorBoundary>
             <Routes>
               <Route path="/" element={<HomeRoute />} />
               <Route
@@ -288,8 +291,16 @@ export function App() {
             {/* Unknown paths fall back to the Fleet List View. */}
             <Route path="*" element={<Navigate to="/main" replace />} />
           </Routes>
+            </RoutedErrorBoundary>
         </BrowserRouter>
       </LocalizationProvider>
     </FleetViewProvider>
   );
+}
+
+/** Wraps the routed content so a page error shows a fallback (not a blank
+ *  screen) and resets automatically when the route changes. */
+function RoutedErrorBoundary({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  return <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>;
 }

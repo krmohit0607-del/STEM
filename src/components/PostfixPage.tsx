@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
@@ -8,7 +8,8 @@ import { WorkflowStatusSelect } from './WorkflowStatusSelect';
 import type { Voyage } from '../data/voyages';
 import { makeBlankVoyage } from '../data/voyages';
 import { NoVesselSelected } from './NoVesselSelected';
-import { addPayable } from '../data/accounts';
+import { loadOpsRecap, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
+import { seedRecap, VoyageDetailsTab, HireTab, FreightTab, computePnl, type Recap, type Pnl } from './OperationsPage';
 
 /**
  * Postfix Department — Voyage Settlement & Claims Management Center.
@@ -22,8 +23,8 @@ import { addPayable } from '../data/accounts';
 
 /* ------------------------------------------------------------------ types */
 
-type TabId = 'summary' | 'pdafda' | 'freightlaytime' | 'invoices' | 'services' | 'claims' | 'documents' | 'accounting' | 'audit';
-type RailPanel = 'summary' | 'activity' | 'docs' | 'reminders' | null;
+type TabId = 'details' | 'hire' | 'freightlaytime' | 'pdaservices' | 'history';
+type RailPanel = 'activity' | 'docs' | 'reminders' | null;
 
 interface PdaRow { id: string; port: string; agent: string; currency: string; estimated: number; advance: number; fdaFinal: number; status: string; approval: string; }
 interface AgentInvoice { id: string; invoiceNo: string; agent: string; vendor: string; date: string; due: string; currency: string; amount: number; approved: number; paid: number; category: string; port: string; dept: string; accounts: string; }
@@ -35,7 +36,6 @@ interface TimelineStep { label: string; date: string; user: string; status: 'don
 /* ---------------------------------------------------------------- helpers */
 
 function money(n: number): string { return `${n < 0 ? '-' : ''}$${Math.abs(Math.round(n)).toLocaleString('en-US')}`; }
-function num(n: number, dp = 0): string { return n.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp }); }
 
 /* --------- mock settlement bundle (linked to the Operations voyage) --------- */
 
@@ -140,11 +140,6 @@ function Card({ title, icon, right, children }: { title: string; icon: string; r
     </section>
   );
 }
-function Pill({ text }: { text: string }) {
-  const t = text.toLowerCase();
-  const tone = /approv|paid|settl|received|done|clos/.test(t) ? 'green' : /pending|review|open|progress/.test(t) ? 'amber' : /reject|overdue|fail/.test(t) ? 'bad' : 'blue';
-  return <span className={`fv-ops__pill fv-ops__pill--${tone === 'bad' ? 'amber' : tone}`}>{text}</span>;
-}
 function RailIcon({ icon, label, active, badge, onClick }: { icon: string; label: string; active: boolean; badge?: number; onClick: () => void }) {
   return (
     <button type="button" className={`fv-ops__rail-icon${active ? ' fv-ops__rail-icon--active' : ''}`} onClick={onClick} title={label}>
@@ -156,15 +151,11 @@ function RailIcon({ icon, label, active, badge, onClick }: { icon: string; label
 }
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
-  { id: 'summary', label: 'Voyage Summary', icon: 'fa-clipboard-list' },
-  { id: 'pdafda', label: 'PDA & FDA', icon: 'fa-file-circle-check' },
-  { id: 'freightlaytime', label: 'Freight & Laytime', icon: 'fa-scale-balanced' },
-  { id: 'invoices', label: 'Agent Invoices', icon: 'fa-file-invoice-dollar' },
-  { id: 'services', label: 'Additional Services', icon: 'fa-screwdriver-wrench' },
-  { id: 'claims', label: 'Claims', icon: 'fa-gavel' },
-  { id: 'documents', label: 'Documents', icon: 'fa-folder-open' },
-  { id: 'accounting', label: 'Accounting', icon: 'fa-building-columns' },
-  { id: 'audit', label: 'Audit', icon: 'fa-clock-rotate-left' },
+  { id: 'details', label: 'Voyage Details', icon: 'fa-clipboard-list' },
+  { id: 'hire', label: 'Hire & Claims', icon: 'fa-money-bill-wave' },
+  { id: 'freightlaytime', label: 'Freight & Laytime', icon: 'fa-file-invoice-dollar' },
+  { id: 'pdaservices', label: 'PDA/FDA & Services', icon: 'fa-file-circle-check' },
+  { id: 'history', label: 'Configuration History', icon: 'fa-clock-rotate-left' },
 ];
 
 /* ============================================================ main page */
@@ -176,31 +167,38 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
   const blankVoyage = useMemo(() => makeBlankVoyage(), []);
   const voyage = createMode ? blankVoyage : selectedVoyage;
   const cpdds = useCpdds();
-  const [tab, setTab] = useState<TabId>('summary');
-  const [rail, setRail] = useState<RailPanel>('summary');
-  const [sent, setSent] = useState<Set<string>>(new Set());
+  const [tab, setTab] = useState<TabId>('details');
+  const [rail, setRail] = useState<RailPanel>(null);
+
+  // Live recap state shared with Operations (same localStorage key).
+  const [recap, setRecap] = useState<Recap>(() => {
+    const stored = loadOpsRecap(voyage?.id) as Partial<Recap> | undefined;
+    return { ...seedRecap(voyage ?? undefined), ...stored };
+  });
+
+  // Re-hydrate when the voyage selection changes.
+  useEffect(() => {
+    const stored = loadOpsRecap(voyage?.id) as Partial<Recap> | undefined;
+    setRecap({ ...seedRecap(voyage ?? undefined), ...stored });
+  }, [voyage?.id]);
+
+  // Persist edits to the shared Operations recap store.
+  useEffect(() => {
+    writeOpsRecapRaw(voyage?.id, JSON.stringify(recap));
+  }, [recap, voyage?.id]);
+
+  // Subscribe to changes made in Operations so this tab stays in sync.
+  useEffect(() => {
+    return subscribeOpsRecap(voyage?.id, () => {
+      const stored = loadOpsRecap(voyage?.id) as Partial<Recap> | undefined;
+      if (stored) setRecap((prev) => ({ ...prev, ...stored }));
+    });
+  }, [voyage?.id]);
 
   const b = useMemo<Bundle | null>(() => (voyage ? buildPostfix(voyage) : null), [voyage]);
+  const pnl = useMemo<Pnl>(() => computePnl(recap), [recap]);
 
   if (!voyage || !b) return <NoVesselSelected />;
-
-  const pendingApprovals = b.invoices.filter((i) => i.dept === 'Pending').length + b.services.filter((s) => s.status === 'Pending').length + b.pda.filter((p) => p.approval === 'Pending').length;
-
-  const sendToAccounts = (inv: AgentInvoice) => {
-    addPayable({
-      reference: voyage.id,
-      vessel: voyage.vessel,
-      voyage: voyage.id,
-      supplier: inv.vendor,
-      invoiceNo: inv.invoiceNo,
-      amount: inv.approved || inv.amount,
-      currency: inv.currency,
-      dueDate: inv.due,
-      module: 'Postfix',
-      category: inv.category.startsWith('FDA') ? 'FDA' : 'Agency',
-    });
-    setSent((prev) => new Set(prev).add(inv.id));
-  };
 
   return (
     <div className="fv-ops">
@@ -230,271 +228,24 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
         </nav>
 
         <div className="fv-ops__content">
-          {tab === 'summary' && (
-            <div className="fv-ops__grid2">
-              <Card title="Voyage Information" icon="fa-clipboard-list">
-                <ul className="fv-ops__kv-list">
-                  {kv('Vessel', voyage.vessel)}
-                  {kv('IMO', voyage.imo)}
-                  {kv('Voyage No', voyage.id)}
-                  {kv('Fixture No', voyage.id.replace(/^[A-Z]+/, 'FIX-'))}
-                  {kv('Charterer', voyage.client)}
-                  {kv('Vessel Type', voyage.vesselType || '—')}
-                  {kv('DWT', voyage.dwt ? `${voyage.dwt} MT` : '—')}
-                </ul>
-              </Card>
-              <Card title="Route & Cargo" icon="fa-route">
-                <ul className="fv-ops__kv-list">
-                  {kv('Load Port', b.load)}
-                  {kv('Discharge Port', b.disch)}
-                  {kv('Bunker Port', b.pda.find((p) => /bunker/i.test(p.port))?.port ?? '—')}
-                  {kv('ETD', voyage.etdDisplay || '—')}
-                  {kv('ETA', voyage.eta || '—')}
-                  {kv('Service', voyage.service || '—')}
-                  {kv('Operational Status', voyage.status || 'Completed')}
-                </ul>
-              </Card>
-              <Card title="Commercial" icon="fa-file-contract">
-                <ul className="fv-ops__kv-list">
-                  {kv('Contract Freight', money(b.freight.contract))}
-                  {kv('Freight Basis', b.freight.basis)}
-                  {kv('Final Freight', money(b.finalFreight))}
-                  {kv('Demurrage', money(b.demurrage))}
-                  {kv('Despatch', money(b.despatch))}
-                </ul>
-              </Card>
-              <Card title="Settlement Status" icon="fa-scale-balanced">
-                <ul className="fv-ops__kv-list">
-                  {kv('Total Receivable', money(b.receivable))}
-                  {kv('Total Payable', money(b.payable))}
-                  {kv('FDA Total', money(b.fdaTotal))}
-                  {kv('Additional Services', money(b.servicesTotal))}
-                  {kv('Open Claims', String(b.claims.filter((c) => c.status !== 'Settled').length))}
-                </ul>
-                <div className="fv-ops__kv-line fv-ops__kv-line--profit"><span>Net Settlement</span><span className="fv-ops__kv-out">{money(b.net)}</span></div>
-              </Card>
-            </div>
+          {tab === 'details' && (
+            <VoyageDetailsTab recap={recap} setRecap={setRecap} voyage={voyage} status="Completed" />
           )}
 
-          {tab === 'pdafda' && (
-            <Card title="Proforma Disbursement Accounts (PDA)" icon="fa-file-invoice" right={<><button type="button" className="fv-ops__btn">Upload PDA</button><button type="button" className="fv-ops__btn">Compare with FDA</button></>}>
-              <table className="fv-ops__table">
-                <thead><tr><th>Port</th><th>Agent</th><th>Cur.</th><th className="fv-ops__r">Estimated PDA</th><th className="fv-ops__r">Advance Paid</th><th className="fv-ops__r">Outstanding</th><th>Status</th><th>Approval</th><th /></tr></thead>
-                <tbody>
-                  {b.pda.map((p) => (
-                    <tr key={p.id}>
-                      <td>{p.port}</td><td>{p.agent}</td><td>{p.currency}</td>
-                      <td className="fv-ops__r">{num(p.estimated)}</td>
-                      <td className="fv-ops__r">{num(p.advance)}</td>
-                      <td className="fv-ops__r">{num(p.estimated - p.advance)}</td>
-                      <td><Pill text={p.status} /></td>
-                      <td><Pill text={p.approval} /></td>
-                      <td>{p.approval === 'Pending' && <><button type="button" className="fv-ops__btn">Approve</button> <button type="button" className="fv-ops__btn">Reject</button></>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot><tr className="fv-ops__row-sub"><td colSpan={3}>Total</td><td className="fv-ops__r">{num(b.pdaTotal)}</td><td className="fv-ops__r">{num(b.pda.reduce((s, p) => s + p.advance, 0))}</td><td colSpan={3} /></tr></tfoot>
-              </table>
-            </Card>
-          )}
-
-          {tab === 'pdafda' && (
-            <Card title="Final Disbursement Accounts (FDA) — Variance vs PDA" icon="fa-file-circle-check">
-              <table className="fv-ops__table">
-                <thead><tr><th>Port</th><th>Agent</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">FDA (Actual)</th><th className="fv-ops__r">Advance</th><th className="fv-ops__r">Balance</th><th className="fv-ops__r">Variance</th><th className="fv-ops__r">Var %</th><th>Invoice</th></tr></thead>
-                <tbody>
-                  {b.pda.map((p) => {
-                    const fda = p.fdaFinal || 0;
-                    const variance = fda ? fda - p.estimated : 0;
-                    const balance = fda - p.advance;
-                    return (
-                      <tr key={p.id}>
-                        <td>{p.port}</td><td>{p.agent}</td>
-                        <td className="fv-ops__r">{num(p.estimated)}</td>
-                        <td className="fv-ops__r">{fda ? num(fda) : '—'}</td>
-                        <td className="fv-ops__r">{num(p.advance)}</td>
-                        <td className={`fv-ops__r${balance < 0 ? ' fv-ops__neg' : ''}`}>{fda ? num(balance) : '—'}</td>
-                        <td className={`fv-ops__r${variance > 0 ? ' fv-ops__neg' : variance < 0 ? ' fv-ops__pos' : ''}`}>{fda ? (variance >= 0 ? '+' : '') + num(variance) : '—'}</td>
-                        <td className="fv-ops__r">{fda ? `${((variance / p.estimated) * 100).toFixed(1)}%` : '—'}</td>
-                        <td><Pill text={fda ? 'Received' : 'Awaited'} /></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              <p className="fv-ops__hint">Auto-variance flags FDA lines deviating &gt; 10% from PDA for review; exchange-rate conversion applied to non-USD ports.</p>
-            </Card>
-          )}
-
-          {tab === 'invoices' && (
-            <Card title="Agent & Vendor Invoices" icon="fa-file-invoice-dollar" right={<button type="button" className="fv-ops__btn">Generate Payment Request</button>}>
-              <table className="fv-ops__table">
-                <thead><tr><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Approved</th><th className="fv-ops__r">Paid</th><th className="fv-ops__r">Outstanding</th><th>Dept</th><th>Accounts</th><th /></tr></thead>
-                <tbody>
-                  {b.invoices.map((i) => {
-                    const acctStatus = sent.has(i.id) ? 'Sent' : i.accounts;
-                    return (
-                      <tr key={i.id}>
-                        <td>{i.invoiceNo}</td><td>{i.vendor}</td><td>{i.category}</td><td>{i.port}</td><td>{i.due}</td>
-                        <td className="fv-ops__r">{num(i.amount)}</td>
-                        <td className="fv-ops__r">{i.approved ? num(i.approved) : '—'}</td>
-                        <td className="fv-ops__r">{num(i.paid)}</td>
-                        <td className="fv-ops__r">{num((i.approved || i.amount) - i.paid)}</td>
-                        <td><Pill text={i.dept} /></td>
-                        <td><Pill text={acctStatus} /></td>
-                        <td>
-                          {i.dept === 'Pending' && <button type="button" className="fv-ops__btn">Approve</button>}
-                          {i.dept === 'Approved' && i.accounts !== 'Paid' && !sent.has(i.id) && <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={() => sendToAccounts(i)}>Send to Accounts</button>}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              <p className="fv-ops__hint">Duplicate & missing-invoice detection runs on upload; approved invoices can be pushed to the Accounts payable ledger.</p>
-            </Card>
-          )}
-
-          {tab === 'services' && (
-            <Card title="Additional Services & Husbandry" icon="fa-screwdriver-wrench" right={<button type="button" className="fv-ops__btn">Add Service</button>}>
-              <table className="fv-ops__table">
-                <thead><tr><th>Service</th><th>Vendor</th><th>Invoice</th><th>Reason</th><th className="fv-ops__r">Cost</th><th className="fv-ops__r">Tax</th><th>Requested</th><th>Approved</th><th>Status</th></tr></thead>
-                <tbody>
-                  {b.services.map((s) => (
-                    <tr key={s.id}>
-                      <td>{s.service}</td><td>{s.vendor}</td><td>{s.invoice}</td><td>{s.reason}</td>
-                      <td className="fv-ops__r">{num(s.cost)}</td><td className="fv-ops__r">{num(s.tax)}</td>
-                      <td>{s.requestedBy}</td><td>{s.approvedBy}</td><td><Pill text={s.status} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot><tr className="fv-ops__row-sub"><td colSpan={4}>Total Additional Services</td><td className="fv-ops__r">{num(b.servicesTotal)}</td><td colSpan={4} /></tr></tfoot>
-              </table>
-            </Card>
+          {tab === 'hire' && (
+            <HireTab recap={recap} setRecap={setRecap} pnl={pnl} voyage={voyage} />
           )}
 
           {tab === 'freightlaytime' && (
-            <div className="fv-ops__grid2">
-              <Card title="Laytime Calculation" icon="fa-stopwatch" right={<><button type="button" className="fv-ops__btn">Recalculate</button><button type="button" className="fv-ops__btn">Statement</button></>}>
-                <ul className="fv-ops__kv-list">
-                  {kv('Laycan', b.laytime.laycan)}
-                  {kv('NOR Tendered', b.laytime.norTendered)}
-                  {kv('NOR Accepted', b.laytime.norAccepted)}
-                  {kv('Discharge Commenced', b.laytime.dischCommenced)}
-                  {kv('Discharge Completed', b.laytime.dischCompleted)}
-                  {kv('Weather / Rain Delay', `${b.laytime.weatherDelay.toFixed(2)} d`)}
-                  {kv('Shifting / Excepted', `${(b.laytime.shifting + b.laytime.excepted).toFixed(2)} d`)}
-                </ul>
-              </Card>
-              <Card title="Result" icon="fa-scale-balanced">
-                <ul className="fv-ops__kv-list">
-                  {kv('Allowed Time', `${b.laytime.allowed.toFixed(2)} d`)}
-                  {kv('Time Used', `${b.laytime.used.toFixed(2)} d`)}
-                  {kv('Saved Time', `${b.laySaved.toFixed(2)} d`)}
-                  {kv('Excess Time', `${b.layExcess.toFixed(2)} d`)}
-                  {kv('Demurrage Rate', money(b.laytime.demRate))}
-                  {kv('Despatch Rate', money(b.laytime.desRate))}
-                </ul>
-                <div className={`fv-ops__kv-line fv-ops__kv-line--sub`}><span>Calculated Demurrage</span><span className="fv-ops__kv-out">{money(b.demurrage)}</span></div>
-                <div className={`fv-ops__kv-line fv-ops__kv-line--sub`}><span>Calculated Despatch</span><span className="fv-ops__kv-out">{money(b.despatch)}</span></div>
-                <div className="fv-pf__laybar">
-                  <div className="fv-pf__laybar-used" style={{ width: `${Math.min(100, (b.laytime.used / (b.laytime.allowed + b.layExcess)) * 100)}%` }} />
-                  <span className="fv-pf__laybar-mark" style={{ left: `${(b.laytime.allowed / (b.laytime.allowed + b.layExcess)) * 100}%` }} title="Allowed" />
-                </div>
-                <p className="fv-ops__hint">Auto-generated from SOF. Excess over allowed laytime accrues demurrage; time saved accrues despatch (½ demurrage).</p>
-              </Card>
-            </div>
+            <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} section="freight" />
           )}
 
-          {tab === 'freightlaytime' && (
-            <div className="fv-ops__grid2">
-              <Card title="Freight Settlement" icon="fa-sack-dollar">
-                <ul className="fv-ops__kv-list">
-                  {kv('Contract Freight', money(b.freight.contract))}
-                  {kv('Basis', b.freight.basis)}
-                  {kv('Advance Freight (90%)', money(b.freight.advance))}
-                  {kv('Address Commission', `- ${money(b.freight.addComm)}`)}
-                  {kv('Brokerage', `- ${money(b.freight.brokerage)}`)}
-                  {kv('Deadfreight', money(b.freight.deadfreight))}
-                  {kv('Taxes', money(b.freight.taxes))}
-                </ul>
-                <div className="fv-ops__kv-line fv-ops__kv-line--sub"><span>Final Freight</span><span className="fv-ops__kv-out">{money(b.finalFreight)}</span></div>
-                <div className="fv-ops__kv-line fv-ops__kv-line--profit"><span>Balance Freight Due</span><span className="fv-ops__kv-out">{money(b.balanceFreight)}</span></div>
-              </Card>
-              <Card title="Collection" icon="fa-hand-holding-dollar">
-                <ul className="fv-ops__kv-list">
-                  {kv('Invoice No', 'FR-2606')}
-                  {kv('Invoice Date', '05 Jun 2026')}
-                  {kv('Payment Due', '05 Jul 2026')}
-                  {kv('Amount Received', money(b.freight.advance))}
-                  {kv('Outstanding', money(b.balanceFreight))}
-                </ul>
-                <div className="fv-ops__kv-line fv-ops__kv-line--sub"><span>Collection Status</span><span className="fv-ops__kv-out"><Pill text="Partially Collected" /></span></div>
-              </Card>
-            </div>
+          {tab === 'pdaservices' && (
+            <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} section="pda-services" />
           )}
 
-          {tab === 'claims' && (
-            <Card title="Claims Management" icon="fa-gavel" right={<button type="button" className="fv-ops__btn">New Claim</button>}>
-              <table className="fv-ops__table">
-                <thead><tr><th>Type</th><th>Reference</th><th>Owner</th><th className="fv-ops__r">Claim Amount</th><th className="fv-ops__r">Settlement</th><th>Status</th><th>Remarks</th></tr></thead>
-                <tbody>
-                  {b.claims.map((c) => (
-                    <tr key={c.id}>
-                      <td>{c.type}</td><td>{c.reference}</td><td>{c.owner}</td>
-                      <td className="fv-ops__r">{num(c.amount)}</td>
-                      <td className="fv-ops__r">{c.settlement ? num(c.settlement) : '—'}</td>
-                      <td><Pill text={c.status} /></td>
-                      <td className="fv-pf__remark">{c.remarks}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Card>
-          )}
-
-          {tab === 'documents' && (
-            <Card title="Document Repository" icon="fa-folder-open" right={<span className="fv-pf__ocr"><i className="fas fa-magnifying-glass" /> <input placeholder="OCR search documents…" /></span>}>
-              <ul className="fv-pf__docs">
-                {b.documents.map((d) => (
-                  <li key={d.id}><i className="fas fa-file-lines" /> <span className="fv-pf__doc-name">{d.name}</span><span className="fv-pf__doc-meta">{d.type} · {d.date}</span><button type="button" className="fv-ops__icon-btn" title="Open"><i className="fas fa-up-right-from-square" /></button></li>
-                ))}
-              </ul>
-            </Card>
-          )}
-
-          {tab === 'accounting' && (
-            <div className="fv-ops__grid2">
-              <Card title="Financial Summary" icon="fa-building-columns">
-                <ul className="fv-ops__kv-list">
-                  {kv('Total Receivable', money(b.receivable))}
-                  {kv('Total Payable', money(b.payable))}
-                  {kv('FDA Total', money(b.fdaTotal))}
-                  {kv('Additional Services', money(b.servicesTotal))}
-                  {kv('Demurrage / Despatch', `${money(b.demurrage)} / ${money(b.despatch)}`)}
-                </ul>
-                <div className="fv-ops__kv-line fv-ops__kv-line--profit"><span>Net Settlement</span><span className="fv-ops__kv-out">{money(b.net)}</span></div>
-              </Card>
-              <Card title="Payment Requests → Accounts" icon="fa-money-check-dollar">
-                <table className="fv-ops__table">
-                  <thead><tr><th>Invoice</th><th>Vendor</th><th className="fv-ops__r">Amount</th><th>Status</th></tr></thead>
-                  <tbody>
-                    {b.invoices.filter((i) => i.dept === 'Approved').map((i) => (
-                      <tr key={i.id}>
-                        <td>{i.invoiceNo}</td><td>{i.vendor}</td>
-                        <td className="fv-ops__r">{num(i.approved || i.amount)}</td>
-                        <td>{sent.has(i.id) ? <Pill text="Sent to Accounts" /> : i.accounts === 'Paid' ? <Pill text="Paid" /> : <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={() => sendToAccounts(i)}>Send</button>}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <p className="fv-ops__hint">Sent requests appear in the Accounts module payables; payment status flows back here automatically.</p>
-              </Card>
-            </div>
-          )}
-
-          {tab === 'audit' && (
-            <Card title="Audit Trail — Immutable" icon="fa-clock-rotate-left">
+          {tab === 'history' && (
+            <Card title="Configuration History" icon="fa-clock-rotate-left">
               <ul className="fv-pf__audit">
                 {[
                   { u: 'A. Nair', a: 'FDA-24118 approved (PDA 128,500 → FDA 131,240)', at: '18 Jun 2026, 10:12' },
@@ -516,24 +267,10 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
         {rail && (
           <div className="fv-ops__rail-panel">
             <div className="fv-ops__rail-panel-head">
-              <span>{rail === 'summary' ? 'Live Financial Summary' : rail === 'activity' ? 'Activity & Notes' : rail === 'docs' ? 'Documents' : 'Reminders'}</span>
+              <span>{rail === 'activity' ? 'Activity & Notes' : rail === 'docs' ? 'Documents' : 'Reminders'}</span>
               <button type="button" className="fv-ops__icon-btn" onClick={() => setRail(null)} title="Close"><i className="fas fa-xmark" /></button>
             </div>
             <div className="fv-ops__rail-panel-body">
-              {rail === 'summary' && (
-                <ul className="fv-ops__kv-list">
-                  {kv('PDA', money(b.pdaTotal))}
-                  {kv('FDA', money(b.fdaTotal))}
-                  {kv('Additional', money(b.servicesTotal))}
-                  {kv('Demurrage', money(b.demurrage))}
-                  {kv('Despatch', money(b.despatch))}
-                  {kv('Freight', money(b.finalFreight))}
-                  {kv('Net Receivable', money(Math.max(0, b.net)))}
-                  {kv('Net Payable', money(Math.max(0, -b.net)))}
-                  {kv('Completion', `${b.completion}%`)}
-                  {kv('Pending Approvals', String(pendingApprovals))}
-                </ul>
-              )}
               {rail === 'activity' && (
                 <ul className="fv-pf__feed">
                   <li><i className="fas fa-circle-check" /> FDA received for {b.load}</li>
@@ -558,8 +295,7 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
           </div>
         )}
         <div className="fv-ops__rail-icons">
-          <RailIcon icon="fa-chart-pie" label="Summary" active={rail === 'summary'} onClick={() => setRail(rail === 'summary' ? null : 'summary')} />
-          <RailIcon icon="fa-list-check" label="Activity" active={rail === 'activity'} badge={pendingApprovals} onClick={() => setRail(rail === 'activity' ? null : 'activity')} />
+          <RailIcon icon="fa-list-check" label="Activity" active={rail === 'activity'} badge={b.invoices.filter(i=>i.dept==='Pending').length} onClick={() => setRail(rail === 'activity' ? null : 'activity')} />
           <RailIcon icon="fa-folder-open" label="Docs" active={rail === 'docs'} badge={b.documents.length} onClick={() => setRail(rail === 'docs' ? null : 'docs')} />
           <RailIcon icon="fa-bell" label="Reminders" active={rail === 'reminders'} onClick={() => setRail(rail === 'reminders' ? null : 'reminders')} />
         </div>
@@ -568,12 +304,3 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
   );
 }
 
-/* key/value line reused from the ops kv-list pattern */
-function kv(label: string, value: ReactNode) {
-  return (
-    <li className="fv-ops__kv-line">
-      <span>{label}</span>
-      <span className="fv-ops__kv-out">{value}</span>
-    </li>
-  );
-}

@@ -32,6 +32,58 @@ export function normalizeRingLonLat(ring: [number, number][]): [number, number][
   return out;
 }
 
+/**
+ * Split a ring at the antimeridian so Leaflet's SVG fill never wraps across
+ * the globe. Returns one ring when no crossing exists, or two rings (one on
+ * each side of ±180°) when the ring straddles the antimeridian.
+ */
+export function splitRingAtAntimeridian(ring: [number, number][]): [number, number][][] {
+  const norm = normalizeRingLonLat(ring);
+  const lons = norm.map(([, lon]) => lon);
+  const minLon = Math.min(...lons);
+  const maxLon = Math.max(...lons);
+
+  // If the ring fits within any 360° window that doesn't straddle 180°, use as-is.
+  if (maxLon - minLon <= 180) return [norm];
+
+  // Find the split meridian: use 180 when any vertex has lon > 180,
+  // use -180 when any vertex has lon < -180.
+  const splitAt = lons.some((l) => l > 180) ? 180 : -180;
+
+  const sideA: [number, number][] = [];
+  const sideB: [number, number][] = [];
+
+  for (let i = 0; i < norm.length; i++) {
+    const curr = norm[i];
+    const next = norm[(i + 1) % norm.length];
+    const currLon = curr[1];
+    const nextLon = next[1];
+
+    // Assign current vertex to the appropriate side.
+    (currLon <= splitAt ? sideA : sideB).push(curr);
+
+    // If this edge crosses the split meridian, insert an interpolated vertex on both sides.
+    const crossesForward = currLon <= splitAt && nextLon > splitAt;
+    const crossesBack = currLon > splitAt && nextLon <= splitAt;
+    if (crossesForward || crossesBack) {
+      const t = (splitAt - currLon) / (nextLon - currLon);
+      const crossLat = curr[0] + t * (next[0] - curr[0]);
+      sideA.push([crossLat, splitAt]);
+      sideB.push([crossLat, splitAt]);
+    }
+  }
+
+  // Normalise the "other-side" vertices back into [-180, 180].
+  const normaliseBack = (pts: [number, number][]): [number, number][] =>
+    pts.map(([lat, lon]) => [lat, lon > 180 ? lon - 360 : lon < -180 ? lon + 360 : lon]);
+
+  const results: [number, number][][] = [];
+  if (sideA.length >= 3) results.push(sideA);
+  const adjB = normaliseBack(sideB);
+  if (adjB.length >= 3) results.push(adjB);
+  return results.length > 0 ? results : [norm];
+}
+
 export interface ZoneStyle {
   label: string;
   color: string;
@@ -141,20 +193,23 @@ export function AreaConstraintsLayer({
         const hoverOptions: PathOptions = { fillOpacity: 0.35, weight: 2 };
         return (
           <Fragment key={c.id}>
-            {c.rings.map((ring, ri) => (
-              <Polygon
-                key={`${c.id}-${ri}`}
-                positions={normalizeRingLonLat(ring)}
-                pathOptions={pathOptions}
-                eventHandlers={{
-                  mouseover: (e) => e.target.setStyle(hoverOptions),
-                  mouseout: (e) => e.target.setStyle(pathOptions),
-                  click: () => onConstraintClick?.(c.id),
-                }}
-              >
-                <ConstraintTooltip c={c} />
-              </Polygon>
-            ))}
+            {c.rings.map((ring, ri) => {
+              const subRings = splitRingAtAntimeridian(ring);
+              return subRings.map((positions, si) => (
+                <Polygon
+                  key={`${c.id}-${ri}-${si}`}
+                  positions={positions}
+                  pathOptions={pathOptions}
+                  eventHandlers={{
+                    mouseover: (e) => e.target.setStyle(hoverOptions),
+                    mouseout: (e) => e.target.setStyle(pathOptions),
+                    click: () => onConstraintClick?.(c.id),
+                  }}
+                >
+                  {si === 0 && <ConstraintTooltip c={c} />}
+                </Polygon>
+              ));
+            })}
           </Fragment>
         );
       })}

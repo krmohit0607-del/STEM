@@ -57,6 +57,15 @@ export interface AuditEntry {
   action: string;
 }
 
+/** One fuel type line within a bunker requirement (multiple per port call). */
+export interface FuelLine {
+  fuel: string;
+  quantity: number;
+  grade: string;
+  suppliedQty?: number;
+  deliveredQty?: number;
+}
+
 export interface BunkerRequirement {
   id: string;
   priority: Priority;
@@ -73,9 +82,12 @@ export interface BunkerRequirement {
   eta: string;
   requiredOn: string;
   requiredIso: string;
+  /** Primary fuel type (first line) — kept for backward compat; use fuelLines for full list. */
   fuelType: string;
   grade: string;
   quantity: number;
+  /** All fuel types requested at this port. Replaces the single fuelType/quantity for new requirements. */
+  fuelLines?: FuelLine[];
   robArrival: number;
   expectedCons: number;
   chartererInstructions: string;
@@ -442,6 +454,10 @@ function seed(): BunkerRequirement[] {
 
   for (const r of rows) {
     r.quotes = scoreQuotes(r.quotes);
+    // Back-fill fuelLines for seed data that predates the multi-fuel model.
+    if (!r.fuelLines || r.fuelLines.length === 0) {
+      r.fuelLines = [{ fuel: r.fuelType, quantity: r.quantity, grade: r.grade }];
+    }
   }
   return rows;
 }
@@ -535,6 +551,8 @@ export interface NewRequirementInput {
   fuelType: string;
   grade?: string;
   quantity: number;
+  /** Multiple fuel types for this port — when provided, creates fuelLines on the requirement. */
+  fuelLines?: { fuel: string; quantity: number; grade?: string }[];
   priority?: Priority;
   chartererInstructions?: string;
   ownerInstructions?: string;
@@ -545,6 +563,10 @@ export function addBunkerRequirement(input: NewRequirementInput): string {
   const suffix = String(n).padStart(3, '0');
   const id = `BR-2607-${suffix}`;
   const at = nowStamp();
+  const lines: FuelLine[] = input.fuelLines
+    ? input.fuelLines.map((l) => ({ fuel: l.fuel, quantity: l.quantity, grade: l.grade ?? 'ISO 8217:2017 RMG 380' }))
+    : [{ fuel: input.fuelType, quantity: input.quantity, grade: input.grade ?? 'ISO 8217:2017 RMG 380' }];
+  const primaryLine = lines[0];
   const r: BunkerRequirement = {
     id,
     priority: input.priority ?? 'Medium',
@@ -560,9 +582,10 @@ export function addBunkerRequirement(input: NewRequirementInput): string {
     eta: input.eta?.trim() || '—',
     requiredOn: input.requiredOn?.trim() || '—',
     requiredIso: '',
-    fuelType: input.fuelType,
-    grade: input.grade?.trim() || 'ISO 8217:2017 RMG 380',
-    quantity: input.quantity,
+    fuelType: primaryLine.fuel,
+    grade: primaryLine.grade,
+    quantity: primaryLine.quantity,
+    fuelLines: lines,
     robArrival: 0,
     expectedCons: 0,
     chartererInstructions: input.chartererInstructions?.trim() || 'As per charterers instruction.',

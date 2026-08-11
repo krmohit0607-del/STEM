@@ -70,27 +70,41 @@ export function LoadLineZonesLayer({
         };
         const hoverOptions: PathOptions = { weight: 3, opacity: 1 };
 
+        // Build all segments for this zone then normalise consecutive endpoint
+        // longitudes — prevents segments that cross the antimeridian from
+        // rendering on different world copies of the Leaflet canvas.
+        const rawSegments = zone.segments.map((seg) => segmentToLineString(seg).map(toLeafletCoords));
+        let refLon: number | null = null;
+        const normSegments = rawSegments.map((pts) => {
+          if (pts.length === 0) return pts;
+          if (refLon === null) {
+            refLon = pts[pts.length - 1][1];
+            return pts;
+          }
+          // Shortest-path delta from the last segment's end to this segment's start.
+          let delta = pts[0][1] - refLon;
+          while (delta > 180) delta -= 360;
+          while (delta < -180) delta += 360;
+          const offset = refLon + delta - pts[0][1];
+          const shifted = pts.map(([lat, lon]) => [lat, lon + offset] as [number, number]);
+          refLon = shifted[shifted.length - 1][1];
+          return shifted;
+        });
+
         return (
           <Fragment key={zone.id}>
-            {zone.segments.map((segment, si) => {
-              // Convert segment to line string
-              const lineString = segmentToLineString(segment);
-              // Convert GeoJSON [lon, lat] to Leaflet [lat, lon]
-              const leafletCoords = lineString.map(toLeafletCoords);
-
-              return (
-                <Polyline
-                  key={`${zone.id}-${si}`}
-                  positions={leafletCoords}
-                  pathOptions={pathOptions}
-                  eventHandlers={{
-                    mouseover: (e) => e.target.setStyle(hoverOptions),
-                    mouseout: (e) => e.target.setStyle(pathOptions),
-                    click: () => onZoneClick?.(zone.id),
-                  }}
-                />
-              );
-            })}
+            {normSegments.map((leafletCoords, si) => (
+              <Polyline
+                key={`${zone.id}-${si}`}
+                positions={leafletCoords}
+                pathOptions={pathOptions}
+                eventHandlers={{
+                  mouseover: (e) => e.target.setStyle(hoverOptions),
+                  mouseout: (e) => e.target.setStyle(pathOptions),
+                  click: () => onZoneClick?.(zone.id),
+                }}
+              />
+            ))}
             <LoadLineZoneLabel zone={zone} />
           </Fragment>
         );

@@ -8,6 +8,7 @@ import { makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { addNotification, copyLaytimeToPostfix, useCpdds, useFixtureNumbers } from '../data/workflow';
 import { loadClients, saveClients, SERVICE_PROVIDER_TYPES } from '../data/clients';
 import { addBunkerRequirement } from '../data/bunker';
+import { useWorldPorts, type WorldPort } from '../data/ports';
 import { loadVessels, saveVessels } from '../data/vessels';
 import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
 import { NoVesselSelected } from './NoVesselSelected';
@@ -1006,7 +1007,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
 
 /* --------------------------------------------------------- P&L computation */
 
-interface Pnl {
+export interface Pnl {
   days: number;
   qty: number;
   freight: number;
@@ -1054,7 +1055,7 @@ function itineraryTotals(plan: EtaPlan): { distance: number; portDays: number } 
   return { distance, portDays };
 }
 
-function computePnl(r: Recap): Pnl {
+export function computePnl(r: Recap): Pnl {
   // Observed speed (when entered) drives voyage days from the itinerary distance; else delivery→redelivery.
   const spd = num(r.actualSpeed ?? '');
   let days: number;
@@ -1281,8 +1282,10 @@ function extractRecapFields(text: string): Partial<Recap> {
     ['demDespatch', [/demurrage\s*\/?\s*despatch\s*[:\-|]\s*\$?\s*([\d.,]+)/i, /demurrage\s*[:\-|]\s*\$?\s*([\d.,]+)/i]],
     ['despatchTerm', [/despatch\s*[:\-|]\s*(.+)/i]],
     ['deliveryPort', [/delivery\s*(?:at|port)\s*[:\-|]\s*(.+)/i]],
+    ['deliveryTerm', [/delivery\s*term\s*[:\-|]\s*(.+)/i]],
     ['deliveryDateTime', [/delivery\s*date\s*\/?\s*time\s*[:\-|]\s*(.+)/i]],
     ['redeliveryPort', [/redelivery\s*(?:at|port)\s*[:\-|]\s*(.+)/i]],
+    ['redeliveryTerm', [/redelivery\s*term\s*[:\-|]\s*(.+)/i]],
     ['redeliveryDateTime', [/redelivery\s*date\s*\/?\s*time\s*[:\-|]\s*(.+)/i]],
     ['wxClause', [/wx\s*clause\s*[:\-|]\s*(.+)/i, /weather\s*clause\s*[:\-|]\s*(.+)/i]],
     ['ilohc', [/ilohc\s*[:\-|]\s*\$?\s*([\d.,]+)/i]],
@@ -1866,6 +1869,13 @@ const OPS_PAYMENT_BASES = ['Banking Days', 'Running Days', 'Calendar Days'];
 const OPS_HIRE_INCLUDE = ['Bunkers', 'Ballast Bonus', 'Both', 'None'];
 // Hold-cleaning responsibility.
 const OPS_HOLD_CLEANING = ['Owners', 'Self (Company)', 'Charterers'];
+// Common cargo commodities offered as type-ahead suggestions (free text stays).
+const OPS_COMMON_CARGOES = [
+  'Iron Ore', 'Coal', 'Steam Coal', 'Coking Coal', 'Bauxite', 'Alumina', 'Gypsum', 'Limestone',
+  'Clinker', 'Cement', 'Grain', 'Wheat', 'Corn', 'Soybeans', 'Soybean Meal', 'Rice', 'Sugar',
+  'Salt', 'Fertilizer', 'Urea', 'DAP', 'MOP', 'Sulphur', 'Petcoke', 'Scrap', 'Steel Products',
+  'HR Coils', 'Rebar', 'Logs', 'Woodchips', 'Manganese Ore', 'Chrome Ore', 'Nickel Ore', 'Concentrates',
+];
 // LOI / OBL at discharge and its approval status.
 const OPS_LOI_OBL = ['OBL', 'LOI'];
 const OPS_LOI_STATUS = ['Awaiting from Charterers', 'Awaiting Owners Confirmation', 'Submitted', 'Approved by Owners'];
@@ -1979,13 +1989,75 @@ function VdSelect({ label, value, onChange, options }: { label: string; value: s
   );
 }
 
-/** Autocomplete field backed by a datalist (pick a saved account or type one). */
-function VdCombo({ label, value, onChange, options, listId, accent }: { label: string; value: string; onChange: (v: string) => void; options: string[]; listId: string; accent?: boolean }) {
+/** Shared themed autocomplete popup: free-text input over a filtered saved list. */
+function VdAutocomplete({ value, onChange, options, placeholder, accent, inputClass }: { value: string; onChange: (v: string) => void; options: { value: string; label?: string; meta?: string }[]; placeholder?: string; accent?: boolean; inputClass?: string }) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const matches = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const list = q ? options.filter((o) => `${o.value} ${o.label ?? ''} ${o.meta ?? ''}`.toLowerCase().includes(q)) : options;
+    return list.slice(0, 50);
+  }, [value, options]);
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => { if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, []);
+  const choose = (v: string) => { onChange(v); setOpen(false); };
+  return (
+    <div className="fv-ops__vd-combo" ref={wrapRef}>
+      <input
+        className={inputClass ?? `fv-ops__vd-in${accent ? ' fv-ops__vd-in--accent' : ''}`}
+        value={value}
+        placeholder={placeholder ?? 'Select or type…'}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); setActive(0); }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(e) => {
+          if (!open) return;
+          if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, matches.length - 1)); }
+          else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+          else if (e.key === 'Enter' && matches[active]) { e.preventDefault(); choose(matches[active].value); }
+          else if (e.key === 'Escape') setOpen(false);
+        }}
+      />
+      {open && matches.length > 0 && (
+        <ul className="fv-port-combo__list">
+          {matches.map((o, i) => (
+            <li
+              key={`${o.value}-${i}`}
+              className={`fv-port-combo__item${i === active ? ' fv-port-combo__item--active' : ''}`}
+              onMouseDown={(e) => { e.preventDefault(); choose(o.value); }}
+              onMouseEnter={() => setActive(i)}
+            >
+              <span className="fv-port-combo__name">{o.label ?? o.value}</span>
+              {o.meta && <span className="fv-port-combo__meta">{o.meta}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Autocomplete field backed by saved accounts (pick a saved account or type one). */
+function VdCombo({ label, value, onChange, options, accent }: { label: string; value: string; onChange: (v: string) => void; options: string[]; accent?: boolean }) {
+  const opts = useMemo(() => options.map((o) => ({ value: o })), [options]);
   return (
     <label className="fv-ops__vd-field">
       <span>{label}</span>
-      <input className={`fv-ops__vd-in${accent ? ' fv-ops__vd-in--accent' : ''}`} list={listId} value={value} placeholder="Select or type…" onChange={(e) => onChange(e.target.value)} />
-      <datalist id={listId}>{options.map((o) => <option key={o} value={o} />)}</datalist>
+      <VdAutocomplete value={value} onChange={onChange} options={opts} accent={accent} />
+    </label>
+  );
+}
+
+/** Port field with autocomplete over the saved World Port Index. */
+function VdPort({ label, value, onChange, ports, accent }: { label: string; value: string; onChange: (v: string) => void; ports: WorldPort[]; accent?: boolean }) {
+  const opts = useMemo(() => ports.map((p) => ({ value: p.label, label: p.name, meta: p.code ? `${p.country} · ${p.code}` : p.country })), [ports]);
+  return (
+    <label className="fv-ops__vd-field">
+      <span>{label}</span>
+      <VdAutocomplete value={value} onChange={onChange} options={opts} placeholder="Search port…" accent={accent} />
     </label>
   );
 }
@@ -2036,7 +2108,7 @@ function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage
   );
 }
 
-function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; status: string }) {
+export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; status: string }) {
   const set = (k: keyof Recap, v: string) => setRecap((r) => ({ ...r, [k]: v }));
 
   const OPS_ALLOWED_VOYAGE_TYPES = [
@@ -2069,6 +2141,16 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
 
   // Counterparty / service-provider options sourced from Settings → Account Details.
   const clients = useMemo(() => loadClients(), []);
+  const worldPorts = useWorldPorts();
+  // Vessel options sourced from Settings → Vessels Details (name + master email).
+  const vessels = useMemo(() => loadVessels(), []);
+  const vesselNames = useMemo(() => vessels.map((v) => v.name.trim()).filter(Boolean), [vessels]);
+  const vesselEmails = useMemo(() => Array.from(new Set(vessels.map((v) => v.email.trim()).filter(Boolean))), [vessels]);
+  const pickVessel = (name: string) => {
+    set('vesselName', name);
+    const match = vessels.find((v) => v.name.trim().toLowerCase() === name.trim().toLowerCase());
+    if (match?.email) { set('vesselEmail', match.email); syncVesselEmail(match.email); }
+  };
   const namesFor = (kind: string, cat: string) =>
     clients.filter((c) => (c.kind ?? 'Account') === kind && c.category === cat && c.name.trim()).map((c) => c.name.trim());
   const ownerNames = useMemo(() => namesFor('Account', 'Owner'), [clients]);
@@ -2170,16 +2252,14 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
           <div className="fv-ops__vd-fields">
             <label className="fv-ops__vd-field">
               <span>Vessel Name</span>
-              <input className="fv-ops__vd-in fv-ops__vd-in--accent" value={recap.vesselName} onChange={(e) => set('vesselName', e.target.value)} />
+              <VdAutocomplete value={recap.vesselName} onChange={pickVessel} options={vesselNames.map((n) => ({ value: n }))} inputClass="fv-ops__vd-in fv-ops__vd-in--accent" />
             </label>
-            <VdField
-              label="Vessel Email"
-              value={recap.vesselEmail}
-              onChange={(v) => { set('vesselEmail', v); syncVesselEmail(v); }}
-              placeholder="master.vessel@…"
-            />
+            <label className="fv-ops__vd-field">
+              <span>Vessel Email</span>
+              <VdAutocomplete value={recap.vesselEmail} onChange={(v) => { set('vesselEmail', v); syncVesselEmail(v); }} options={vesselEmails.map((e) => ({ value: e }))} placeholder="master.vessel@…" />
+            </label>
             <VdSelect label="Voyage / Fix Type" value={recap.voyageFixType} onChange={(v) => set('voyageFixType', v)} options={OPS_ALLOWED_VOYAGE_TYPES} />
-            {showVoyageCargo && <VdField label="Cargo Name" value={recap.cargoName} onChange={(v) => set('cargoName', v)} accent />}
+            {showVoyageCargo && <VdCombo label="Cargo Name" value={recap.cargoName} onChange={(v) => set('cargoName', v)} options={OPS_COMMON_CARGOES} accent />}
             {showVoyageCargo && <VdValueUnit label="CP Quantity" value={recap.cpQuantity} onValue={(v) => set('cpQuantity', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} />}
             {showVoyageCargo && <VdValueUnit label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num />}
             {showVoyageCargo && <VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} />}
@@ -2197,8 +2277,8 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
 
         <Card title="Owners" icon="fa-building">
           <div className="fv-ops__vd-fields">
-            <VdCombo label="Owners" value={recap.owners} onChange={(v) => set('owners', v)} options={ownerNames} listId="vd-owners" accent />
-            <VdCombo label="Owners Broker" value={recap.ownersBroker} onChange={(v) => set('ownersBroker', v)} options={brokerNames} listId="vd-brokers" />
+            <VdCombo label="Owners" value={recap.owners} onChange={(v) => set('owners', v)} options={ownerNames} accent />
+            <VdCombo label="Owners Broker" value={recap.ownersBroker} onChange={(v) => set('ownersBroker', v)} options={brokerNames} />
             <VdField label="CP Date" value={recap.cpDate} onChange={(v) => set('cpDate', v)} placeholder="dd-mm-yyyy" />
             {showHireFields && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
@@ -2233,8 +2313,8 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
 
         <Card title="Sub Charter — Charterers" icon="fa-handshake">
           <div className="fv-ops__vd-fields">
-            <VdCombo label="Charterers" value={recap.charterers} onChange={(v) => set('charterers', v)} options={chartererNames} listId="vd-charterers" accent />
-            <VdCombo label="Charterers Broker" value={recap.charterersBroker} onChange={(v) => set('charterersBroker', v)} options={brokerNames} listId="vd-brokers2" />
+            <VdCombo label="Charterers" value={recap.charterers} onChange={(v) => set('charterers', v)} options={chartererNames} accent />
+            <VdCombo label="Charterers Broker" value={recap.charterersBroker} onChange={(v) => set('charterersBroker', v)} options={brokerNames} />
             <VdField label="Charterers CP Date" value={recap.charterersCpDate} onChange={(v) => set('charterersCpDate', v)} placeholder="dd-mm-yyyy" />
             {showDualHire && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.charterHirePerDay} onValue={(v) => set('charterHirePerDay', v)} unit={recap.charterHireCurrency} onUnit={(v) => set('charterHireCurrency', v)} units={OPS_CURRENCIES} accent num />}
             {showFreightFields && <VdValueUnit label="Freight / MT" value={recap.freightPerMt} onValue={(v) => set('freightPerMt', v)} unit={recap.freightCurrency} onUnit={(v) => set('freightCurrency', v)} units={OPS_CURRENCIES} accent num />}
@@ -2282,13 +2362,13 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
         {showDelivery && <Card title="Delivery / Redelivery" icon="fa-clock">
           <div className="fv-ops__vd-dr">
             <div className="fv-ops__vd-dr-col">
-              <VdField label="Delivery Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} accent />
-              <VdCombo label="Delivery Term" value={recap.deliveryTerm} onChange={(v) => set('deliveryTerm', v)} options={OPS_BERTH_TERMS} listId="vd-delterm" />
+              <VdPort label="Delivery Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} ports={worldPorts} accent />
+              <VdSelect label="Delivery Term" value={recap.deliveryTerm} onChange={(v) => set('deliveryTerm', v)} options={OPS_BERTH_TERMS} />
               <VdDateTime label="Delivery Date / Time" value={recap.deliveryDateTime} onChange={(v) => set('deliveryDateTime', v)} accent />
             </div>
             <div className="fv-ops__vd-dr-col">
-              <VdField label="Redelivery Port" value={recap.redeliveryPort} onChange={(v) => set('redeliveryPort', v)} accent />
-              <VdCombo label="Redelivery Term" value={recap.redeliveryTerm} onChange={(v) => set('redeliveryTerm', v)} options={OPS_BERTH_TERMS} listId="vd-redelterm" />
+              <VdPort label="Redelivery Port" value={recap.redeliveryPort} onChange={(v) => set('redeliveryPort', v)} ports={worldPorts} accent />
+              <VdSelect label="Redelivery Term" value={recap.redeliveryTerm} onChange={(v) => set('redeliveryTerm', v)} options={OPS_BERTH_TERMS} />
               <VdDateTime label="Redelivery Date / Time" value={recap.redeliveryDateTime} onChange={(v) => set('redeliveryDateTime', v)} accent />
             </div>
           </div>
@@ -2342,12 +2422,12 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
 
         {showLoadDischarge && <Card title="Load & Discharge Ports" icon="fa-anchor" span2>
           <div className="fv-ops__vd-fields">
-            <VdField label="Load Port" value={recap.loadPort} onChange={(v) => set('loadPort', v)} accent />
-            <VdCombo label="NOR at Load Port" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} listId="vd-nor-load" />
+            <VdPort label="Load Port" value={recap.loadPort} onChange={(v) => set('loadPort', v)} ports={worldPorts} accent />
+            <VdSelect label="NOR at Load Port" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} />
             <VdField label="Load Rate" value={recap.loadRate} onChange={(v) => set('loadRate', v)} />
             <VdField label="PDA Load Port" value={recap.pdaLoadPort} onChange={(v) => set('pdaLoadPort', v)} />
-            <VdField label="Discharge Port" value={recap.dischargePort} onChange={(v) => set('dischargePort', v)} accent />
-            <VdCombo label="NOR at D.Port" value={recap.norAtDPort} onChange={(v) => set('norAtDPort', v)} options={OPS_NOR_TENDER_TERMS} listId="vd-nor-disch" />
+            <VdPort label="Discharge Port" value={recap.dischargePort} onChange={(v) => set('dischargePort', v)} ports={worldPorts} accent />
+            <VdSelect label="NOR at D.Port" value={recap.norAtDPort} onChange={(v) => set('norAtDPort', v)} options={OPS_NOR_TENDER_TERMS} />
             <VdField label="Disch. Rate" value={recap.dischRate} onChange={(v) => set('dischRate', v)} />
             <VdField label="PDA D.Port" value={recap.pdaDPort} onChange={(v) => set('pdaDPort', v)} />
             <VdSelect label="LOI / OBL at D.Port" value={recap.loiOblDPort} onChange={(v) => set('loiOblDPort', v)} options={OPS_LOI_OBL} />
@@ -2374,8 +2454,7 @@ function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; s
                   <select className="fv-ops__vd-in" value={sp.type} onChange={(e) => updSP(i, { type: e.target.value })}>
                     {SERVICE_PROVIDER_TYPES.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
                   </select>
-                  <input className="fv-ops__vd-in" list={`vd-sp-${i}`} value={sp.name} placeholder="Company name…" onChange={(e) => updSP(i, { name: e.target.value })} />
-                  <datalist id={`vd-sp-${i}`}>{spNamesFor(sp.type).map((n) => <option key={n} value={n} />)}</datalist>
+                  <VdAutocomplete value={sp.name} onChange={(v) => updSP(i, { name: v })} options={spNamesFor(sp.type).map((n) => ({ value: n }))} placeholder="Company name…" inputClass="fv-ops__vd-in" />
                   <input className="fv-ops__vd-in" type="email" value={sp.email} placeholder="email@company.com" onChange={(e) => { updSP(i, { email: e.target.value }); syncServiceProviderEmail(sp.type, sp.name, e.target.value); }} />
                   <button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove provider" onClick={() => setSPs(sps.filter((_, idx) => idx !== i))}><i className="fas fa-trash" aria-hidden="true" /></button>
                 </div>
@@ -3112,38 +3191,59 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
 }) {
   const defIdx = Math.max(0, ports.findIndex((o) => o.supV + o.supM > 0));
   const base = ports[defIdx] ?? { port: recap.dischargePort, eta: '', laycanStart: '', laycanEnd: '', supV: 0, supM: 0 };
-  const [idx, setIdx] = useState(defIdx);
-  const [port, setPort] = useState(base.port);
-  const [eta, setEta] = useState(base.eta);
-  const [laycanStart, setLaycanStart] = useState(base.laycanStart);
-  const [laycanEnd, setLaycanEnd] = useState(base.laycanEnd);
-  const [lines, setLines] = useState<{ fuel: string; qty: string }[]>([
-    { fuel: 'VLSFO', qty: base.supV ? String(base.supV) : '' },
-    { fuel: 'LSMGO', qty: base.supM ? String(base.supM) : '' },
-  ]);
+
+  // Each entry is one port with its own fuel lines.
+  const [portEntries, setPortEntries] = useState<Array<{
+    port: string; eta: string; laycanStart: string; laycanEnd: string;
+    lines: { fuel: string; qty: string }[];
+  }>>([{
+    port: base.port, eta: base.eta, laycanStart: base.laycanStart, laycanEnd: base.laycanEnd,
+    lines: [
+      { fuel: 'VLSFO', qty: base.supV ? String(base.supV) : '' },
+      { fuel: 'LSMGO', qty: base.supM ? String(base.supM) : '' },
+    ],
+  }]);
   const [note, setNote] = useState('');
   const [done, setDone] = useState(false);
+  const [doneIds, setDoneIds] = useState<string[]>([]);
 
-  const applyPort = (i: number) => {
-    const o = ports[i];
+  const applyPort = (entryIdx: number, portIdx: number) => {
+    const o = ports[portIdx];
     if (!o) return;
-    setIdx(i); setPort(o.port); setEta(o.eta); setLaycanStart(o.laycanStart); setLaycanEnd(o.laycanEnd);
-    setLines([{ fuel: 'VLSFO', qty: o.supV ? String(o.supV) : '' }, { fuel: 'LSMGO', qty: o.supM ? String(o.supM) : '' }]);
-  };
-  const setLine = (i: number, patch: Partial<{ fuel: string; qty: string }>) => setLines(lines.map((l, k) => (k === i ? { ...l, ...patch } : l)));
-  const addLine = () => setLines([...lines, { fuel: 'VLSFO', qty: '' }]);
-  const delLine = (i: number) => setLines(lines.filter((_, k) => k !== i));
-
-  const active = lines.filter((l) => num(l.qty) > 0);
-  const valid = port.trim() !== '' && active.length > 0;
-  const submit = () => {
-    active.forEach((l) => addBunkerRequirement({
-      vessel: recap.vesselName, imo: voyage.imo, loadPort: recap.loadPort, dischargePort: recap.dischargePort,
-      bunkerPort: port, eta, requiredOn: laycanStart, fuelType: l.fuel, quantity: num(l.qty),
-      ownerInstructions: note || undefined,
+    setPortEntries((prev) => prev.map((e, i) => i !== entryIdx ? e : {
+      ...e, port: o.port, eta: o.eta, laycanStart: o.laycanStart, laycanEnd: o.laycanEnd,
+      lines: [{ fuel: 'VLSFO', qty: o.supV ? String(o.supV) : '' }, { fuel: 'LSMGO', qty: o.supM ? String(o.supM) : '' }],
     }));
-    const summary = active.map((l) => `${l.fuel} ${fmt(num(l.qty), 0)} MT`).join(' + ');
-    addNotification(`New bunker request — ${recap.vesselName} @ ${port} (${summary}), ETA ${eta || '—'}`, 'Bunker');
+  };
+  const setEntryField = (i: number, patch: Partial<typeof portEntries[0]>) =>
+    setPortEntries((prev) => prev.map((e, k) => (k === i ? { ...e, ...patch } : e)));
+  const setLine = (ei: number, li: number, patch: Partial<{ fuel: string; qty: string }>) =>
+    setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: e.lines.map((l, j) => (j === li ? { ...l, ...patch } : l)) }));
+  const addLine = (ei: number) => setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: [...e.lines, { fuel: 'VLSFO', qty: '' }] }));
+  const delLine = (ei: number, li: number) => setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: e.lines.filter((_, j) => j !== li) }));
+  const addPort = () => setPortEntries((prev) => [...prev, { port: '', eta: '', laycanStart: '', laycanEnd: '', lines: [{ fuel: 'VLSFO', qty: '' }] }]);
+  const removePort = (i: number) => setPortEntries((prev) => prev.filter((_, k) => k !== i));
+
+  const validEntries = portEntries.filter((e) => e.port.trim() && e.lines.some((l) => num(l.qty) > 0));
+  const valid = validEntries.length > 0;
+
+  // Create ONE requirement per port with all its fuel lines.
+  const submit = () => {
+    const ids: string[] = [];
+    validEntries.forEach((e) => {
+      const activeLines = e.lines.filter((l) => num(l.qty) > 0);
+      const id = addBunkerRequirement({
+        vessel: recap.vesselName, imo: voyage.imo, loadPort: recap.loadPort, dischargePort: recap.dischargePort,
+        bunkerPort: e.port, eta: e.eta, requiredOn: e.laycanStart,
+        fuelType: activeLines[0].fuel, quantity: num(activeLines[0].qty),
+        fuelLines: activeLines.map((l) => ({ fuel: l.fuel, quantity: num(l.qty) })),
+        ownerInstructions: note || undefined,
+      });
+      ids.push(id);
+      const summary = activeLines.map((l) => `${l.fuel} ${fmt(num(l.qty), 0)} MT`).join(' + ');
+      addNotification(`New bunker request — ${recap.vesselName} @ ${e.port} (${summary}), ETA ${e.eta || '—'}`, 'Bunker');
+    });
+    setDoneIds(ids);
     setDone(true);
   };
 
@@ -3163,45 +3263,56 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
           {done ? (
             <div className="fv-ops__bnkreq-done">
               <i className="fas fa-circle-check" aria-hidden="true" />
-              <p>Bunker request sent to the Bunkers department. It now appears in the Bunker module as <b>Pending RFQ</b>.</p>
+              <p>{doneIds.length} bunker requirement{doneIds.length > 1 ? 's' : ''} sent to the Bunkers department (<b>{doneIds.join(', ')}</b>). {doneIds.length > 1 ? 'They appear' : 'It appears'} in the Bunker module as <b>Pending RFQ</b>.</p>
               <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={onClose}>Done</button>
             </div>
           ) : (
             <>
-              <div className="fv-ops__vd-fields">
-                <label className="fv-ops__vd-field">
-                  <span>Port of Supply</span>
-                  <select className="fv-ops__vd-in" value={idx} onChange={(e) => applyPort(Number(e.target.value))}>
-                    {ports.length === 0 && <option value={-1}>—</option>}
-                    {ports.map((o, i) => <option key={i} value={i}>{o.port}{o.supV + o.supM > 0 ? ' · supply planned' : ''}</option>)}
-                  </select>
-                </label>
-                <label className="fv-ops__vd-field"><span>Port (edit)</span><input className="fv-ops__vd-in" value={port} onChange={(e) => setPort(e.target.value)} /></label>
-                <label className="fv-ops__vd-field"><span>ETA at Port</span><input className="fv-ops__vd-in" value={eta} onChange={(e) => setEta(e.target.value)} placeholder="dd-mm-yyyy HH:MM" /></label>
-                <label className="fv-ops__vd-field"><span>Laycan Start</span><input className="fv-ops__vd-in" value={laycanStart} onChange={(e) => setLaycanStart(e.target.value)} placeholder="dd-mm-yyyy" /></label>
-                <label className="fv-ops__vd-field"><span>Laycan End</span><input className="fv-ops__vd-in" value={laycanEnd} onChange={(e) => setLaycanEnd(e.target.value)} placeholder="dd-mm-yyyy" /></label>
-              </div>
-              <div className="fv-ops__vd-sub-head fv-ops__bnkreq-fuelhd"><i className="fas fa-gas-pump" aria-hidden="true" /> Fuel &amp; Quantity
-                <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addLine}><i className="fas fa-plus" aria-hidden="true" /> Fuel</button>
-              </div>
-              <table className="fv-ops__table">
-                <thead><tr><th>Fuel Type</th><th className="fv-ops__r">Quantity (MT)</th><th aria-label="Remove" /></tr></thead>
-                <tbody>
-                  {lines.map((l, i) => (
-                    <tr key={i}>
-                      <td><select className="fv-ops__eta-sel" value={l.fuel} onChange={(e) => setLine(i, { fuel: e.target.value })}>{OPS_FUEL_GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></td>
-                      <td className="fv-ops__r"><input className="fv-ops__eta-in" value={l.qty} placeholder="0" onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
-                      <td className="fv-ops__r">{lines.length > 1 && <button type="button" className="fv-ops__bnk-rm" aria-label="Remove fuel" onClick={() => delLine(i)}><i className="fas fa-xmark" aria-hidden="true" /></button>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {portEntries.map((entry, ei) => (
+                <div key={ei} className="fv-ops__bnkreq-port-block">
+                  {portEntries.length > 1 && (
+                    <div className="fv-ops__bnkreq-port-head">
+                      <span><i className="fas fa-anchor" aria-hidden="true" /> Port #{ei + 1}</span>
+                      <button type="button" className="fv-ops__bnk-rm" aria-label="Remove port" onClick={() => removePort(ei)}><i className="fas fa-xmark" aria-hidden="true" /></button>
+                    </div>
+                  )}
+                  <div className="fv-ops__vd-fields">
+                    <label className="fv-ops__vd-field">
+                      <span>Port of Supply</span>
+                      <select className="fv-ops__vd-in" value="" onChange={(e) => applyPort(ei, Number(e.target.value))}>
+                        <option value="">— pick from itinerary —</option>
+                        {ports.map((o, i) => <option key={i} value={i}>{o.port}{o.supV + o.supM > 0 ? ' · supply planned' : ''}</option>)}
+                      </select>
+                    </label>
+                    <label className="fv-ops__vd-field"><span>Port (edit)</span><input className="fv-ops__vd-in" value={entry.port} onChange={(e) => setEntryField(ei, { port: e.target.value })} /></label>
+                    <label className="fv-ops__vd-field"><span>ETA at Port</span><input className="fv-ops__vd-in" value={entry.eta} onChange={(e) => setEntryField(ei, { eta: e.target.value })} placeholder="dd-mm-yyyy HH:MM" /></label>
+                    <label className="fv-ops__vd-field"><span>Laycan Start</span><input className="fv-ops__vd-in" value={entry.laycanStart} onChange={(e) => setEntryField(ei, { laycanStart: e.target.value })} placeholder="dd-mm-yyyy" /></label>
+                    <label className="fv-ops__vd-field"><span>Laycan End</span><input className="fv-ops__vd-in" value={entry.laycanEnd} onChange={(e) => setEntryField(ei, { laycanEnd: e.target.value })} placeholder="dd-mm-yyyy" /></label>
+                  </div>
+                  <div className="fv-ops__vd-sub-head fv-ops__bnkreq-fuelhd"><i className="fas fa-gas-pump" aria-hidden="true" /> Fuel &amp; Quantity
+                    <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={() => addLine(ei)}><i className="fas fa-plus" aria-hidden="true" /> Fuel</button>
+                  </div>
+                  <table className="fv-ops__table">
+                    <thead><tr><th>Fuel Type</th><th className="fv-ops__r">Quantity (MT)</th><th aria-label="Remove" /></tr></thead>
+                    <tbody>
+                      {entry.lines.map((l, li) => (
+                        <tr key={li}>
+                          <td><select className="fv-ops__eta-sel" value={l.fuel} onChange={(e) => setLine(ei, li, { fuel: e.target.value })}>{OPS_FUEL_GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></td>
+                          <td className="fv-ops__r"><input className="fv-ops__eta-in" value={l.qty} placeholder="0" onChange={(e) => setLine(ei, li, { qty: e.target.value })} /></td>
+                          <td className="fv-ops__r">{entry.lines.length > 1 && <button type="button" className="fv-ops__bnk-rm" aria-label="Remove fuel" onClick={() => delLine(ei, li)}><i className="fas fa-xmark" aria-hidden="true" /></button>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+              <button type="button" className="fv-ops__btn fv-ops__soa-add" style={{ marginBottom: 8 }} onClick={addPort}><i className="fas fa-plus" aria-hidden="true" /> Add Another Port</button>
               <label className="fv-ops__vd-field fv-ops__bnkreq-note"><span>Instructions / Note</span><input className="fv-ops__vd-in" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional message to the bunkers team" /></label>
               <div className="fv-ops__laytime-actions">
                 <button type="button" className="fv-ops__btn" onClick={onClose}>Cancel</button>
-                <button type="button" className="fv-ops__btn fv-ops__btn--primary" disabled={!valid} onClick={submit}><i className="fas fa-paper-plane" aria-hidden="true" /> Submit Request</button>
+                <button type="button" className="fv-ops__btn fv-ops__btn--primary" disabled={!valid} onClick={submit}><i className="fas fa-paper-plane" aria-hidden="true" /> Submit {validEntries.length > 1 ? `${validEntries.length} Requests` : 'Request'}</button>
               </div>
-              <p className="fv-ops__hint">Quantities default to the itinerary <b>Supply</b> columns and ETA to the projected arrival for the selected port — all editable. Submitting raises a Pending-RFQ requirement in the Bunkers module and notifies the department.</p>
+              <p className="fv-ops__hint">One requirement is created per port with all its fuel types. Add ports with <b>Add Another Port</b> to submit multiple bunkering stops in one action.</p>
             </>
           )}
         </div>
@@ -3671,7 +3782,7 @@ function offHireDays(o: OffHireRow): number {
   return Math.max(0, days) * (pct / 100);
 }
 
-function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; voyage: Voyage }) {
+export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; voyage: Voyage }) {
   const hd = num(recap.hirePerDay);
   const dedPct = num(recap.adcom) + num(recap.brokerage);
   const cur = recap.hireCurrency || 'USD';
@@ -4711,6 +4822,126 @@ interface SoaDraft {
 }
 
 /** Statement of Account — detailed hire calculation for one installment. */
+/**
+ * Standalone Claims & Expenses card — used by both Operations (HireTab)
+ * and Postfix. Reads/writes `recap.freightLaytime.settlement.claims`.
+ */
+export function OpsClaimsCard({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage }) {
+  const stored = recap.freightLaytime;
+  const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
+  const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
+  const seededSettlement = useMemo(() => seedFreightSettlement(voyage), [voyage.id, voyage.portFrom, voyage.portTo]);
+  const settlement = fl.settlement ?? seededSettlement;
+  const setFL = (patch: Partial<FreightLaytimeData>) =>
+    setRecap((r) => {
+      const cur = (r.freightLaytime && Array.isArray(r.freightLaytime.invoices) && Array.isArray(r.freightLaytime.laytimes))
+        ? r.freightLaytime : seedFreightLaytime(r);
+      return { ...r, freightLaytime: { ...cur, ...patch } };
+    });
+  const setSettlement = (patch: Partial<FreightSettlementData>) => setFL({ settlement: { ...settlement, ...patch } });
+
+  useEffect(() => {
+    if (!valid || !fl.settlement) {
+      setRecap((r) => {
+        const cur = (r.freightLaytime && Array.isArray(r.freightLaytime.invoices) && Array.isArray(r.freightLaytime.laytimes))
+          ? r.freightLaytime : seedFreightLaytime(r);
+        return { ...r, freightLaytime: { ...cur, settlement: cur.settlement ?? seededSettlement } };
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid, fl.settlement, seededSettlement]);
+
+  const [selClaims, setSelClaims] = useState<Set<string>>(new Set());
+  const [claimId, setClaimId] = useState<string | null>(null);
+  const [claimStatusOpen, setClaimStatusOpen] = useState(false);
+  const [claimStatusValue, setClaimStatusValue] = useState('Under Review');
+  const fmtAmt = (n: number) => n.toLocaleString('en-US');
+  const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
+
+  const addClaim = () => {
+    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Open', attachments: [] };
+    setSettlement({ claims: [...settlement.claims, row] });
+    setClaimId(row.id);
+  };
+  const saveClaim = (id: string, patch: Partial<ClaimRow>) => setSettlement({ claims: settlement.claims.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const deleteSelClaims = () => { setSettlement({ claims: settlement.claims.filter((x) => !selClaims.has(x.id)) }); setSelClaims(new Set()); };
+  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Open' }))] }); setSelClaims(new Set()); };
+  const updateSelClaimStatus = () => { setClaimStatusValue('Under Review'); setClaimStatusOpen(true); };
+  const applyClaimStatus = () => { setSettlement({ claims: settlement.claims.map((x) => (selClaims.has(x.id) ? { ...x, status: claimStatusValue } : x)) }); setClaimStatusOpen(false); };
+  const pdfSelClaims = () => {
+    const rowsSel = settlement.claims.filter((x) => selClaims.has(x.id));
+    if (rowsSel.length === 0) return;
+    const body = rowsSel.map((r) => `<tr><td>${esc(r.type)}</td><td>${esc(r.reference)}</td><td>${esc(claimChargeTo(r))}</td><td class="r">${fmtAmt(r.amount)}</td><td class="r">${fmtAmt(r.settlement)}</td><td class="r">${fmtAmt(r.amount - r.settlement)}</td><td>${esc(r.status)}</td></tr>`).join('');
+    printSections(`Claims — ${recap.vesselName}`, `<section><h1>Claims</h1><table><thead><tr><th>Type</th><th>Reference</th><th>Charge To</th><th class="r">Amount</th><th class="r">Settlement</th><th class="r">Balance</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></section>`);
+  };
+  const openClaim = settlement.claims.find((x) => x.id === claimId) ?? null;
+
+  return (
+    <>
+      <Card
+        title="Claims & Expenses"
+        icon="fa-gavel"
+        wide
+        right={(
+          <span className="fv-ops__frl-secbtns">
+            <button type="button" className="fv-ops__btn" onClick={addClaim}><i className="fas fa-plus" aria-hidden="true" /> New</button>
+            <button type="button" className="fv-ops__btn" onClick={() => setClaimId(openFirstSelected(selClaims))} disabled={selClaims.size === 0}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>
+            <button type="button" className="fv-ops__btn" onClick={copySelClaims} disabled={selClaims.size === 0}><i className="fas fa-copy" aria-hidden="true" /> Copy</button>
+            <button type="button" className="fv-ops__btn" onClick={deleteSelClaims} disabled={selClaims.size === 0}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
+            <button type="button" className="fv-ops__btn" onClick={pdfSelClaims} disabled={selClaims.size === 0}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
+            <button type="button" className="fv-ops__btn" onClick={updateSelClaimStatus} disabled={selClaims.size === 0}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+          </span>
+        )}
+      >
+        <table className="fv-ops__table">
+          <thead>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all claims" checked={settlement.claims.length > 0 && settlement.claims.every((x) => selClaims.has(x.id))} ref={(el) => { if (el) el.indeterminate = selClaims.size > 0 && !settlement.claims.every((x) => selClaims.has(x.id)); }} onChange={(e) => setSelClaims(e.target.checked ? new Set(settlement.claims.map((x) => x.id)) : new Set())} /></th><th>Type</th><th>Reference</th><th>Charge To</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Settlement</th><th className="fv-ops__r">Balance</th><th>Attachment</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {settlement.claims.map((c) => {
+              const settled = c.settlement || 0;
+              const balance = c.amount - settled;
+              return (
+                <tr key={c.id}>
+                  <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${c.reference || 'claim'}`} checked={selClaims.has(c.id)} onChange={() => setSelClaims((prev) => { const n = new Set(prev); n.has(c.id) ? n.delete(c.id) : n.add(c.id); return n; })} /></td>
+                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setClaimId(c.id)}>{c.type || 'Open'}</button></td>
+                  <td>{c.reference}</td>
+                  <td>{claimChargeTo(c) || '—'}</td>
+                  <td>{c.due || '—'}</td>
+                  <td className="fv-ops__r">{fmtAmt(c.amount)}</td>
+                  <td className="fv-ops__r">{fmtAmt(settled)}</td>
+                  <td className={`fv-ops__r${balance > 0 ? ' fv-ops__neg' : ' fv-ops__pos'}`}>{fmtAmt(balance)}</td>
+                  <td>{attachmentStatusLabel(c.attachments)}</td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${c.status === 'Settled' ? 'green' : 'amber'}`}>{c.status}</span></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Card>
+      {openClaim && (
+        <ClaimModal
+          row={openClaim}
+          onSave={(patch) => saveClaim(openClaim.id, patch)}
+          onDelete={() => { setSettlement({ claims: settlement.claims.filter((x) => x.id !== openClaim.id) }); setSelClaims((prev) => { const n = new Set(prev); n.delete(openClaim.id); return n; }); setClaimId(null); }}
+          onClose={() => setClaimId(null)}
+        />
+      )}
+      {claimStatusOpen && (
+        <StatusPickerModal
+          title="Update Claim Status"
+          options={STATUS_OPTIONS_CLAIMS}
+          value={claimStatusValue}
+          onChange={setClaimStatusValue}
+          onApply={applyClaimStatus}
+          onClose={() => setClaimStatusOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
 function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, isLast, cumulative, bodCharged, borReversedToHere, priorOffHireDays, mode = 'owners', onSave, onClose }: {
   row: { key: string; name: string; from: Date | null; to: Date | null; onHire: number; offHire: number; amount: number; ballast: boolean; status: string; bunkers: number; bunkerCredit: number };
   entry: HirePayEntry;
@@ -5902,7 +6133,7 @@ export function EuaCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<
 
 /* ------------------------------------------------------------ Freight & Laytime */
 
-function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage }) {
+export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; section?: 'all' | 'freight' | 'pda-services' }) {
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
   const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
@@ -6133,7 +6364,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
     <>
     <div className="fv-ops__frl">
       {/* ---------------------------------------------------------- Invoices list */}
-      {hasVoyageLeg && <Card title="Invoices" icon="fa-file-invoice-dollar" wide
+      {(section === 'all' || section === 'freight') && hasVoyageLeg && <Card title="Invoices" icon="fa-file-invoice-dollar" wide
         right={
           <span className="fv-ops__frl-secbtns">
             <button type="button" className="fv-ops__btn" onClick={() => addInvoice('Freight')}><i className="fas fa-plus" aria-hidden="true" /> Freight Invoice</button>
@@ -6182,7 +6413,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
       </Card>}
 
       {/* --------------------------------------------------- Laytime Calculations */}
-      {hasVoyageLeg && <Card title="Laytime Calculations" icon="fa-hourglass-half" wide
+      {(section === 'all' || section === 'freight') && hasVoyageLeg && <Card title="Laytime Calculations" icon="fa-hourglass-half" wide
         right={
           <span className="fv-ops__frl-secbtns">
             <button type="button" className="fv-ops__btn" onClick={() => addLaytime('Load')}><i className="fas fa-plus" aria-hidden="true" /> Load Port</button>
@@ -6236,7 +6467,7 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
         </table>
       </Card>}
 
-      <Card
+      {(section === 'all' || section === 'pda-services') && <Card
         title="PDA / FDA"
         icon="fa-file-circle-check"
         wide
@@ -6308,9 +6539,9 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
           </tfoot>
           </table>
         </div>
-      </Card>
+      </Card>}
 
-      <Card
+      {(section === 'all' || section === 'pda-services') && <Card
         title="Agent Invoice & Services"
         icon="fa-file-invoice-dollar"
         wide
@@ -6383,9 +6614,9 @@ function FreightTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
           </tfoot>
           </table>
         </div>
-      </Card>
+      </Card>}
 
-      {hasVoyageLeg && <div className="fv-ops__laytime-actions">
+      {(section === 'all' || section === 'freight') && hasVoyageLeg && <div className="fv-ops__laytime-actions">
         <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={copyToPostfix} disabled={copied}>
           <i className={`fas ${copied ? 'fa-circle-check' : 'fa-share-from-square'}`} aria-hidden="true" />{' '}
           {copied ? 'Copied to Postfix' : 'Copy Laytime to Postfix'}
@@ -6762,7 +6993,7 @@ function ClaimModal({ row, onSave, onDelete, onClose }: {
           <div className="fv-ops__vd-fields">
             <VdField label="Type" value={draft.type} onChange={(v) => setD({ type: v })} />
             <VdField label="Reference" value={draft.reference} onChange={(v) => setD({ reference: v })} />
-            <VdCombo label="Charge To" value={chargeToValue} onChange={(v) => setD({ chargeTo: v, owner: v })} options={CLAIM_CHARGE_TO_OPTIONS} listId="claim-charge-to" />
+            <VdCombo label="Charge To" value={chargeToValue} onChange={(v) => setD({ chargeTo: v, owner: v })} options={CLAIM_CHARGE_TO_OPTIONS} />
             <VdField label="Due Date" value={draft.due || ''} onChange={(v) => setD({ due: v })} />
             <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
             <VdField label="Amount" value={String(draft.amount)} onChange={(v) => setD({ amount: num(v) })} num />

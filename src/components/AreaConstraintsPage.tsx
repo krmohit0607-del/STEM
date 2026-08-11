@@ -15,6 +15,7 @@ import {
   getZoneStyle,
   speedKnots,
   normalizeRingLonLat,
+  splitRingAtAntimeridian,
 } from './AreaConstraintsLayer';
 import { AreaConstraintEditLayer } from './AreaConstraintEditLayer';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
@@ -814,7 +815,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
               />
               {drawingState.pts.length >= 3 && (
                 <Polygon
-                  positions={normalizeRingLonLat(drawingState.pts)}
+                  positions={splitRingAtAntimeridian(drawingState.pts)[0] ?? normalizeRingLonLat(drawingState.pts)}
                   pathOptions={{
                     color: getZoneStyle(drawingState.zoneType).color,
                     weight: 2,

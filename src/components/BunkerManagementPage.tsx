@@ -622,13 +622,40 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
           </div>
         </PanelSection>
         <PanelSection title="Fuel Requirement">
-          <div className="fv-bk__grid4">
-            <Field label="Fuel Type" value={r.fuelType} tone="accent" />
-            <Field label="Quantity" value={`${num(r.quantity)} MT`} />
-            <Field label="Grade" value={r.grade} />
-            <Field label="Delivery Mode" value={r.deliveryMethod ?? '—'} />
+          {(r.fuelLines?.length ?? 0) > 1 ? (
+            <table className="fv-bk__table" style={{ marginBottom: 8 }}>
+              <thead><tr><th>Fuel Type</th><th>Grade</th><th className="fv-bk__r">Required (MT)</th><th className="fv-bk__r">Supplied (MT)</th><th className="fv-bk__r">Delivered (MT)</th></tr></thead>
+              <tbody>
+                {(r.fuelLines ?? [{ fuel: r.fuelType, quantity: r.quantity, grade: r.grade }]).map((fl, i) => (
+                  <tr key={i}>
+                    <td><span className="fv-bk__fuel-chip">{fl.fuel}</span></td>
+                    <td>{fl.grade}</td>
+                    <td className="fv-bk__r">{num(fl.quantity)}</td>
+                    <td className="fv-bk__r">{fl.suppliedQty != null ? num(fl.suppliedQty) : '—'}</td>
+                    <td className="fv-bk__r">{fl.deliveredQty != null ? num(fl.deliveredQty) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="fv-bk__row-sub">
+                  <td colSpan={2}>Total</td>
+                  <td className="fv-bk__r">{num((r.fuelLines ?? []).reduce((s, l) => s + l.quantity, 0))} MT</td>
+                  <td colSpan={2} />
+                </tr>
+              </tfoot>
+            </table>
+          ) : (
+            <div className="fv-bk__grid4">
+              <Field label="Fuel Type" value={r.fuelType} tone="accent" />
+              <Field label="Quantity" value={`${num(r.quantity)} MT`} />
+              <Field label="Grade" value={r.grade} />
+              <Field label="Delivery Mode" value={r.deliveryMethod ?? '—'} />
+            </div>
+          )}
+          <div className="fv-bk__grid4" style={{ marginTop: 6 }}>
             <Field label="ROB on Arrival" value={`${num(r.robArrival)} MT`} />
             <Field label="Expected Cons." value={`${num(r.expectedCons)} MT/day`} />
+            <Field label="Delivery Mode" value={r.deliveryMethod ?? '—'} />
           </div>
           <div className="fv-bk__note"><i className="fas fa-user-tie" aria-hidden="true" /> Charterer: {r.chartererInstructions}</div>
           <div className="fv-bk__note"><i className="fas fa-anchor" aria-hidden="true" /> Owner: {r.ownerInstructions}</div>

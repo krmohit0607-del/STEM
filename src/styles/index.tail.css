@@ -299,7 +299,7 @@
 .fv-left-tabs {
   list-style: none;
   margin: 0;
-  padding: 6px 3px;
+  padding: 110px 3px 6px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -314,7 +314,7 @@
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: 36px;
+  height: 42px;
   padding: 0;
   background: transparent;
   border: 1px solid transparent;
@@ -335,7 +335,7 @@
 }
 
 .fv-left-tab i {
-  font-size: 14px;
+  font-size: 18px;
   color: #8b949e;
 }
 
@@ -4764,13 +4764,13 @@
 
 .fv-weather-control__btn {
   position: relative;
-  width: 38px;
-  height: 38px;
+  width: 52px;
+  height: 52px;
   border-radius: 8px;
   border: 1px solid #2a3447;
   background: #0d1626;
   color: #9fb4d4;
-  font-size: 16px;
+  font-size: 22px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -5062,8 +5062,8 @@
 
 .fv-map-controls__btn {
   position: relative;
-  width: 36px;
-  height: 36px;
+  width: 50px;
+  height: 50px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5072,7 +5072,7 @@
   border: 1px solid transparent;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 22px;
 }
 
 .fv-map-controls__btn:hover {
@@ -15505,6 +15505,8 @@ select.fv-voyage__input {
 .fv-bk__table tbody td { padding: 8px 10px; border-bottom: 1px solid var(--b-border-soft); vertical-align: middle; }
 .fv-bk__table tbody tr { cursor: pointer; }
 .fv-bk__table tbody tr:hover { background: rgba(88,166,255,.05); }
+.fv-bk__row-sub td { font-weight: 700; background: rgba(255,255,255,.03); }
+.fv-bk__fuel-chip { display: inline-block; padding: 1px 7px; border-radius: 4px; background: rgba(88,166,255,.15); color: #58a6ff; font-size: 11px; font-weight: 700; }
 .fv-bk__row--active { background: rgba(88,166,255,.12) !important; box-shadow: inset 3px 0 0 var(--b-accent); }
 .fv-bk__cell-strong { font-weight: 700; }
 .fv-bk__cell-sub { font-size: 10.5px; color: var(--b-muted); margin-top: 1px; }

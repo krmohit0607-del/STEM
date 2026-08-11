@@ -1,6 +1,7 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 
+import { SmartCombo } from '../SmartCombo';
 import {
   fromDateInput,
   fromDateTimeInput,
@@ -135,7 +136,6 @@ interface FieldProps {
 }
 
 export function Field({ label, value, editing, onChange, inline, display, options, suggestions, type }: FieldProps) {
-  const listId = useId();
   return (
     <div className={`fv-voyage__info${inline ? ' fv-voyage__info--inline' : ''}`}>
       <span className="fv-voyage__info-label">{label}</span>
@@ -176,18 +176,14 @@ export function Field({ label, value, editing, onChange, inline, display, option
           />
         ) : (
           <>
-            <input
-              className="fv-voyage__input"
-              value={value}
-              list={suggestions ? listId : undefined}
-              onChange={(e) => onChange(e.target.value)}
-            />
-            {suggestions && (
-              <datalist id={listId}>
-                {suggestions.map((opt) => (
-                  <option key={opt} value={opt} />
-                ))}
-              </datalist>
+            {suggestions ? (
+              <SmartCombo value={value} onChange={onChange} options={suggestions} inputClassName="fv-voyage__input" />
+            ) : (
+              <input
+                className="fv-voyage__input"
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+              />
             )}
           </>
         )
@@ -230,11 +226,13 @@ interface CellProps {
   value: string;
   onChange: (value: string) => void;
   options?: string[];
+  /** When provided, the cell offers these as type-ahead suggestions. */
+  suggestions?: string[];
   /** When set, the cell renders a native date / datetime / numeric input. */
   type?: 'date' | 'datetime' | 'number';
 }
 
-export function Cell({ editing, value, onChange, options, type }: CellProps) {
+export function Cell({ editing, value, onChange, options, suggestions, type }: CellProps) {
   if (!editing) return <>{value || '—'}</>;
   if (options) {
     return (
@@ -277,6 +275,11 @@ export function Cell({ editing, value, onChange, options, type }: CellProps) {
           )
         }
       />
+    );
+  }
+  if (suggestions) {
+    return (
+      <SmartCombo value={value} onChange={onChange} options={suggestions} inputClassName="fv-voyage__cell-input" />
     );
   }
   return (

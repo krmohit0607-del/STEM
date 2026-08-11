@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import { BoolField, Card, Cell, Field } from './primitives';
+import { loadVessels } from '../../data/vessels';
 import {
   ME_TYPE_OPTIONS,
   SCRUBBER_TYPE_OPTIONS,
@@ -32,6 +33,9 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
   // Speed & Cons profile and Market Factors are only relevant for the
   // Optimization service; they're hidden for every other service type.
   const isOptimization = view.serviceType === 'Optimization';
+
+  // Vessel-name suggestions come from Settings → Vessels Details.
+  const vesselNames = loadVessels().map((v) => v.name.trim()).filter(Boolean);
 
   const setEngine = (i: number, key: keyof EngineSpeedConsRow, value: string) =>
     setView((prev) => ({
@@ -82,7 +86,7 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
         <h5 className="fv-voyage__subhead">Vessel &amp; Engine Details</h5>
         <div className="fv-voyage__cols fv-voyage__cols--3">
           <div className="fv-voyage__col">
-            <Field label="Vessel Name" value={view.vesselName} editing={editing} onChange={(x) => set('vesselName', x)} />
+            <Field label="Vessel Name" value={view.vesselName} editing={editing} onChange={(x) => set('vesselName', x)} suggestions={vesselNames} />
             <Field label="Vessel IMO" value={view.imo} editing={editing} onChange={(x) => set('imo', x)} />
             <Field label="Vessel Type" value={view.vesselType} editing={editing} onChange={(x) => set('vesselType', x)} options={VESSEL_TYPE_OPTIONS} />
             <Field label="LOA (m)" value={view.loa} editing={editing} onChange={(x) => set('loa', x)} type="number" />

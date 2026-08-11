@@ -1,9 +1,10 @@
-import { Fragment, useState, useEffect } from 'react';
+import { Fragment, useState, useEffect, useMemo } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import { emptyLeg, normalizeLegs } from './buildView';
 import { Card, Cell, Field } from './primitives';
 import { searchPortIndex } from '../../data/portIndex';
+import { useWorldPorts } from '../../data/ports';
 import {
   FUEL_TYPE_OPTIONS,
   LEG_STATUS_OPTIONS,
@@ -198,6 +199,9 @@ function applyTzOffset(etdUtc: string, tz: string): string {
 
 export function LegsSection({ view, setView, editing, onToggleEdit, title, collapsed, onToggleCollapse }: Props) {
   const [selected, setSelected] = useState<number | null>(0);
+  // Port suggestions from the saved World Port Index.
+  const worldPorts = useWorldPorts();
+  const portLabels = useMemo(() => worldPorts.map((p) => p.label), [worldPorts]);
   // Sub-legs whose CP / good-weather criteria editor is expanded (key: `${legIdx}-${subIdx}`).
   const [openCriteria, setOpenCriteria] = useState<Set<string>>(new Set());
   const [checkedSubRows, setCheckedSubRows] = useState<Set<string>>(new Set());
@@ -495,8 +499,8 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                           )}
                         </td>
                         <td><Cell editing={editing} value={leg.type} onChange={(x) => setLeg(i, 'type', x)} options={LEG_VOYAGE_TYPE_OPTIONS} /></td>
-                        <td><Cell editing={editing} value={leg.from} onChange={(x) => setLeg(i, 'from', x)} /></td>
-                        <td><Cell editing={editing} value={leg.to} onChange={(x) => setLeg(i, 'to', x)} /></td>
+                        <td><Cell editing={editing} value={leg.from} onChange={(x) => setLeg(i, 'from', x)} suggestions={portLabels} /></td>
+                        <td><Cell editing={editing} value={leg.to} onChange={(x) => setLeg(i, 'to', x)} suggestions={portLabels} /></td>
                         <td><Cell editing={editing} value={leg.etd} onChange={(x) => setLeg(i, 'etd', x)} type="datetime" /></td>
                         <td><Cell editing={editing} value={leg.etdTimezone} onChange={(x) => setLeg(i, 'etdTimezone', x)} /></td>
                         <td className="fv-voyage__muted">{applyTzOffset(leg.etd, leg.etdTimezone)}</td>

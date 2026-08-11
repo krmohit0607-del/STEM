@@ -7,6 +7,7 @@ import type { Voyage } from '../data/voyages';
 import { VOYAGES, makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { useWorldPorts, resolveWorldPort } from '../data/ports';
 import { accountNames } from '../data/clients';
+import { loadVessels } from '../data/vessels';
 import { VesselSearchInput } from './VesselSearchInput';
 import { EstimationRouteMap } from './EstimationRouteMap';
 import { generateSeaRoute } from '../data/seaRoute';
@@ -1035,6 +1036,81 @@ function Section({
   );
 }
 
+/**
+ * Themed autocomplete cell: a free-text input that filters a saved option list
+ * (vessels / accounts / ports from Settings). The dropdown is fixed-positioned
+ * so it is never clipped by the scrollable estimation tables. Manual entry stays
+ * possible — the field is plain text.
+ */
+function CeAutocomplete({ value, onChange, options, placeholder, disabled, min }: { value: string; onChange: (v: string) => void; options: string[]; placeholder?: string; disabled?: boolean; min?: number }) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const matches = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const list = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+    return list.slice(0, 50);
+  }, [value, options]);
+  const place = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setRect({ left: r.left, top: r.bottom + 2, width: Math.max(r.width, 180) });
+  };
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const onDoc = (e: MouseEvent) => { if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener('mousedown', onDoc);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [open]);
+  const choose = (v: string) => { onChange(v); setOpen(false); };
+  return (
+    <span className="fv-ce__combo" ref={wrapRef}>
+      <input
+        ref={inputRef}
+        className="fv-ce__cell-input"
+        style={{ minWidth: min }}
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); setActive(0); place(); }}
+        onFocus={() => { setOpen(true); place(); }}
+        onKeyDown={(e) => {
+          if (!open) return;
+          if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, matches.length - 1)); }
+          else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+          else if (e.key === 'Enter' && matches[active]) { e.preventDefault(); choose(matches[active]); }
+          else if (e.key === 'Escape') setOpen(false);
+        }}
+      />
+      {open && !disabled && matches.length > 0 && rect && (
+        <ul className="fv-port-combo__list fv-ce__combo-list" style={{ position: 'fixed', left: rect.left, top: rect.top, width: rect.width, right: 'auto' }}>
+          {matches.map((o, i) => (
+            <li
+              key={`${o}-${i}`}
+              className={`fv-port-combo__item${i === active ? ' fv-port-combo__item--active' : ''}`}
+              onMouseDown={(e) => { e.preventDefault(); choose(o); }}
+              onMouseEnter={() => setActive(i)}
+            >
+              <span className="fv-port-combo__name">{o}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </span>
+  );
+}
+
 /* ------------------------------------------------------------ main component */
 
 export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
@@ -1095,9 +1171,23 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const opts = useEstimationOptions();
   const worldPorts = useWorldPorts();
   const portOptions = useMemo(() => worldPorts.slice(0, 4000).map((p) => p.label), [worldPorts]);
-  const vesselOptions = useMemo(() => Array.from(new Set(VOYAGES.map((v) => v.vessel))).sort(), []);
+  // Vessel options come from Settings → Vessels Details (plus any voyage vessels).
+  const vesselOptions = useMemo(
+    () => Array.from(new Set([...loadVessels().map((v) => v.name.trim()), ...VOYAGES.map((v) => v.vessel)].filter(Boolean))).sort(),
+    [],
+  );
   // Account options come from Settings → Account Details.
   const accountOptions = useMemo(() => accountNames(), []);
+  // Common cargo commodities offered as type-ahead suggestions (free text stays).
+  const cargoOptions = useMemo(
+    () => [
+      'Iron Ore', 'Coal', 'Steam Coal', 'Coking Coal', 'Bauxite', 'Alumina', 'Gypsum', 'Limestone',
+      'Clinker', 'Cement', 'Grain', 'Wheat', 'Corn', 'Soybeans', 'Soybean Meal', 'Rice', 'Sugar',
+      'Salt', 'Fertilizer', 'Urea', 'DAP', 'MOP', 'Sulphur', 'Petcoke', 'Scrap', 'Steel Products',
+      'HR Coils', 'Rebar', 'Logs', 'Woodchips', 'Manganese Ore', 'Chrome Ore', 'Nickel Ore', 'Concentrates',
+    ],
+    [],
+  );
 
   // Stable estimate number generated once for a brand-new estimate.
   const [createEstNo] = useState(() => nextEstimateNo());
@@ -1848,19 +1938,20 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     const w = Math.max(minCh, String(value ?? '').length + 2.5);
     return <input className="fv-ce__cell-num fv-ce__cell-auto" style={{ width: `${w}ch` }} type="number" value={value} disabled={locked} onChange={(e) => onChange(num(e.target.value))} />;
   };
-  const txtCell = (value: string, onChange: (v: string) => void, min = 120) => (
-    <input className="fv-ce__cell-input" style={{ minWidth: min }} value={value} disabled={locked} onChange={(e) => onChange(e.target.value)} />
-  );
   // Port cell backed by our world-port data (settings database).
   const portCell = (value: string, onChange: (v: string) => void, min = 160) => (
-    <input className="fv-ce__cell-input" style={{ minWidth: min }} list="fv-ce-ports" placeholder="Search port…" value={value} disabled={locked} onChange={(e) => onChange(e.target.value)} />
+    <CeAutocomplete value={value} onChange={onChange} options={portOptions} placeholder="Search port…" disabled={locked} min={min} />
   );
   const vesselCell = (value: string, onChange: (v: string) => void, min = 150) => (
-    <input className="fv-ce__cell-input" style={{ minWidth: min }} list="fv-ce-vessels" placeholder="Select vessel…" value={value} disabled={locked} onChange={(e) => onChange(e.target.value)} />
+    <CeAutocomplete value={value} onChange={onChange} options={vesselOptions} placeholder="Select vessel…" disabled={locked} min={min} />
   );
   // Account cell backed by the accounts created in Settings → Account Details.
   const accountCell = (value: string, onChange: (v: string) => void, min = 90) => (
-    <input className="fv-ce__cell-input" style={{ minWidth: min }} list="fv-ce-accounts" placeholder="Select account…" value={value} disabled={locked} onChange={(e) => onChange(e.target.value)} />
+    <CeAutocomplete value={value} onChange={onChange} options={accountOptions} placeholder="Select account…" disabled={locked} min={min} />
+  );
+  // Cargo-name cell with common-commodity suggestions (free text stays).
+  const cargoCell = (value: string, onChange: (v: string) => void, min = 100) => (
+    <CeAutocomplete value={value} onChange={onChange} options={cargoOptions} placeholder="Cargo…" disabled={locked} min={min} />
   );
   // Compact in-cell select for units / terms sourced from the options list.
   const optCell = (value: string, onChange: (v: string) => void, options: string[], min = 62) => (
@@ -1894,10 +1985,6 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
 
   return (
     <div className="fv-ce">
-      {/* Shared option lists sourced from our vessel + world-port data. */}
-      <datalist id="fv-ce-ports">{portOptions.map((o) => <option key={o} value={o} />)}</datalist>
-      <datalist id="fv-ce-vessels">{vesselOptions.map((o) => <option key={o} value={o} />)}</datalist>
-      <datalist id="fv-ce-accounts">{accountOptions.map((o) => <option key={o} value={o} />)}</datalist>
       {fixOpen && (
         <ToolModal title="Mark Fixed — Charter Party Date" onClose={() => setFixOpen(false)}>
           <p className="fv-ce__lq-hint">Select the Charter Party (CP) date. This is recorded as the CPDD, so a fix marked a few days late still carries the correct date.</p>
@@ -2354,7 +2441,7 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
                 <tr key={c.id}>
                   <td className="fv-ce__num">{idx + 1}</td>
                   <td>{accountCell(c.account, (v) => updateCargo(c.id, { account: v }), 90)}</td>
-                  <td>{txtCell(c.name, (v) => updateCargo(c.id, { name: v }), 100)}</td>
+                  <td>{cargoCell(c.name, (v) => updateCargo(c.id, { name: v }), 100)}</td>
                   <td>{portCell(c.loadPort, (v) => updateCargo(c.id, { loadPort: v }), 150)}</td>
                   <td>{portCell(c.dischPort, (v) => updateCargo(c.id, { dischPort: v }), 150)}</td>
                   <td className="fv-ce__r fv-ce__qty">{autoNumCell(c.quantity, (n) => updateCargo(c.id, { quantity: n }))}{optCell(c.unit, (v) => updateCargo(c.id, { unit: v }), opts.qtyUnits, 56)}</td>

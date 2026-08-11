@@ -33,7 +33,14 @@ export function legPositions(
   b: { lat: number; lon: number },
   legType: 'rhumb' | 'greatcircle',
 ): LatLngExpression[] {
-  if (legType !== 'greatcircle') return [[a.lat, a.lon], [b.lat, b.lon]];
+  // For rhumb lines normalise the destination longitude so the segment always
+  // takes the shorter path (handles antimeridian crossings, e.g. Japan→US).
+  if (legType !== 'greatcircle') {
+    let lon2 = b.lon;
+    while (lon2 - a.lon > 180) lon2 -= 360;
+    while (lon2 - a.lon < -180) lon2 += 360;
+    return [[a.lat, a.lon], [b.lat, lon2]];
+  }
 
   const φ1 = toRad(a.lat);
   const λ1 = toRad(a.lon);
