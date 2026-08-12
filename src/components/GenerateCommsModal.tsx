@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import type { Voyage } from '../data/voyages';
 import {
@@ -11,6 +11,7 @@ import {
   type EmailAttachment,
   type EmailTemplate,
 } from '../data/emailTemplates';
+import { consumeCommsDraft } from '../data/commsStore';
 import { RichTextEditor } from './RichTextEditor';
 
 /**
@@ -48,6 +49,17 @@ export function GenerateCommsModal({
   const [sent, setSent] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
+
+  // Consume any queued forecast draft and pre-fill on mount
+  useEffect(() => {
+    const draft = consumeCommsDraft();
+    if (draft) {
+      if (draft.subject) setSubject(draft.subject);
+      if (draft.body) setBody(ensureHtml(draft.body));
+      if (draft.to) setTo(draft.to);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Sub categories available within the chosen main folder.
   const subCategories = useMemo(

@@ -1,29 +1,30 @@
-import { useMemo, useState } from 'react';
+﻿import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 import {
   useAccountTxns,
-  settleTxn,
-  approveTxn,
-  holdTxn,
-  scheduleTxn,
+  updateTxn,
   findTxnByInvoice,
   daysUntil,
   isOverdue,
   ACCT_NOW,
+  STATUS_TONES,
+  stamp,
   useSelectedAccountVessel,
   clearSelectedAccountVessel,
+  writeSelectedAccountVessel,
   type FinTxn,
   type TxnStatus,
   type Approval,
   type Priority,
   type TxnCategory,
 } from '../data/accounts';
+import { addNotification } from '../data/workflow';
 import { getBunkerRequirements, updateBunkerRequirement } from '../data/bunker';
 
 /**
- * Accounts — Financial Control Center. Single source of truth: every financial
+ * Accounts â€” Financial Control Center. Single source of truth: every financial
  * event from other ODAS modules flows into one ledger. Settling a payable that
  * originated in Bunker reflects the status back to that module in real time.
  */
@@ -51,26 +52,15 @@ const CAT_COLOR: Record<TxnCategory, string> = {
   Insurance: '#9aa6b6', Taxes: '#8b98ad', Misc: '#6e7681',
 };
 
-const STATUS_TONE: Record<TxnStatus, string> = {
-  'Approval Pending': 'purple', Due: 'amber', Scheduled: 'blue', 'On Hold': 'grey',
-  Paid: 'green', Received: 'green', Cancelled: 'grey',
-};
+const STATUS_TONE: Record<TxnStatus, string> = STATUS_TONES;
 
-/** Settle a transaction and reflect Bunker-origin payments back to the Bunker module. */
-function settleAndReflect(t: FinTxn): void {
-  settleTxn(t.id);
-  if (t.kind === 'Payable' && t.module === 'Bunker') {
-    const updated = findTxnByInvoice(t.invoiceNo);
-    const req = getBunkerRequirements().find((r) => r.invoiceNo === t.invoiceNo);
-    if (req) {
-      updateBunkerRequirement(
-        req.id,
-        { status: 'Paid', paymentStatus: 'Paid', amountPaid: t.amount, paymentRef: updated?.paymentRef, paymentDate: updated?.paymentDate },
-        { user: 'Accounts', role: 'Accounts', action: `Payment settled — ${updated?.paymentRef ?? ''}` },
-      );
-    }
-  }
-}
+// All statuses available for manual selection — allows reverting to any state
+const ALL_STATUSES: TxnStatus[] = [
+  'Draft','Submitted','Accounts Review','Pending Approval','Approved','Scheduled',
+  'Payment Executed','Bank Confirmation','Reconciled','Closed',
+  'Overdue','Due','On Hold','Partially Paid','Payment Failed','Rejected','Cancelled',
+  'Paid','Received',
+];
 
 /* --------- small ui atoms --------- */
 
@@ -137,18 +127,76 @@ function Donut({ segments, total }: { segments: { label: string; value: number; 
 
 /* --------- cash flow bar chart --------- */
 
-function CashFlowChart({ bars }: { bars: { label: string; net: number }[] }) {
-  const max = Math.max(1, ...bars.map((b) => Math.abs(b.net)));
+function CashFlowChart({ bars }: { bars: { label: string; inn: number; out: number; net: number }[] }) {
+  const max = Math.max(1, ...bars.flatMap((b) => [b.inn, b.out]), 1);
+  // Always show every alternate label so dates don't crowd
+  const every = 2;
   return (
-    <div className="fv-acct__chart">
+    <div className="fv-acct__chart fv-acct__chart--paired">
       <div className="fv-acct__chart-bars">
         {bars.map((b, i) => (
-          <div key={i} className="fv-acct__bar-col" title={`${b.label}: ${abbr(b.net)}`}>
-            <div className={`fv-acct__bar fv-acct__bar--${b.net >= 0 ? 'pos' : 'neg'}`} style={{ height: `${(Math.abs(b.net) / max) * 100}%` }} />
+          <div key={i} className="fv-acct__bar-col" title={`${b.label}\nIn: ${abbr(b.inn)}  Out: ${abbr(b.out)}`}>
+            <div className="fv-acct__bar-pair">
+              <div className="fv-acct__bar fv-acct__bar--pos" style={{ height: `${(b.inn / max) * 100}%` }} />
+              <div className="fv-acct__bar fv-acct__bar--neg" style={{ height: `${(b.out / max) * 100}%` }} />
+            </div>
+            <div className="fv-acct__bar-date">{i % every === 0 ? b.label : ''}</div>
           </div>
         ))}
       </div>
-      <div className="fv-acct__chart-axis"><span>{bars[0]?.label}</span><span>Today</span><span>{bars[bars.length - 1]?.label}</span></div>
+    </div>
+  );
+}
+
+/* --------- side-by-side cashflow table (like image) --------- */
+
+function CashflowTable({ scope }: { scope: FinTxn[] }) {
+  const recs = scope.filter((t) => t.kind === 'Receivable' && t.status !== 'Received' && t.status !== 'Cancelled').sort((a, b) => a.dueIso.localeCompare(b.dueIso));
+  const pays = scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.status !== 'Cancelled').sort((a, b) => a.dueIso.localeCompare(b.dueIso));
+  const rows = Math.max(recs.length, pays.length);
+  const totalRec = recs.reduce((s, t) => s + t.amount, 0);
+  const totalPay = pays.reduce((s, t) => s + t.amount, 0);
+  const net = totalRec - totalPay;
+  if (rows === 0) return null;
+  return (
+    <div className="fv-acct__cft-wrap">
+      <table className="fv-acct__cft">
+        <thead>
+          <tr>
+            <th>Date</th><th>Receivables</th><th className="fv-acct__r">Amount (USD)</th>
+            <td className="fv-acct__cft-divider" />
+            <th>Date</th><th>Payables</th><th className="fv-acct__r">Amount (USD)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: rows }, (_, i) => {
+            const r = recs[i], p = pays[i];
+            return (
+              <tr key={i}>
+                <td className="fv-acct__cft-date">{r?.dueDate.split(' ').slice(0, 2).join(' ') ?? ''}</td>
+                <td>{r ? `${r.category} (${r.counterparty})` : ''}</td>
+                <td className="fv-acct__r fv-acct__pos">{r ? num(r.amount) : ''}</td>
+                <td className="fv-acct__cft-divider" />
+                <td className="fv-acct__cft-date">{p?.dueDate.split(' ').slice(0, 2).join(' ') ?? ''}</td>
+                <td>{p ? `${p.category} (${p.counterparty})` : ''}</td>
+                <td className="fv-acct__r fv-acct__neg">{p ? num(p.amount) : ''}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+        <tfoot>
+          <tr className="fv-acct__cft-totrow">
+            <td /><td><b>Total Receivables</b></td><td className="fv-acct__r"><b>{money(totalRec)}</b></td>
+            <td />
+            <td /><td><b>Total Payables</b></td><td className="fv-acct__r"><b>{money(totalPay)}</b></td>
+          </tr>
+          <tr className="fv-acct__cft-netrow">
+            <td colSpan={3}><b>Net Cash Flow (Receivables – Payables)</b></td>
+            <td />
+            <td colSpan={3} className="fv-acct__r"><b className={net >= 0 ? 'fv-acct__pos' : 'fv-acct__neg'}>{money(net)}</b></td>
+          </tr>
+        </tfoot>
+      </table>
     </div>
   );
 }
@@ -156,48 +204,100 @@ function CashFlowChart({ bars }: { bars: { label: string; net: number }[] }) {
 /* --------- transaction detail modal --------- */
 
 function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
+  const [live, setLive] = useState(t);
+  const refresh = () => { const u = findTxnByInvoice(live.invoiceNo); if (u) setLive(u); };
+
+  const changeStatus = (next: TxnStatus) => {
+    if (!next || next === live.status) return;
+    updateTxn(live.id,
+      { status: next, ...(next === 'Payment Executed' || next === 'Reconciled' ? { paymentDate: stamp() } : {}) },
+      { user: 'Accounts', action: 'Status changed', from: live.status, to: next },
+    );
+    if ((next === 'Payment Executed' || next === 'Reconciled') && live.kind === 'Payable' && live.module === 'Bunker') {
+      const req = getBunkerRequirements().find((r) => r.invoiceNo === live.invoiceNo);
+      if (req) updateBunkerRequirement(req.id, { status: 'Paid', paymentStatus: 'Paid', amountPaid: live.amount }, { user: 'Accounts', role: 'Accounts', action: `Accounts \u2014 status: ${next}` });
+    }
+    addNotification(`${live.invoiceNo} \u00b7 ${live.vessel} status \u2192 ${next}`, live.module);
+    refresh();
+  };
+
+  const uploadSwift = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { updateTxn(live.id, { swiftDocUrl: reader.result as string }, { user: 'Accounts', action: `SWIFT doc uploaded \u2014 ${file.name}` }); refresh(); };
+    reader.readAsDataURL(file);
+  };
+
   const F = ({ label, value }: { label: string; value: ReactNode }) => (
-    <div className="fv-acct__field"><span>{label}</span><b>{value ?? '—'}</b></div>
+    <div className="fv-acct__field"><span>{label}</span><b>{value ?? '\u2014'}</b></div>
   );
+
+  const tone = STATUS_TONE[live.status] ?? 'grey';
+
   return (
     <div className="fv-acct__modal-backdrop" onClick={onClose}>
-      <div className="fv-acct__modal" onClick={(e) => e.stopPropagation()}>
+      <div className="fv-acct__modal fv-acct__modal--wide" onClick={(e) => e.stopPropagation()}>
         <div className="fv-acct__modal-head">
-          <span><i className="fas fa-receipt" aria-hidden="true" /> {t.invoiceNo} · {t.category} {t.kind}</span>
-          <button type="button" className="fv-acct__icon-btn" onClick={onClose}><i className="fas fa-xmark" /></button>
+          <span><i className="fas fa-receipt" /> {live.invoiceNo} \u00b7 {live.category} {live.kind}</span>
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            {/* Inline status dropdown — shows all statuses so user can revert freely */}
+            <select
+              className={`fv-acct__status-sel fv-acct__status-sel--${tone}`}
+              value={live.status}
+              onChange={(e) => changeStatus(e.target.value as TxnStatus)}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {ALL_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <button type="button" className="fv-acct__icon-btn" onClick={onClose}><i className="fas fa-xmark" /></button>
+          </div>
         </div>
         <div className="fv-acct__modal-body">
           <div className="fv-acct__grid4">
-            <F label="Transaction ID" value={t.id} />
-            <F label="Source Module" value={t.module} />
-            <F label="Company" value={t.company} />
-            <F label="Reference No" value={t.reference} />
-            <F label="Vessel" value={t.vessel} />
-            <F label="Voyage" value={t.voyage} />
-            <F label="Fixture" value={t.fixture} />
-            <F label="Counterparty" value={t.counterparty} />
-            <F label="Invoice No" value={t.invoiceNo} />
-            <F label="Amount" value={`${t.currency} ${num(t.amount)}`} />
-            <F label="Exchange Rate" value={t.exchangeRate} />
-            <F label="Base (USD)" value={money(t.amount * t.exchangeRate)} />
-            <F label="Invoice Date" value={t.invoiceDate} />
-            <F label="Due Date" value={t.dueDate} />
-            <F label="Bank" value={t.bank} />
-            <F label="Method" value={t.method} />
-            <F label="Priority" value={<PriorityPill p={t.priority} />} />
-            <F label="Approval" value={<ApprovalPill a={t.approval} />} />
-            <F label="Status" value={<StatusPill status={t.status} />} />
-            <F label="Payment Ref" value={t.paymentRef} />
+            <F label="Transaction ID" value={live.id} />
+            <F label="Source Module" value={live.module} />
+            <F label="Company" value={live.company} />
+            <F label="Reference No" value={live.reference} />
+            <F label="Vessel" value={live.vessel} />
+            <F label="Voyage" value={live.voyage} />
+            <F label="Fixture" value={live.fixture} />
+            <F label="Counterparty" value={live.counterparty} />
+            <F label="Invoice No" value={live.invoiceNo} />
+            <F label="Amount" value={`${live.currency} ${num(live.amount)}`} />
+            <F label="Exchange Rate" value={live.exchangeRate} />
+            <F label="Base (USD)" value={money(live.amount * live.exchangeRate)} />
+            <F label="Invoice Date" value={live.invoiceDate} />
+            <F label="Due Date" value={live.dueDate} />
+            <F label="Bank" value={live.bank} />
+            <F label="Method" value={live.method} />
+            <F label="Priority" value={<PriorityPill p={live.priority} />} />
+            <F label="Approval" value={<ApprovalPill a={live.approval} />} />
+            <F label="Payment Ref" value={live.paymentRef} />
+            <F label="Payment Date" value={live.paymentDate} />
+            {live.remarks && <div className="fv-acct__field fv-acct__field--full"><span>Remarks</span><b>{live.remarks}</b></div>}
           </div>
-          <div className="fv-acct__audit-head">Audit Trail</div>
-          <ul className="fv-acct__audit">
-            {t.audit.map((a, i) => (
-              <li key={i}>
-                <span className="fv-acct__audit-dot" />
-                <div><span>{a.action}{a.from && a.to ? ` (${a.from} → ${a.to})` : ''}</span><small>{a.user} · {a.at}</small></div>
-              </li>
-            ))}
-          </ul>
+          {/* Compact SWIFT document section */}
+          <div className="fv-acct__swift-compact">
+            <span><i className="fas fa-file-invoice" /> Bank SWIFT / Payment Document</span>
+            {live.swiftDocUrl ? (
+              <div className="fv-acct__swift-compact-file">
+                <i className="fas fa-file-circle-check" style={{color:'var(--a-good)'}} />
+                <span>Document uploaded</span>
+                <a href={live.swiftDocUrl} download={`SWIFT-${live.invoiceNo}`} className="fv-acct__btn fv-acct__btn--ghost" style={{fontSize:11}}>
+                  <i className="fas fa-download" /> Download
+                </a>
+                <label className="fv-acct__btn fv-acct__btn--ghost" style={{fontSize:11,cursor:'pointer'}}>
+                  <i className="fas fa-arrow-up-from-bracket" /> Replace
+                  <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{display:'none'}} onChange={uploadSwift} />
+                </label>
+              </div>
+            ) : (
+              <label className="fv-acct__btn fv-acct__btn--ghost" style={{cursor:'pointer'}}>
+                <i className="fas fa-cloud-arrow-up" /> Upload SWIFT / Bank receipt
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{display:'none'}} onChange={uploadSwift} />
+              </label>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -207,6 +307,24 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
 /* --------- reusable data grid --------- */
 
 function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void }) {
+  const [auditId, setAuditId] = useState<string | null>(null);
+
+  const changeStatus = (t: FinTxn, next: TxnStatus) => {
+    if (!next || next === t.status) return;
+    updateTxn(t.id,
+      { status: next, ...(next === 'Payment Executed' || next === 'Reconciled' ? { paymentDate: stamp() } : {}) },
+      { user: 'Accounts', action: 'Status changed', from: t.status, to: next },
+    );
+    addNotification(`${t.invoiceNo} \u00b7 ${t.vessel} status \u2192 ${next}`, t.module);
+  };
+
+  const uploadSwift = (t: FinTxn, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => updateTxn(t.id, { swiftDocUrl: reader.result as string }, { user: 'Accounts', action: `SWIFT doc uploaded \u2014 ${file.name}` });
+    reader.readAsDataURL(file);
+  };
+
   if (rows.length === 0) return <div className="fv-acct__empty"><i className="fas fa-inbox" aria-hidden="true" /> No transactions match the current view.</div>;
   return (
     <div className="fv-acct__gridwrap">
@@ -231,7 +349,8 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
         <tbody>
           {rows.map((t) => {
             const overdue = isOverdue(t);
-            const settled = t.status === 'Paid' || t.status === 'Received';
+            const tone = STATUS_TONE[t.status] ?? 'grey';
+            const auditOpen = auditId === t.id;
             return (
               <tr key={t.id} onClick={() => onView(t)}>
                 <td><span className="fv-acct__cat" style={{ borderColor: CAT_COLOR[t.category] }}><span className="fv-acct__cat-dot" style={{ background: CAT_COLOR[t.category] }} /> {t.category}</span><div className="fv-acct__sub">{t.kind}</div></td>
@@ -244,16 +363,61 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
                 <td>{t.currency}</td>
                 <td className={overdue ? 'fv-acct__od' : undefined}>{t.dueDate}{overdue ? <div className="fv-acct__sub fv-acct__od">Overdue {Math.abs(daysUntil(t.dueIso))}d</div> : null}</td>
                 <td><ApprovalPill a={t.approval} /></td>
-                <td>{overdue ? <span className="fv-acct__pill fv-acct__pill--red">Overdue</span> : <StatusPill status={t.status} />}</td>
+                {/* Inline status change dropdown */}
+                <td onClick={(e) => e.stopPropagation()}>
+                  <select
+                    className={`fv-acct__status-sel fv-acct__status-sel--${tone}`}
+                    value={t.status}
+                    onChange={(e) => changeStatus(t, e.target.value as TxnStatus)}
+                  >
+                    {ALL_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </td>
                 <td><PriorityPill p={t.priority} /></td>
+                {/* Actions: View, SWIFT upload, Audit */}
                 <td className="fv-acct__actions" onClick={(e) => e.stopPropagation()}>
-                  <button type="button" className="fv-acct__icon-btn" title="View" onClick={() => onView(t)}><i className="fas fa-eye" /></button>
-                  {t.approval === 'Pending' && <button type="button" className="fv-acct__icon-btn fv-acct__ok" title="Approve" onClick={() => approveTxn(t.id, 'approve')}><i className="fas fa-check" /></button>}
-                  {!settled && t.approval !== 'Pending' && t.status !== 'Cancelled' && (
-                    <button type="button" className="fv-acct__icon-btn fv-acct__ok" title={t.kind === 'Payable' ? 'Execute payment' : 'Record receipt'} onClick={() => settleAndReflect(t)}><i className="fas fa-money-bill-wave" /></button>
-                  )}
-                  {!settled && t.status === 'Due' && <button type="button" className="fv-acct__icon-btn" title="Schedule" onClick={() => scheduleTxn(t.id)}><i className="fas fa-calendar" /></button>}
-                  {!settled && t.status !== 'On Hold' && t.status !== 'Cancelled' && <button type="button" className="fv-acct__icon-btn" title="Hold" onClick={() => holdTxn(t.id)}><i className="fas fa-pause" /></button>}
+                  <button type="button" className="fv-acct__icon-btn" title="View invoice" onClick={() => onView(t)}><i className="fas fa-eye" /></button>
+                  <label className="fv-acct__icon-btn" title={t.swiftDocUrl ? 'SWIFT uploaded — replace' : 'Upload SWIFT / bank receipt'} style={{cursor:'pointer',display:'inline-flex',alignItems:'center',justifyContent:'center'}}>
+                    <i className={`fas ${t.swiftDocUrl ? 'fa-file-circle-check' : 'fa-file-arrow-up'}`} style={{color: t.swiftDocUrl ? 'var(--a-good)' : undefined}} />
+                    <input type="file" accept=".pdf,.png,.jpg,.jpeg" style={{display:'none'}} onChange={(e) => uploadSwift(t, e)} />
+                  </label>
+                  <div style={{position:'relative',display:'inline-block'}}>
+                    <button type="button" className={`fv-acct__icon-btn${auditOpen?' fv-acct__icon-btn--active':''}`} title="Audit trail" onClick={() => setAuditId(auditOpen ? null : t.id)}>
+                      <i className="fas fa-clock-rotate-left" />
+                      {t.audit.length > 0 && <span className="fv-acct__audit-badge">{t.audit.length}</span>}
+                    </button>
+                    {auditOpen && (
+                      <div className="fv-acct__audit-popup" onClick={(e) => e.stopPropagation()}>
+                        <div className="fv-acct__audit-popup-head">
+                          <span><i className="fas fa-clock-rotate-left" /> Audit Trail — {t.invoiceNo}</span>
+                          <button type="button" className="fv-acct__icon-btn" onClick={() => setAuditId(null)}><i className="fas fa-xmark" /></button>
+                        </div>
+                        <ul className="fv-acct__audit-timeline" style={{maxHeight:260,overflowY:'auto',padding:'8px 12px'}}>
+                          {t.audit.length === 0 ? (
+                            <li style={{color:'var(--a-faint)',fontSize:11,padding:'8px 0'}}>No audit entries yet</li>
+                          ) : t.audit.map((a, i) => (
+                            <li key={i} className="fv-acct__audit-entry">
+                              <div className="fv-acct__audit-marker">
+                                <div className="fv-acct__audit-dot-big" />
+                                {i < t.audit.length-1 && <div className="fv-acct__audit-line" />}
+                              </div>
+                              <div className="fv-acct__audit-content">
+                                <div className="fv-acct__audit-action">{a.action}</div>
+                                {a.from && a.to && (
+                                  <div className="fv-acct__audit-transition">
+                                    <span className={`fv-acct__pill fv-acct__pill--${STATUS_TONE[a.from]??'grey'}`}>{a.from}</span>
+                                    <i className="fas fa-arrow-right" style={{color:'var(--a-faint)',fontSize:10,margin:'0 4px'}} />
+                                    <span className={`fv-acct__pill fv-acct__pill--${STATUS_TONE[a.to]??'grey'}`}>{a.to}</span>
+                                  </div>
+                                )}
+                                <div className="fv-acct__audit-meta"><b>{a.user}</b> \u00b7 {a.at}</div>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 </td>
               </tr>
             );
@@ -264,47 +428,17 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
   );
 }
 
-/* --------- AI finance assistant --------- */
-
-const AI_QA: { q: string; a: (t: FinTxn[]) => string }[] = [
-  { q: 'What payments are due today?', a: (t) => { const d = t.filter((x) => x.kind === 'Payable' && x.status !== 'Paid' && daysUntil(x.dueIso) === 0); return d.length ? `${d.length} payment(s) due today totalling ${money(d.reduce((s, x) => s + x.amount, 0))}.` : 'No payments are due today.'; } },
-  { q: 'Show overdue bunker invoices.', a: (t) => { const d = t.filter((x) => x.category === 'Bunker' && isOverdue(x)); return d.length ? `${d.length} overdue bunker invoice(s): ${d.map((x) => `${x.vessel} (${money(x.amount)})`).join(', ')}.` : 'No overdue bunker invoices.'; } },
-  { q: 'Show unpaid hire.', a: (t) => { const d = t.filter((x) => x.category === 'Hire' && x.kind === 'Payable' && x.status !== 'Paid'); return d.length ? `Unpaid hire: ${money(d.reduce((s, x) => s + x.amount, 0))} across ${d.length} vessel(s).` : 'All hire is settled.'; } },
-  { q: 'Show outstanding freight.', a: (t) => { const d = t.filter((x) => x.category === 'Freight' && x.kind === 'Receivable' && x.status !== 'Received'); return d.length ? `Outstanding freight receivable: ${money(d.reduce((s, x) => s + x.amount, 0))}.` : 'No outstanding freight.'; } },
-  { q: 'Which invoices are awaiting approval?', a: (t) => { const d = t.filter((x) => x.approval === 'Pending'); return d.length ? `${d.length} awaiting approval: ${d.map((x) => x.invoiceNo).join(', ')}.` : 'Nothing awaiting approval.'; } },
-  { q: 'What is today\u2019s expected cash position?', a: (t) => { const inn = t.filter((x) => x.kind === 'Receivable' && x.status !== 'Received' && daysUntil(x.dueIso) <= 0).reduce((s, x) => s + x.amount, 0); const out = t.filter((x) => x.kind === 'Payable' && x.status !== 'Paid' && daysUntil(x.dueIso) <= 0).reduce((s, x) => s + x.amount, 0); return `Net expected today: ${abbr(inn - out)} (in ${abbr(inn)} / out ${abbr(out)}).`; } },
-];
-
-function AiAssistant({ txns }: { txns: FinTxn[] }) {
-  const [answer, setAnswer] = useState<string | null>(null);
-  return (
-    <div className="fv-acct__ai">
-      <div className="fv-acct__ai-head"><i className="fas fa-wand-magic-sparkles" aria-hidden="true" /> AI Finance Assistant</div>
-      <div className="fv-acct__ai-chips">
-        {AI_QA.map((item) => (
-          <button key={item.q} type="button" className="fv-acct__ai-chip" onClick={() => setAnswer(item.a(txns))}>{item.q}</button>
-        ))}
-      </div>
-      {answer && <div className="fv-acct__ai-answer"><i className="fas fa-robot" aria-hidden="true" /> {answer}</div>}
-    </div>
-  );
-}
-
 /* ------------------------------------------------------------ main page */
 
-type Tab = 'overview' | 'payables' | 'receivables' | 'cashflow' | 'approvals' | 'bank' | 'reports';
+type Tab = 'dashboard' | 'cashflow' | 'calendar' | 'payments' | 'reports';
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'payables', label: 'Payables' },
-  { id: 'receivables', label: 'Receivables' },
-  { id: 'cashflow', label: 'Cash Flow' },
-  { id: 'approvals', label: 'Approvals' },
-  { id: 'bank', label: 'Bank & Reconciliation' },
-  { id: 'reports', label: 'Reports' },
+const TABS: { id: Tab; label: string; icon: string }[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: 'fa-gauge-high' },
+  { id: 'cashflow', label: 'Cash Flow', icon: 'fa-chart-column' },
+  { id: 'calendar', label: 'Calendar', icon: 'fa-calendar' },
+  { id: 'payments', label: 'Payments', icon: 'fa-money-bill-wave' },
+  { id: 'reports', label: 'Reports', icon: 'fa-file-chart-column' },
 ];
-
-const CATEGORY_CHIPS: TxnCategory[] = ['Hire', 'Freight', 'PDA', 'FDA', 'Bunker', 'Demurrage', 'Despatch', 'Agency', 'Port', 'Canal', 'Claims', 'Commission', 'Performance', 'Weather'];
 
 const CASH_IN_BANK = 4_245_890;
 
@@ -314,20 +448,26 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
   const txns = useAccountTxns();
   const rows = createMode ? [] : txns;
   const sidebarVessel = useSelectedAccountVessel();
-  const [tab, setTab] = useState<Tab>('overview');
-  const [company, setCompany] = useState('All');
+  const [tab, setTab] = useState<Tab>('dashboard');
   const [vessel, setVessel] = useState('All');
   const [typeF, setTypeF] = useState('All');
-  const [currency, setCurrency] = useState('All');
   const [statusF, setStatusF] = useState('All');
+  const [moduleF, setModuleF] = useState('All');
   const [query, setQuery] = useState('');
-  const [cats, setCats] = useState<Set<TxnCategory>>(new Set());
-  const [gridTab, setGridTab] = useState<'due' | 'overdue' | 'scheduled' | 'completed' | 'all'>('due');
+  const [cfRange, setCfRange] = useState<'7d' | '15d' | '30d' | '60d' | '90d' | '1y'>('30d');
+  const [dashCfRange, setDashCfRange] = useState<'7d' | '15d' | '30d' | '60d' | '90d' | '1y'>('30d');
+  const [dashVessel, setDashVessel] = useState('All');
+  const [calMonth, setCalMonth] = useState(ACCT_NOW);
+  const [calFrom, setCalFrom] = useState('');
+  const [calTo, setCalTo] = useState('');
+  const [calShowRec, setCalShowRec] = useState(true);
+  const [calShowPay, setCalShowPay] = useState(true);
   const [detail, setDetail] = useState<FinTxn | null>(null);
+  const [vesselSearch, setVesselSearch] = useState('');
+  const [vesselDropOpen, setVesselDropOpen] = useState(false);
 
   const vessels = useMemo(() => ['All', ...Array.from(new Set(rows.map((t) => t.vessel)))], [rows]);
-
-  const toggleCat = (c: TxnCategory) => setCats((prev) => { const n = new Set(prev); if (n.has(c)) n.delete(c); else n.add(c); return n; });
+  const modules = useMemo(() => ['All', ...Array.from(new Set(rows.map((t) => t.module)))], [rows]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -335,13 +475,12 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
       if (sidebarVessel && t.vessel !== sidebarVessel) return false;
       if (vessel !== 'All' && t.vessel !== vessel) return false;
       if (typeF !== 'All' && t.kind !== typeF) return false;
-      if (currency !== 'All' && t.currency !== currency) return false;
-      if (statusF !== 'All' && t.status !== statusF) return false;
-      if (cats.size > 0 && !cats.has(t.category)) return false;
-      if (q && !`${t.invoiceNo} ${t.vessel} ${t.counterparty} ${t.reference} ${t.category}`.toLowerCase().includes(q)) return false;
+      if (moduleF !== 'All' && t.module !== moduleF) return false;
+      if (statusF && statusF !== 'All' && t.status !== statusF) return false;
+      if (q && !`${t.invoiceNo} ${t.vessel} ${t.counterparty} ${t.reference} ${t.category} ${t.module}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [rows, sidebarVessel, vessel, typeF, currency, statusF, cats, query]);
+  }, [rows, sidebarVessel, vessel, typeF, moduleF, statusF, query]);
 
   // Dashboard scope follows the sidebar-selected vessel (all vessels when none).
   const scope = useMemo(() => (sidebarVessel ? rows.filter((t) => t.vessel === sidebarVessel) : rows), [rows, sidebarVessel]);
@@ -376,235 +515,642 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
   const catTotal = catSegments.reduce((s, c) => s + c.value, 0);
 
   const forecast = useMemo(() => {
-    const days = 30;
-    const bars: { label: string; net: number }[] = [];
-    for (let i = 0; i < days; i += 1) {
+    const daysMap: Record<typeof cfRange, number> = { '7d': 7, '15d': 15, '30d': 30, '60d': 60, '90d': 90, '1y': 365 };
+    const days = daysMap[cfRange];
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const bars: { label: string; inn: number; out: number; net: number }[] = [];
+    const step = days <= 30 ? 1 : days <= 90 ? 3 : days <= 180 ? 7 : 30;
+    for (let i = 0; i < days; i += step) {
       const day = new Date(ACCT_NOW.getTime() + i * 86_400_000);
       const iso = day.toISOString().slice(0, 10);
-      const inn = scope.filter((t) => t.kind === 'Receivable' && t.status !== 'Received' && t.dueIso === iso).reduce((s, t) => s + t.amount, 0);
-      const out = scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.dueIso === iso).reduce((s, t) => s + t.amount, 0);
-      // add a little synthetic baseline so the chart reads like a forecast
-      const base = Math.sin(i / 2) * 120_000;
-      bars.push({ label: `${day.getDate()} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][day.getMonth()]}`, net: inn - out + base });
+      const inn = scope.filter((t) => t.kind === 'Receivable' && t.status !== 'Received' && t.dueIso.startsWith(iso.slice(0, step > 1 ? 7 : 10))).reduce((s, t) => s + t.amount, 0);
+      const out = scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.dueIso.startsWith(iso.slice(0, step > 1 ? 7 : 10))).reduce((s, t) => s + t.amount, 0);
+      const base = Math.sin(i / 2) * 80_000;
+      const label = step >= 30 ? MONTHS[day.getMonth()] : `${day.getDate()} ${MONTHS[day.getMonth()]}`;
+      bars.push({ label, inn, out, net: inn - out + base });
     }
     return bars;
-  }, [scope]);
-
-  const currencyPos = useMemo(() => {
-    const map = new Map<string, number>();
-    scope.filter((t) => t.status !== 'Cancelled').forEach((t) => map.set(t.currency, (map.get(t.currency) ?? 0) + (t.kind === 'Receivable' ? t.amount : -t.amount)));
-    return Array.from(map.entries()).map(([cur, val]) => ({ cur, val }));
-  }, [scope]);
+  }, [scope, cfRange]);
 
   const paymentsDue7 = useMemo(() => scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && daysUntil(t.dueIso) >= 0 && daysUntil(t.dueIso) <= 8).sort((a, b) => daysUntil(a.dueIso) - daysUntil(b.dueIso)), [scope]);
 
-  const alerts = useMemo(() => {
-    const a: { icon: string; tone: string; text: string; at: string }[] = [];
-    scope.filter(isOverdue).slice(0, 2).forEach((t) => a.push({ icon: 'fa-triangle-exclamation', tone: 'red', text: `${t.category} ${t.kind === 'Payable' ? 'payment' : 'receipt'} overdue for ${t.vessel} (${money(t.amount)})`, at: '1d ago' }));
-    scope.filter((t) => t.approval === 'Pending').slice(0, 2).forEach((t) => a.push({ icon: 'fa-user-clock', tone: 'amber', text: `${t.category} invoice ${t.invoiceNo} awaiting approval`, at: '3h ago' }));
-    scope.filter((t) => t.kind === 'Payable' && daysUntil(t.dueIso) === 1).slice(0, 1).forEach((t) => a.push({ icon: 'fa-clock', tone: 'blue', text: `${t.category} payment due tomorrow — ${t.vessel} (${money(t.amount)})`, at: '2h ago' }));
-    return a;
-  }, [scope]);
-
-  const gridRows = useMemo(() => {
-    if (gridTab === 'overdue') return filtered.filter(isOverdue);
-    if (gridTab === 'scheduled') return filtered.filter((t) => t.status === 'Scheduled');
-    if (gridTab === 'completed') return filtered.filter((t) => t.status === 'Paid' || t.status === 'Received');
-    if (gridTab === 'due') return filtered.filter((t) => (t.status === 'Due' || t.status === 'Scheduled') && !isOverdue(t));
-    return filtered;
-  }, [filtered, gridTab]);
 
   const asOn = `${ACCT_NOW.getDate()} Jun ${ACCT_NOW.getFullYear()}`;
+  const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  const recDueToday = useMemo(() =>
+    scope.filter((t) => t.kind === 'Receivable' && t.status !== 'Received' && t.status !== 'Cancelled' && daysUntil(t.dueIso) === 0),
+  [scope]);
+
+  const pendingApprovals = useMemo(() =>
+    scope.filter((t) => t.approval === 'Pending' && t.status !== 'Paid' && t.status !== 'Received' && t.status !== 'Cancelled'),
+  [scope]);
+
+  // AP/AR aging: buckets by days-past-due for unpaid items
+  const agingBuckets = useMemo(() => {
+    const make = () => ({ current: 0, d30: 0, d60: 0, d90p: 0 });
+    const pay = make(), rec = make();
+    scope.filter((t) => t.status !== 'Paid' && t.status !== 'Received' && t.status !== 'Cancelled').forEach((t) => {
+      const d = daysUntil(t.dueIso);
+      const b = t.kind === 'Payable' ? pay : rec;
+      if (d >= 0) b.current += t.amount;
+      else if (d >= -30) b.d30 += t.amount;
+      else if (d >= -60) b.d60 += t.amount;
+      else b.d90p += t.amount;
+    });
+    return { pay, rec };
+  }, [scope]);
+
+  const dashForecast = useMemo(() => {
+    const daysMap = { '7d': 7, '15d': 15, '30d': 30, '60d': 60, '90d': 90, '1y': 365 } as const;
+    const days = daysMap[dashCfRange];
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const step = days <= 30 ? 1 : days <= 90 ? 3 : days <= 180 ? 7 : 30;
+    const src = dashVessel === 'All' ? scope : scope.filter((t) => t.vessel === dashVessel);
+    const bars: { label: string; inn: number; out: number; net: number }[] = [];
+    for (let i = 0; i < days; i += step) {
+      const day = new Date(ACCT_NOW.getTime() + i * 86_400_000);
+      const pfx = day.toISOString().slice(0, step > 1 ? 7 : 10);
+      const inn = src.filter((t) => t.kind === 'Receivable' && t.status !== 'Received' && t.dueIso.startsWith(pfx)).reduce((s, t) => s + t.amount, 0);
+      const out = src.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.dueIso.startsWith(pfx)).reduce((s, t) => s + t.amount, 0);
+      const label = step >= 30 ? MONTHS[day.getMonth()] : `${day.getDate()} ${MONTHS[day.getMonth()]}`;
+      bars.push({ label, inn, out, net: inn - out });
+    }
+    return bars;
+  }, [scope, dashCfRange, dashVessel]);
+
+  // MTD (month-to-date) collected and paid
+  const mtd = useMemo(() => {
+    const now = ACCT_NOW;
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const collected = scope.filter((t) => t.kind === 'Receivable' && t.status === 'Received' && t.dueIso?.startsWith(monthStart)).reduce((s, t) => s + t.amount, 0);
+    const paid = scope.filter((t) => t.kind === 'Payable' && t.status === 'Paid' && t.dueIso?.startsWith(monthStart)).reduce((s, t) => s + t.amount, 0);
+    return { collected, paid };
+  }, [scope]);
+
+  // Calendar helpers
+  const calYear = calMonth.getFullYear();
+  const calMon = calMonth.getMonth();
+  const calDaysInMonth = new Date(calYear, calMon + 1, 0).getDate();
+  const calFirstDay = new Date(calYear, calMon, 1).getDay();
+  const calTxnsByDay = useMemo(() => {
+    const map = new Map<number, { pay: number; rec: number; count: number }>();
+    scope.forEach((t) => {
+      if (!t.dueIso) return;
+      const d = new Date(t.dueIso);
+      if (d.getFullYear() !== calYear || d.getMonth() !== calMon) return;
+      const day = d.getDate();
+      const e = map.get(day) ?? { pay: 0, rec: 0, count: 0 };
+      if (t.kind === 'Payable') e.pay += t.amount; else e.rec += t.amount;
+      e.count++;
+      map.set(day, e);
+    });
+    return map;
+  }, [scope, calYear, calMon]);
+
 
   return (
     <div className="fv-acct">
-      <div className="fv-acct__main">
-        {/* header */}
+      {/* Non-scrolling header: topbar + tab nav */}
+      <div className="fv-acct__header">
         <header className="fv-acct__topbar">
-          <h1><i className="fas fa-building-columns" aria-hidden="true" /> Accounts Dashboard</h1>
+          <div className="fv-acct__topbar-left">
+            <h1><i className="fas fa-building-columns" aria-hidden="true" /> Accounts</h1>
+          </div>
+          {/* Vessel-only search — selecting a vessel filters all tabs and highlights it in the sidebar */}
+          <div className="fv-acct__header-search" style={{position:'relative'}}>
+            <i className="fas fa-ship" style={{color:'var(--a-muted)',fontSize:11}} />
+            {sidebarVessel ? (
+              <span className="fv-acct__search-vessel-chip">
+                {sidebarVessel}
+                <button type="button" title="Clear vessel filter" onClick={() => { clearSelectedAccountVessel(); setVesselSearch(''); }}>
+                  <i className="fas fa-xmark" />
+                </button>
+              </span>
+            ) : (
+              <input
+                value={vesselSearch}
+                placeholder="Search vessel…"
+                onChange={e => { setVesselSearch(e.target.value); setVesselDropOpen(true); }}
+                onFocus={() => setVesselDropOpen(true)}
+                onBlur={() => setTimeout(() => setVesselDropOpen(false), 150)}
+              />
+            )}
+            {!sidebarVessel && vesselSearch && (
+              <button type="button" className="fv-acct__icon-btn" style={{width:18,height:18}} onClick={() => setVesselSearch('')}>
+                <i className="fas fa-xmark" />
+              </button>
+            )}
+            {/* Vessel autocomplete dropdown */}
+            {vesselDropOpen && vesselSearch && !sidebarVessel && (() => {
+              const matches = vessels.filter(v => v !== 'All' && v.toLowerCase().includes(vesselSearch.toLowerCase()));
+              if (!matches.length) return null;
+              return (
+                <ul className="fv-acct__vessel-drop">
+                  {matches.map(v => (
+                    <li key={v}>
+                      <button type="button" onMouseDown={() => { writeSelectedAccountVessel(v); setVesselSearch(''); setVesselDropOpen(false); }}>
+                        <i className="fas fa-ship" /> {v}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
+          </div>
           <div className="fv-acct__actions">
-            <button type="button" className="fv-acct__btn"><i className="fas fa-plus" /> Create Payment</button>
-            <button type="button" className="fv-acct__btn"><i className="fas fa-hand-holding-dollar" /> Record Receipt</button>
-            <button type="button" className="fv-acct__btn"><i className="fas fa-file-invoice" /> Create Invoice</button>
-            <button type="button" className="fv-acct__btn"><i className="fas fa-file-lines" /> Reports</button>
-            <button type="button" className="fv-acct__btn"><i className="fas fa-file-export" /> Export</button>
-            <button type="button" className="fv-acct__icon-btn fv-acct__icon-btn--lg" title="Audit Logs"><i className="fas fa-clock-rotate-left" /></button>
+            <button type="button" className="fv-acct__btn fv-acct__btn--ghost" onClick={() => setTab('reports')}><i className="fas fa-file-export" /> Export</button>
             <button type="button" className="fv-acct__icon-btn fv-acct__icon-btn--lg" title="Notifications"><i className="fas fa-bell" /></button>
-            <button type="button" className="fv-acct__icon-btn fv-acct__icon-btn--lg" title="Settings"><i className="fas fa-gear" /></button>
           </div>
         </header>
-
-        {/* tabs */}
         <nav className="fv-acct__tabs" aria-label="Accounts sections">
           {TABS.map((tb) => (
-            <button key={tb.id} type="button" className={`fv-acct__tab${tab === tb.id ? ' fv-acct__tab--active' : ''}`} onClick={() => setTab(tb.id)}>{tb.label}</button>
+            <button key={tb.id} type="button" className={`fv-acct__tab${tab === tb.id ? ' fv-acct__tab--active' : ''}`} onClick={() => setTab(tb.id)}>
+              <i className={`fas ${tb.icon}`} aria-hidden="true" /> {tb.label}
+            </button>
           ))}
         </nav>
+      </div>
 
-        {/* filters */}
-        <div className="fv-acct__filters">
-          <label><span>Entity / Company</span><select value={company} onChange={(e) => setCompany(e.target.value)}><option>All</option><option>ODAS Shipping Ltd</option></select></label>
-          <label><span>Vessel</span><select value={vessel} onChange={(e) => setVessel(e.target.value)}>{vessels.map((v) => <option key={v}>{v}</option>)}</select></label>
-          <label><span>Type</span><select value={typeF} onChange={(e) => setTypeF(e.target.value)}><option>All</option><option value="Payable">Payables</option><option value="Receivable">Receivables</option></select></label>
-          <label><span>Currency</span><select value={currency} onChange={(e) => setCurrency(e.target.value)}><option>All</option><option>USD</option><option>EUR</option><option>CNY</option><option>SGD</option></select></label>
-          <label><span>Status</span><select value={statusF} onChange={(e) => setStatusF(e.target.value)}><option>All</option>{['Approval Pending', 'Due', 'Scheduled', 'On Hold', 'Paid', 'Received', 'Cancelled'].map((s) => <option key={s}>{s}</option>)}</select></label>
-          <label className="fv-acct__grow"><span>Search</span><span className="fv-acct__search"><i className="fas fa-magnifying-glass" /><input value={query} placeholder="Invoice, vessel, counterparty, reference…" onChange={(e) => setQuery(e.target.value)} /></span></label>
-          <button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-sliders" /> More Filters</button>
-        </div>
+      {/* Scrollable content area */}
+      <div className="fv-acct__main">
 
-        {/* category chips + active vessel (from sidebar) */}
-        <div className="fv-acct__chips">
-          {sidebarVessel && (
-            <button type="button" className="fv-acct__chip fv-acct__chip--vessel" onClick={() => clearSelectedAccountVessel()} title="Clear vessel filter">
-              <i className="fas fa-ship" /> {sidebarVessel} <i className="fas fa-xmark" />
-            </button>
-          )}
-          <span className="fv-acct__chips-label">Category:</span>
-          <button type="button" className={`fv-acct__chip${cats.size === 0 ? ' fv-acct__chip--on' : ''}`} onClick={() => setCats(new Set())}>All</button>
-          {CATEGORY_CHIPS.map((c) => (
-            <button key={c} type="button" className={`fv-acct__chip${cats.has(c) ? ' fv-acct__chip--on' : ''}`} onClick={() => toggleCat(c)}>{c}</button>
-          ))}
-        </div>
-
-        {tab === 'overview' && (
+        {/* ---- DASHBOARD ---- */}
+        {tab === 'dashboard' && (
           <>
+            {/* ── Row 1: KPI tiles ── */}
             <div className="fv-acct__kpis">
-              <Kpi label="Total Payables" value={abbr(kpi.totalPay)} delta="+4.2%" tone="red" icon="fa-file-invoice-dollar" hint={`${kpi.payCount} open`} />
-              <Kpi label="Total Receivables" value={abbr(kpi.totalRec)} delta="+6.8%" tone="green" icon="fa-hand-holding-dollar" hint={`${kpi.recCount} open`} />
-              <Kpi label="Cash In Bank" value={abbr(kpi.cash)} delta="+2.1%" tone="blue" icon="fa-vault" hint={`As on ${asOn}`} />
-              <Kpi label="Payments Today" value={abbr(kpi.dueTodayAmt)} tone="purple" icon="fa-money-bill-transfer" hint={`${kpi.dueTodayCount} payments`} />
-              <Kpi label="Upcoming (7 Days)" value={abbr(kpi.upcomingAmt)} tone="blue" icon="fa-calendar-day" hint={`${kpi.upcomingCount} payments`} />
-              <Kpi label="Overdue" value={abbr(kpi.overdueAmt)} delta="-1.4%" tone="red" icon="fa-triangle-exclamation" hint={`${kpi.overdueCount} items`} />
-              <Kpi label="Working Capital" value={abbr(kpi.working)} delta="+3.0%" tone="green" icon="fa-scale-balanced" />
-              <Kpi label="Financial Health" value="A- · 82" tone="green" icon="fa-heart-pulse" hint="Stable" />
+              <Kpi label="Overdue" value={abbr(kpi.overdueAmt)} tone="red" icon="fa-triangle-exclamation" hint={`${kpi.overdueCount} items`} />
+              <Kpi label="Due Today (Out)" value={abbr(kpi.dueTodayAmt)} tone="amber" icon="fa-arrow-up-from-bracket" hint={`${kpi.dueTodayCount} payables`} />
+              <Kpi label="Due Today (In)" value={abbr(recDueToday.reduce((s,t)=>s+t.amount,0))} tone="green" icon="fa-arrow-down-to-bracket" hint={`${recDueToday.length} receivables`} />
+              <Kpi label="Pending Approval" value={String(pendingApprovals.length)} tone="purple" icon="fa-user-clock" hint={`${abbr(pendingApprovals.reduce((s,t)=>s+t.amount,0))} total`} />
+              <Kpi label="Due This Week" value={abbr(kpi.upcomingAmt)} tone="blue" icon="fa-calendar-week" hint={`${kpi.upcomingCount} payables`} />
+              <Kpi label="Cash In Bank" value={abbr(kpi.cash)} tone="blue" icon="fa-vault" hint={`As on ${asOn}`} />
+              <Kpi label="MTD Collected" value={abbr(mtd.collected)} tone="green" icon="fa-circle-check" hint="This month" />
+              <Kpi label="Working Capital" value={abbr(kpi.working)} tone="green" icon="fa-scale-balanced" />
             </div>
 
+            {/* ── Row 2: Priority Actions — 3 equal columns ── */}
             <div className="fv-acct__row3">
-              <section className="fv-acct__card fv-acct__card--wide">
-                <div className="fv-acct__card-head"><span><i className="fas fa-chart-column" /> Cash Flow Forecast (Next 30 Days)</span>
-                  <span className="fv-acct__legend-inline"><span className="fv-acct__dot" style={{ background: '#6fdc8c' }} /> Inflow <span className="fv-acct__dot" style={{ background: '#ff6b6b' }} /> Outflow</span>
+              {/* Column 1: OVERDUE */}
+              <section className="fv-acct__card">
+                <div className="fv-acct__card-head fv-acct__card-head--red">
+                  <span><i className="fas fa-triangle-exclamation" /> Overdue</span>
+                  <span className="fv-acct__count-badge fv-acct__count-badge--red">{scope.filter(isOverdue).length}</span>
                 </div>
-                <div className="fv-acct__card-body"><CashFlowChart bars={forecast} /></div>
+                <div className="fv-acct__action-body fv-acct__action-body--scroll">
+                  {scope.filter(isOverdue).length === 0 ? (
+                    <div className="fv-acct__hint" style={{textAlign:'center',padding:'20px 0'}}><i className="fas fa-circle-check" style={{color:'var(--a-good)'}}/> None overdue</div>
+                  ) : scope.filter(isOverdue).sort((a,b)=>daysUntil(a.dueIso)-daysUntil(b.dueIso)).map((t) => {
+                    const days = -daysUntil(t.dueIso);
+                    return (
+                      <div key={t.id} className="fv-acct__action-item fv-acct__action-item--overdue" onClick={() => setDetail(t)}>
+                        <div className="fv-acct__action-age fv-acct__od">{days}d</div>
+                        <div className="fv-acct__action-info">
+                          <span><b>{t.category}</b> · {t.vessel}</span>
+                          <small>{t.counterparty} · {t.invoiceNo}</small>
+                        </div>
+                        <div className="fv-acct__action-amt fv-acct__neg">{money(t.amount)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* Column 2: DUE TODAY (Pay + Collect) */}
+              <section className="fv-acct__card">
+                <div className="fv-acct__card-head fv-acct__card-head--amber">
+                  <span><i className="fas fa-clock" /> Due Today</span>
+                  <span className="fv-acct__count-badge fv-acct__count-badge--amber">{kpi.dueTodayCount + recDueToday.length}</span>
+                </div>
+                <div className="fv-acct__action-body fv-acct__action-body--scroll">
+                  {kpi.dueTodayCount > 0 && (
+                    <>
+                      <div className="fv-acct__action-group fv-acct__action-group--amber">
+                        <i className="fas fa-arrow-up-from-bracket" /> PAY
+                        <span className="fv-acct__action-count">{kpi.dueTodayCount}</span>
+                      </div>
+                      {scope.filter((t) => t.kind==='Payable' && t.status!=='Paid' && daysUntil(t.dueIso)===0).map((t) => (
+                        <div key={t.id} className="fv-acct__action-item fv-acct__action-item--today-out" onClick={() => setDetail(t)}>
+                          <div className="fv-acct__action-age" style={{color:'var(--a-amber)'}}>0d</div>
+                          <div className="fv-acct__action-info">
+                            <span><b>{t.category}</b> · {t.vessel}</span>
+                            <small>{t.counterparty} · {t.invoiceNo}</small>
+                          </div>
+                          <div className="fv-acct__action-amt">{money(t.amount)}</div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {recDueToday.length > 0 && (
+                    <>
+                      <div className="fv-acct__action-group fv-acct__action-group--green">
+                        <i className="fas fa-arrow-down-to-bracket" /> COLLECT
+                        <span className="fv-acct__action-count">{recDueToday.length}</span>
+                      </div>
+                      {recDueToday.map((t) => (
+                        <div key={t.id} className="fv-acct__action-item fv-acct__action-item--today-in" onClick={() => setDetail(t)}>
+                          <div className="fv-acct__action-age" style={{color:'var(--a-good)'}}>0d</div>
+                          <div className="fv-acct__action-info">
+                            <span><b>{t.category}</b> · {t.vessel}</span>
+                            <small>{t.counterparty} · {t.invoiceNo}</small>
+                          </div>
+                          <div className="fv-acct__action-amt fv-acct__pos">{money(t.amount)}</div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {kpi.dueTodayCount === 0 && recDueToday.length === 0 && (
+                    <div className="fv-acct__hint" style={{textAlign:'center',padding:'20px 0'}}><i className="fas fa-circle-check" style={{color:'var(--a-good)'}}/> Nothing due today</div>
+                  )}
+                </div>
+              </section>
+
+              {/* Column 3: AWAITING APPROVAL */}
+              <section className="fv-acct__card">
+                <div className="fv-acct__card-head fv-acct__card-head--purple">
+                  <span><i className="fas fa-user-clock" /> Awaiting Approval</span>
+                  <span className="fv-acct__count-badge fv-acct__count-badge--purple">{pendingApprovals.length}</span>
+                </div>
+                <div className="fv-acct__action-body fv-acct__action-body--scroll">
+                  {pendingApprovals.length === 0 ? (
+                    <div className="fv-acct__hint" style={{textAlign:'center',padding:'20px 0'}}><i className="fas fa-circle-check" style={{color:'var(--a-good)'}}/> Nothing pending</div>
+                  ) : pendingApprovals.map((t) => (
+                    <div key={t.id} className="fv-acct__action-item fv-acct__action-item--approval" onClick={() => setDetail(t)}>
+                      <div className="fv-acct__action-age" style={{color:'var(--a-purple)'}}><i className="fas fa-clock"/></div>
+                      <div className="fv-acct__action-info">
+                        <span><b>{t.invoiceNo}</b> · {t.category}</span>
+                        <small>{t.vessel} · {t.counterparty}</small>
+                      </div>
+                      <div className="fv-acct__action-amt">{money(t.amount)}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+
+            {/* ── Row 3: AP/AR Aging | Payables by Category ── */}
+            <div className="fv-acct__equal-row">
+              <section className="fv-acct__card">
+                <div className="fv-acct__card-head"><i className="fas fa-chart-bar" /> AP / AR Aging</div>
+                <div className="fv-acct__card-body">
+                  {(['pay','rec'] as const).map((kind) => {
+                    const b = agingBuckets[kind];
+                    const total = b.current + b.d30 + b.d60 + b.d90p || 1;
+                    const label = kind === 'pay' ? 'Payables' : 'Receivables';
+                    const color = kind === 'pay' ? 'var(--a-bad)' : 'var(--a-good)';
+                    return (
+                      <div key={kind} className="fv-acct__aging-block">
+                        <div className="fv-acct__aging-title" style={{color}}><i className={`fas fa-${kind==='pay'?'arrow-up':'arrow-down'}`}/> {label}</div>
+                        {([['current', 'Current', '#58a6ff'], ['d30', '1–30d overdue', 'var(--a-amber)'], ['d60', '31–60d overdue', '#ff8c42'], ['d90p', '61d+ overdue', 'var(--a-bad)']] as const).map(([key, lbl, clr]) => {
+                          const val = b[key as keyof typeof b];
+                          if (val === 0) return null;
+                          const pct = (val / total) * 100;
+                          return (
+                            <div key={key} className="fv-acct__aging-row">
+                              <span className="fv-acct__aging-lbl">{lbl}</span>
+                              <div className="fv-acct__aging-bar-wrap">
+                                <div className="fv-acct__aging-bar" style={{width:`${pct}%`, background: clr}} />
+                              </div>
+                              <span className="fv-acct__aging-val">{abbr(val)}</span>
+                            </div>
+                          );
+                        })}
+                        <div className="fv-acct__aging-total"><span>Total Outstanding</span><b>{abbr(total === 1 ? 0 : total)}</b></div>
+                      </div>
+                    );
+                  })}
+                </div>
               </section>
               <section className="fv-acct__card">
-                <div className="fv-acct__card-head"><span><i className="fas fa-chart-pie" /> Payables by Category</span></div>
+                <div className="fv-acct__card-head"><i className="fas fa-chart-pie" /> Payables by Category</div>
                 <div className="fv-acct__card-body"><Donut segments={catSegments} total={catTotal} /></div>
               </section>
             </div>
 
-            <div className="fv-acct__row3">
-              <section className="fv-acct__card">
-                <div className="fv-acct__card-head"><span><i className="fas fa-calendar-check" /> Payments Due (Next 7 Days)</span></div>
-                <div className="fv-acct__card-body">
-                  <ul className="fv-acct__due-list">
-                    {paymentsDue7.slice(0, 6).map((t) => { const d = daysUntil(t.dueIso); return (
-                      <li key={t.id}>
-                        <span className="fv-acct__due-date">{t.dueDate.split(' ').slice(0, 2).join(' ')}</span>
-                        <span className="fv-acct__due-main"><b>{t.category} — {t.vessel}</b><small>{t.counterparty}</small></span>
-                        <span className="fv-acct__due-amt">{money(t.amount)}</span>
-                        <span className={`fv-acct__pill fv-acct__pill--${d === 0 ? 'red' : d <= 2 ? 'amber' : 'blue'}`}>{d === 0 ? 'Today' : d === 1 ? 'Tomorrow' : `${d}d left`}</span>
-                      </li>
-                    ); })}
-                  </ul>
-                </div>
-              </section>
-              <section className="fv-acct__card">
-                <div className="fv-acct__card-head"><span><i className="fas fa-bell" /> Alerts &amp; Notifications</span></div>
-                <div className="fv-acct__card-body">
-                  <ul className="fv-acct__alerts">
-                    {alerts.map((a, i) => (
-                      <li key={i}><span className={`fv-acct__alert-ico fv-acct__alert-ico--${a.tone}`}><i className={`fas ${a.icon}`} /></span><div><span>{a.text}</span><small>{a.at}</small></div></li>
-                    ))}
-                  </ul>
-                </div>
-              </section>
-              <section className="fv-acct__card">
-                <div className="fv-acct__card-head"><span><i className="fas fa-coins" /> Cash Position by Currency</span></div>
-                <div className="fv-acct__card-body">
-                  <ul className="fv-acct__ccy">
-                    {currencyPos.map((c) => (
-                      <li key={c.cur}><span className="fv-acct__ccy-cur">{c.cur}</span><span className="fv-acct__ccy-val">{num(Math.abs(c.val))}</span><span className={`fv-acct__ccy-net fv-acct__ccy-net--${c.val >= 0 ? 'up' : 'down'}`}>{c.val >= 0 ? '▲' : '▼'} {c.cur}</span></li>
-                    ))}
-                  </ul>
-                </div>
-              </section>
-            </div>
-
-            <AiAssistant txns={txns} />
-
+            {/* ── Row 4: Vessel Cash Flow — chart + transaction detail ── */}
             <section className="fv-acct__card">
-              <div className="fv-acct__card-head fv-acct__card-head--tabs">
-                {(['due', 'overdue', 'scheduled', 'completed', 'all'] as const).map((g) => (
-                  <button key={g} type="button" className={`fv-acct__gridtab${gridTab === g ? ' fv-acct__gridtab--active' : ''}`} onClick={() => setGridTab(g)}>
-                    {g === 'due' ? 'Payments Due' : g[0].toUpperCase() + g.slice(1)} <span className="fv-acct__count">{
-                      g === 'overdue' ? filtered.filter(isOverdue).length : g === 'scheduled' ? filtered.filter((t) => t.status === 'Scheduled').length : g === 'completed' ? filtered.filter((t) => t.status === 'Paid' || t.status === 'Received').length : g === 'all' ? filtered.length : filtered.filter((t) => (t.status === 'Due' || t.status === 'Scheduled') && !isOverdue(t)).length
-                    }</span>
-                  </button>
-                ))}
+              <div className="fv-acct__card-head">
+                <span><i className="fas fa-chart-column" /> Vessel Cash Flow</span>
+                <div className="fv-acct__cf-chart-toolbar">
+                  <select className="fv-acct__vsel" value={dashVessel} onChange={(e) => setDashVessel(e.target.value)}>
+                    <option value="All">All Vessels</option>
+                    {Array.from(new Set(scope.map((t) => t.vessel))).sort().map((v) => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                  <span className="fv-acct__legend-inline">
+                    <span className="fv-acct__dot" style={{background:'#6fdc8c'}}/> Inflows
+                    <span className="fv-acct__dot" style={{background:'#ff6b6b'}}/> Outflows
+                  </span>
+                  <div className="fv-acct__range-group">
+                    {(['7d','15d','30d','60d','90d','1y'] as const).map((r) => (
+                      <button key={r} type="button" className={`fv-acct__range-btn${dashCfRange===r?' fv-acct__range-btn--on':''}`} onClick={() => setDashCfRange(r)}>{r.toUpperCase()}</button>
+                    ))}
+                  </div>
+                </div>
               </div>
-              <TxnGrid rows={gridRows} onView={setDetail} />
+              {/* KPI strip for selected vessel */}
+              {dashVessel !== 'All' && (() => {
+                const vTxns = scope.filter((t) => t.vessel === dashVessel && t.status !== 'Cancelled');
+                const vPay = vTxns.filter((t) => t.kind==='Payable' && t.status!=='Paid').reduce((s,t)=>s+t.amount,0);
+                const vRec = vTxns.filter((t) => t.kind==='Receivable' && t.status!=='Received').reduce((s,t)=>s+t.amount,0);
+                const vOd = vTxns.filter(isOverdue).length;
+                return (
+                  <div className="fv-acct__vkpis">
+                    <div className="fv-acct__vkpi fv-acct__vkpi--out"><span>Total Payable</span><b className="fv-acct__neg">{abbr(vPay)}</b></div>
+                    <div className="fv-acct__vkpi fv-acct__vkpi--in"><span>Total Receivable</span><b className="fv-acct__pos">{abbr(vRec)}</b></div>
+                    <div className="fv-acct__vkpi"><span>Net Position</span><b className={vRec-vPay>=0?'fv-acct__pos':'fv-acct__neg'}>{vRec-vPay>=0?'+':''}{abbr(vRec-vPay)}</b></div>
+                    {vOd > 0 && <div className="fv-acct__vkpi fv-acct__vkpi--od"><span>Overdue Items</span><b className="fv-acct__neg">{vOd}</b></div>}
+                  </div>
+                );
+              })()}
+              {/* Cash flow chart */}
+              <div className="fv-acct__card-body"><CashFlowChart bars={dashForecast} /></div>
+              {/* Transaction detail — visible when a vessel is selected */}
+              {dashVessel !== 'All' && (
+                <div className="fv-acct__vcf-txns">
+                  <div className="fv-acct__vcf-txns-head">
+                    <i className="fas fa-list" /> All Transactions · {dashVessel}
+                    <span className="fv-acct__count-badge" style={{marginLeft:6}}>{scope.filter(t=>t.vessel===dashVessel&&t.status!=='Cancelled').length}</span>
+                  </div>
+                  <table className="fv-acct__table fv-acct__table--compact">
+                    <thead>
+                      <tr><th>Due Date</th><th>Invoice</th><th>Voyage</th><th>Category</th><th>Counterparty</th><th className="fv-acct__r">Amount</th><th>Type</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                      {scope.filter((t) => t.vessel === dashVessel && t.status !== 'Cancelled')
+                        .sort((a, b) => a.dueIso.localeCompare(b.dueIso))
+                        .map((t) => {
+                          const od = isOverdue(t);
+                          return (
+                            <tr key={t.id} onClick={() => setDetail(t)} style={{cursor:'pointer'}} className={od ? 'fv-acct__tr--od' : undefined}>
+                              <td>
+                                <b>{t.dueDate}</b>
+                                {od && <div className="fv-acct__sub fv-acct__od">{Math.abs(daysUntil(t.dueIso))}d overdue</div>}
+                              </td>
+                              <td className="fv-acct__ref">{t.invoiceNo}</td>
+                              <td><div className="fv-acct__sub">{t.voyage || t.reference}</div></td>
+                              <td>
+                                <span className="fv-acct__cat-dot" style={{background: CAT_COLOR[t.category] ?? '#8b98ad', verticalAlign:'middle', marginRight:4}} />
+                                {t.category}
+                              </td>
+                              <td>{t.counterparty}</td>
+                              <td className={`fv-acct__r ${t.kind==='Receivable'?'fv-acct__pos':'fv-acct__neg'}`}><b>{money(t.amount)}</b></td>
+                              <td><span className={`fv-acct__pill fv-acct__pill--${t.kind==='Payable'?'amber':'blue'}`}>{t.kind==='Payable'?'Payable':'Receivable'}</span></td>
+                              <td><StatusPill status={t.status} /></td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            {/* ── Row 5: Side-by-side cashflow statement ── */}
+            <section className="fv-acct__card">
+              <div className="fv-acct__card-head"><i className="fas fa-table-columns" /> Cash Flow Statement</div>
+              <div className="fv-acct__card-body" style={{padding:0}}>
+                <CashflowTable scope={dashVessel === 'All' ? scope : scope.filter(t => t.vessel === dashVessel)} />
+              </div>
+            </section>
+
+            {/* ── Row 6: Due-this-week full width ── */}
+            <section className="fv-acct__card">
+              <div className="fv-acct__card-head"><i className="fas fa-calendar-check" /> Due This Week</div>
+              <div className="fv-acct__card-body">
+                <ul className="fv-acct__due-list">
+                  {paymentsDue7.slice(0, 8).map((t) => { const d = daysUntil(t.dueIso); return (
+                    <li key={t.id} onClick={() => setDetail(t)} style={{cursor:'pointer'}}>
+                      <span className="fv-acct__due-date">{t.dueDate.split(' ').slice(0,2).join(' ')}</span>
+                      <span className="fv-acct__due-main"><b>{t.category} · {t.vessel}</b><small>{t.counterparty} · <span className="fv-acct__module-tag">{t.module}</span></small></span>
+                      <span className="fv-acct__due-amt">{money(t.amount)}</span>
+                      <span className={`fv-acct__pill fv-acct__pill--${d===0?'red':d<=2?'amber':'blue'}`}>{d===0?'Today':d===1?'Tomorrow':`${d}d`}</span>
+                    </li>
+                  ); })}
+                </ul>
+              </div>
             </section>
           </>
         )}
 
-        {tab === 'payables' && <TxnGrid rows={filtered.filter((t) => t.kind === 'Payable')} onView={setDetail} />}
-        {tab === 'receivables' && <TxnGrid rows={filtered.filter((t) => t.kind === 'Receivable')} onView={setDetail} />}
-        {tab === 'approvals' && (
-          <section className="fv-acct__card">
-            <div className="fv-acct__card-head"><span><i className="fas fa-user-check" /> Awaiting Approval</span></div>
-            <TxnGrid rows={filtered.filter((t) => t.approval === 'Pending')} onView={setDetail} />
-          </section>
-        )}
-
+        {/* ---- CASH FLOW ---- */}
         {tab === 'cashflow' && (
-          <div className="fv-acct__row3">
-            <section className="fv-acct__card fv-acct__card--wide">
-              <div className="fv-acct__card-head"><span><i className="fas fa-chart-column" /> Net Cash Flow — Next 30 Days</span></div>
+          <div className="fv-acct__cf-layout">
+            <div className="fv-acct__cf-toolbar">
+              <div className="fv-acct__cf-kpis">
+                <div className="fv-acct__cf-kpi fv-acct__cf-kpi--in"><span>Inflows</span><b className="fv-acct__pos">{abbr(kpi.totalRec)}</b></div>
+                <div className="fv-acct__cf-kpi fv-acct__cf-kpi--out"><span>Outflows</span><b className="fv-acct__neg">{abbr(kpi.totalPay)}</b></div>
+                <div className="fv-acct__cf-kpi"><span>Net</span><b>{abbr(kpi.totalRec - kpi.totalPay)}</b></div>
+                <div className="fv-acct__cf-kpi"><span>Bank</span><b>{abbr(kpi.cash)}</b></div>
+                <div className="fv-acct__cf-kpi fv-acct__cf-kpi--wc"><span>Working Capital</span><b>{abbr(kpi.working)}</b></div>
+              </div>
+              <div className="fv-acct__cf-range">
+                <label className="fv-acct__cf-range-label">Vessel</label>
+                <select className="fv-acct__cf-sel" value={vessel} onChange={e => setVessel(e.target.value)}>{vessels.map(v=><option key={v}>{v}</option>)}</select>
+                <label className="fv-acct__cf-range-label">Period</label>
+                {(['7d','15d','30d','60d','90d','1y'] as const).map(r => (
+                  <button key={r} type="button" className={`fv-acct__range-btn${cfRange===r?' fv-acct__range-btn--on':''}`} onClick={() => setCfRange(r)}>{r.toUpperCase()}</button>
+                ))}
+              </div>
+            </div>
+            <section className="fv-acct__card">
+              <div className="fv-acct__card-head"><i className="fas fa-chart-column" /> Cash Flow â€” {cfRange.toUpperCase()}<span className="fv-acct__cf-legend"><span className="fv-acct__cf-leg fv-acct__cf-leg--in"/>Inflows<span className="fv-acct__cf-leg fv-acct__cf-leg--out"/>Outflows</span></div>
               <div className="fv-acct__card-body"><CashFlowChart bars={forecast} /></div>
             </section>
             <section className="fv-acct__card">
-              <div className="fv-acct__card-head"><span><i className="fas fa-arrows-rotate" /> Position</span></div>
+              <div className="fv-acct__card-head"><i className="fas fa-table-columns" /> Cash Flow Statement</div>
+              <div className="fv-acct__card-body" style={{padding:0}}>
+                <CashflowTable scope={vessel === 'All' ? scope : scope.filter(t => t.vessel === vessel)} />
+              </div>
+            </section>
+            <section className="fv-acct__card">
+              <div className="fv-acct__card-head"><i className="fas fa-table-list" /> Breakdown by Module &amp; Category</div>
               <div className="fv-acct__card-body">
-                <ul className="fv-acct__kv">
-                  <li><span>Expected Cash In</span><b className="fv-acct__pos">{abbr(kpi.totalRec)}</b></li>
-                  <li><span>Expected Cash Out</span><b className="fv-acct__neg">{abbr(kpi.totalPay)}</b></li>
-                  <li><span>Net Position</span><b>{abbr(kpi.totalRec - kpi.totalPay)}</b></li>
-                  <li><span>Cash In Bank</span><b>{abbr(kpi.cash)}</b></li>
-                  <li className="fv-acct__kv-strong"><span>Working Capital</span><b>{abbr(kpi.working)}</b></li>
-                </ul>
+                <table className="fv-acct__table">
+                  <thead><tr><th>Module</th><th>Category</th><th className="fv-acct__c">Count</th><th className="fv-acct__c">Inflows</th><th className="fv-acct__c">Outflows</th><th className="fv-acct__c">Net</th></tr></thead>
+                  <tbody>
+                    {(() => {
+                      const groups = new Map<string,{module:string;category:string;inAmt:number;outAmt:number;count:number}>();
+                      scope.filter(t=>t.status!=='Cancelled').forEach(t=>{
+                        const key=`${t.module}||${t.category}`;
+                        const g=groups.get(key)??{module:t.module,category:t.category,inAmt:0,outAmt:0,count:0};
+                        if(t.kind==='Receivable')g.inAmt+=t.amount;else g.outAmt+=t.amount;g.count++;
+                        groups.set(key,g);
+                      });
+                      return [...groups.values()].sort((a,b)=>(b.inAmt+b.outAmt)-(a.inAmt+a.outAmt)).map((g,i)=>{
+                        const net=g.inAmt-g.outAmt;
+                        return <tr key={i}><td><span className="fv-acct__module-tag">{g.module}</span></td><td><span className="fv-acct__cat-dot" style={{background:CAT_COLOR[g.category as TxnCategory]??'#8b98ad',verticalAlign:'middle',marginRight:5}}/>{g.category}</td><td className="fv-acct__c">{g.count}</td><td className="fv-acct__c fv-acct__pos">{g.inAmt>0?num(g.inAmt):'â€”'}</td><td className="fv-acct__c fv-acct__neg">{g.outAmt>0?num(g.outAmt):'â€”'}</td><td className={`fv-acct__c ${net>=0?'fv-acct__pos':'fv-acct__neg'}`}>{num(Math.abs(net))}</td></tr>;
+                      });
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+            <section className="fv-acct__card">
+              <div className="fv-acct__card-head"><i className="fas fa-clock" /> Upcoming Payments ({cfRange.toUpperCase()})</div>
+              <div className="fv-acct__card-body">
+                <table className="fv-acct__table">
+                  <thead><tr><th>Due</th><th>Vessel</th><th className="fv-acct__c">Module</th><th className="fv-acct__c">Category</th><th>Counterparty</th><th className="fv-acct__c">Invoice</th><th className="fv-acct__c">Amount</th><th className="fv-acct__c">Type</th><th className="fv-acct__c">Status</th></tr></thead>
+                  <tbody>
+                    {scope.filter(t=>{const d=daysUntil(t.dueIso);return t.status!=='Paid'&&t.status!=='Received'&&t.status!=='Cancelled'&&d>=-7&&d<=({'7d':7,'15d':15,'30d':30,'60d':60,'90d':90,'1y':365} as Record<string,number>)[cfRange];}).sort((a,b)=>daysUntil(a.dueIso)-daysUntil(b.dueIso)).map(t=>{
+                      const od=isOverdue(t);const d=daysUntil(t.dueIso);
+                      return <tr key={t.id} onClick={()=>setDetail(t)} style={{cursor:'pointer'}}><td className={od?'fv-acct__od':undefined}>{t.dueDate}{od?<div className="fv-acct__sub fv-acct__od">Overdue {Math.abs(d)}d</div>:d===0?<div className="fv-acct__sub fv-acct__od">Today</div>:null}</td><td><b>{t.vessel}</b></td><td><span className="fv-acct__module-tag" style={{margin:'0 auto'}}>{t.module}</span></td><td className="fv-acct__c"><span className="fv-acct__cat-dot" style={{background:CAT_COLOR[t.category]??'#8b98ad',verticalAlign:'middle',marginRight:4}}/>{t.category}</td><td>{t.counterparty}</td><td className="fv-acct__c fv-acct__ref">{t.invoiceNo}</td><td className="fv-acct__c"><b>{t.currency} {num(t.amount)}</b></td><td className="fv-acct__c"><span className={`fv-acct__pill fv-acct__pill--${t.kind==='Payable'?'amber':'blue'}`}>{t.kind}</span></td><td className="fv-acct__c">{od?<span className="fv-acct__pill fv-acct__pill--red">Overdue</span>:<StatusPill status={t.status}/>}</td></tr>;
+                    })}
+                  </tbody>
+                </table>
               </div>
             </section>
           </div>
         )}
 
-        {tab === 'bank' && (
-          <section className="fv-acct__card">
-            <div className="fv-acct__card-head"><span><i className="fas fa-building-columns" /> Bank &amp; Reconciliation</span>
-              <span className="fv-acct__recon-actions"><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-import" /> Import Statement</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-wand-magic-sparkles" /> Auto Match</button></span>
+        {/* ---- CALENDAR ---- */}
+        {tab === 'calendar' && (
+          <div className="fv-acct__cal-wrap">
+            {/* Single toolbar row: month/year dropdowns + vessel + All/Today + date range + legend */}
+            <div className="fv-acct__cal-toolbar">
+              <select className="fv-acct__cal-sel" value={calMon}
+                onChange={e => setCalMonth(new Date(calYear, Number(e.target.value), 1))}>
+                {MONTHS_SHORT.map((m, i) => <option key={m} value={i}>{m}</option>)}
+              </select>
+              <select className="fv-acct__cal-sel" value={calYear}
+                onChange={e => setCalMonth(new Date(Number(e.target.value), calMon, 1))}>
+                {Array.from({length: 5}, (_, i) => calYear - 2 + i).map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+              <div className="fv-acct__cal-toolbar-sep" />
+              <select className="fv-acct__cf-sel" value={vessel} onChange={e=>setVessel(e.target.value)}>{vessels.map(v=><option key={v}>{v}</option>)}</select>
+              <div className="fv-acct__cal-toolbar-sep" />
+              <button type="button" className={`fv-acct__range-btn${!calFrom && !calTo ? ' fv-acct__range-btn--on' : ''}`}
+                onClick={() => { setCalFrom(''); setCalTo(''); }}>All</button>
+              <button type="button" className={`fv-acct__range-btn${calFrom === ACCT_NOW.toISOString().slice(0,10) && calTo === ACCT_NOW.toISOString().slice(0,10) ? ' fv-acct__range-btn--on' : ''}`}
+                onClick={() => { const d = ACCT_NOW.toISOString().slice(0,10); setCalFrom(d); setCalTo(d); setCalMonth(new Date(ACCT_NOW)); }}>Today</button>
+              <label className="fv-acct__cal-range-lbl">From</label>
+              <input type="date" className="fv-acct__cal-date-input" value={calFrom} onChange={e => setCalFrom(e.target.value)} />
+              <label className="fv-acct__cal-range-lbl">To</label>
+              <input type="date" className="fv-acct__cal-date-input" value={calTo} onChange={e => setCalTo(e.target.value)} />
+              {(calFrom || calTo) && (
+                <button type="button" className="fv-acct__icon-btn" title="Clear range" onClick={() => { setCalFrom(''); setCalTo(''); }}>
+                  <i className="fas fa-xmark" />
+                </button>
+              )}
+              <span className="fv-acct__cf-legend" style={{marginLeft:'auto'}}>
+                <button type="button" className={`fv-acct__cal-toggle${calShowRec?'':' fv-acct__cal-toggle--off'}`}
+                  onClick={() => setCalShowRec(v => !v)} title={calShowRec ? 'Hide receivables' : 'Show receivables'}>
+                  <span className="fv-acct__cf-leg" style={{background: calShowRec ? '#6fdc8c' : 'var(--a-border)'}}/>
+                  Receivable
+                </button>
+                <button type="button" className={`fv-acct__cal-toggle${calShowPay?'':' fv-acct__cal-toggle--off'}`}
+                  onClick={() => setCalShowPay(v => !v)} title={calShowPay ? 'Hide payables' : 'Show payables'}>
+                  <span className="fv-acct__cf-leg" style={{background: calShowPay ? '#ff6b6b' : 'var(--a-border)'}}/>
+                  Payable
+                </button>
+              </span>
             </div>
-            <div className="fv-acct__card-body">
-              <div className="fv-acct__recon">
-                <div className="fv-acct__recon-stat"><span>Bank Balance</span><b>{money(4_128_450)}</b></div>
-                <div className="fv-acct__recon-stat"><span>Ledger Balance</span><b>{money(kpi.cash)}</b></div>
-                <div className="fv-acct__recon-stat"><span>Difference</span><b className="fv-acct__neg">{money(kpi.cash - 4_128_450)}</b></div>
-                <div className="fv-acct__recon-stat"><span>Unmatched</span><b>3 items</b></div>
-                <div className="fv-acct__recon-stat"><span>Status</span><span className="fv-acct__pill fv-acct__pill--amber">In Progress</span></div>
-              </div>
-              <p className="fv-acct__hint">Auto-match links imported bank lines to ledger transactions; duplicates are flagged and unmatched items queued for manual review.</p>
+            <div className="fv-acct__cal">
+              {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=><div key={d} className="fv-acct__cal-dow">{d}</div>)}
+              {Array.from({length: calFirstDay}, (_,i) => <div key={`e${i}`} className="fv-acct__cal-empty" />)}
+              {Array.from({length: calDaysInMonth}, (_,i) => {
+                const day = i + 1;
+                const today = new Date(ACCT_NOW);
+                const isToday = calYear === today.getFullYear() && calMon === today.getMonth() && day === today.getDate();
+                const dayIso = `${calYear}-${String(calMon+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+                // Apply date range filter
+                const inRange = (!calFrom || dayIso >= calFrom) && (!calTo || dayIso <= calTo);
+                const info = calTxnsByDay.get(day);
+                const dayTxns = (info && inRange) ? scope.filter(t => {
+                  if (!t.dueIso) return false;
+                  const d = new Date(t.dueIso);
+                  return d.getFullYear() === calYear && d.getMonth() === calMon && d.getDate() === day;
+                }) : [];
+                return (
+                  <div key={day} className={`fv-acct__cal-day${isToday?' fv-acct__cal-day--today':''}${info&&inRange?' fv-acct__cal-day--has':''}${!inRange?' fv-acct__cal-day--dim':''}`}>
+                    <span className="fv-acct__cal-daynum">{day}</span>
+                    {info && inRange && (
+                      <div className="fv-acct__cal-events">
+                        {info.rec > 0 && calShowRec && <span className="fv-acct__cal-dot fv-acct__cal-dot--in" title={`Receive ${money(info.rec)}`}>{abbr(info.rec)}</span>}
+                        {info.pay > 0 && calShowPay && <span className="fv-acct__cal-dot fv-acct__cal-dot--out" title={`Pay ${money(info.pay)}`}>{abbr(info.pay)}</span>}
+                        {dayTxns.filter(t => (t.kind==='Receivable'?calShowRec:calShowPay)).slice(0,2).map(t => (
+                          <button key={t.id} type="button" className="fv-acct__cal-txn" onClick={() => setDetail(t)} title={`${t.category} · ${t.vessel} · ${money(t.amount)}`}>
+                            <span className="fv-acct__cat-dot" style={{background:CAT_COLOR[t.category]??'#8b98ad'}}/> {t.category}
+                          </button>
+                        ))}
+                        {dayTxns.filter(t => (t.kind==='Receivable'?calShowRec:calShowPay)).length > 2 && <span className="fv-acct__cal-more">+{dayTxns.filter(t => (t.kind==='Receivable'?calShowRec:calShowPay)).length - 2}</span>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          </section>
+            {/* Date range summary list */}
+            {(calFrom || calTo) && (() => {
+              const rangeTxns = scope.filter(t => {
+                if (!t.dueIso) return false;
+                return (!calFrom || t.dueIso >= calFrom) && (!calTo || t.dueIso <= calTo);
+              }).sort((a,b)=>a.dueIso.localeCompare(b.dueIso));
+              if (rangeTxns.length === 0) return <div className="fv-acct__hint" style={{padding:16}}>No transactions in selected range</div>;
+              return (
+                <div className="fv-acct__cal-range-list">
+                  <div className="fv-acct__cal-range-list-head">
+                    <i className="fas fa-list" /> Transactions in range ({rangeTxns.length})
+                    <span style={{marginLeft:'auto'}} className="fv-acct__pos">In: {abbr(rangeTxns.filter(t=>t.kind==='Receivable').reduce((s,t)=>s+t.amount,0))}</span>
+                    <span style={{marginLeft:12}} className="fv-acct__neg">Out: {abbr(rangeTxns.filter(t=>t.kind==='Payable').reduce((s,t)=>s+t.amount,0))}</span>
+                  </div>
+                  <table className="fv-acct__table fv-acct__table--compact">
+                    <thead><tr><th>Due</th><th>Vessel</th><th>Category</th><th>Counterparty</th><th>Invoice</th><th className="fv-acct__r">Amount</th><th>Type</th><th>Status</th></tr></thead>
+                    <tbody>
+                      {rangeTxns.map(t => (
+                        <tr key={t.id} onClick={() => setDetail(t)} style={{cursor:'pointer'}}>
+                          <td>{t.dueDate.split(' ').slice(0,2).join(' ')}</td>
+                          <td>{t.vessel}</td>
+                          <td><span className="fv-acct__cat-dot" style={{background:CAT_COLOR[t.category]??'#8b98ad',verticalAlign:'middle',marginRight:4}}/>{t.category}</td>
+                          <td>{t.counterparty}</td>
+                          <td className="fv-acct__ref">{t.invoiceNo}</td>
+                          <td className={`fv-acct__r ${t.kind==='Receivable'?'fv-acct__pos':'fv-acct__neg'}`}><b>{num(t.amount)}</b></td>
+                          <td><span className={`fv-acct__pill fv-acct__pill--${t.kind==='Payable'?'amber':'blue'}`}>{t.kind==='Payable'?'Pay':'Rec'}</span></td>
+                          <td><StatusPill status={t.status} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </div>
         )}
 
+        {/* ---- PAYMENTS ---- */}
+        {tab === 'payments' && (
+          <div className="fv-acct__pay-layout">
+            <div className="fv-acct__filters">
+              <label><span>Vessel</span><select value={vessel} onChange={e=>setVessel(e.target.value)}>{vessels.map(v=><option key={v}>{v}</option>)}</select></label>
+              <label><span>Module</span><select value={moduleF} onChange={e=>setModuleF(e.target.value)}>{modules.map(m=><option key={m}>{m}</option>)}</select></label>
+              <label><span>Type</span><select value={typeF} onChange={e=>setTypeF(e.target.value)}><option>All</option><option value="Payable">Payable</option><option value="Receivable">Receivable</option></select></label>
+              <label className="fv-acct__grow"><span>Status</span><select value={statusF} onChange={e=>setStatusF(e.target.value)}><option value="">All</option>{ALL_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}</select></label>
+              <label className="fv-acct__grow"><span>Search</span><span className="fv-acct__search"><i className="fas fa-magnifying-glass"/><input value={query} placeholder="Invoice, counterparty, module…" onChange={e=>setQuery(e.target.value)}/>{query&&<button type="button" className="fv-acct__icon-btn" style={{width:16,height:16}} onClick={()=>setQuery('')}><i className="fas fa-xmark"/></button>}</span></label>
+            </div>
+            <div className="fv-acct__pay-counts">
+              <span className="fv-acct__pay-stat fv-acct__pay-stat--red"><b>{filtered.filter(isOverdue).length}</b> Overdue</span>
+              <span className="fv-acct__pay-stat fv-acct__pay-stat--amber"><b>{filtered.filter(t=>t.status==='Due'&&!isOverdue(t)).length}</b> Due</span>
+              <span className="fv-acct__pay-stat fv-acct__pay-stat--blue"><b>{filtered.filter(t=>t.status==='Scheduled').length}</b> Scheduled</span>
+              <span className="fv-acct__pay-stat fv-acct__pay-stat--purple"><b>{filtered.filter(t=>t.approval==='Pending').length}</b> Awaiting Approval</span>
+              <span className="fv-acct__pay-stat fv-acct__pay-stat--green"><b>{filtered.filter(t=>t.status==='Paid'||t.status==='Received').length}</b> Settled</span>
+            </div>
+            <TxnGrid rows={filtered} onView={setDetail} />
+          </div>
+        )}
+
+        {/* ---- REPORTS ---- */}
         {tab === 'reports' && (
           <section className="fv-acct__card">
-            <div className="fv-acct__card-head"><span><i className="fas fa-file-lines" /> Reports &amp; Exports</span></div>
+            <div className="fv-acct__card-head"><i className="fas fa-file-lines" /> Reports &amp; Exports</div>
             <div className="fv-acct__card-body">
               <div className="fv-acct__reports">
-                {['Cash Flow', 'Receivables', 'Payables', 'Outstanding', 'Ageing', 'Hire', 'Freight', 'PDA', 'FDA', 'Bunker', 'Vendor Ledger', 'Customer Ledger', 'Voyage Financials', 'Profit & Loss', 'Payment History', 'Collection History', 'Audit'].map((r) => (
-                  <button key={r} type="button" className="fv-acct__report"><i className="fas fa-file-chart-column" /> {r} Report</button>
+                {['Cash Flow','Receivables','Payables','Outstanding','Ageing Analysis','Hire Payments','Freight','PDA / FDA','Bunker','Vendor Ledger','Customer Ledger','Voyage Financials','Profit & Loss','Payment History','Collection History','Audit Trail'].map((r) => (
+                  <button key={r} type="button" className="fv-acct__report"><i className="fas fa-file-chart-column" /> {r}</button>
                 ))}
               </div>
-              <div className="fv-acct__export"><span>Export:</span><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-excel" /> Excel</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-pdf" /> PDF</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-csv" /> CSV</button></div>
+              <div className="fv-acct__export"><span>Export all data:</span><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-excel" /> Excel</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-pdf" /> PDF</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-csv" /> CSV</button></div>
             </div>
           </section>
         )}

@@ -32,6 +32,7 @@ import {
   type Client,
 } from '../data/clients';
 import { VesselsPanel } from './VesselsPanel';
+import { useWorkflowConfig, setWorkflowConfig } from '../data/workflowConfig';
 import {
   EST_OPTION_LABELS,
   resetEstimationOptions,
@@ -72,6 +73,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'port-details', labelKey: 'portDetails', labelFallback: 'Port Details', icon: 'fa-anchor' },
   { id: 'area-constraints', labelKey: 'areaConstraints', labelFallback: 'Area Constraints', icon: 'fa-draw-polygon' },
   { id: 'saved-passages', labelKey: 'savedPassages', labelFallback: 'Saved Passages', icon: 'fa-route' },
+  { id: 'workflow-config', labelKey: 'workflowConfig', labelFallback: 'Company & Workflow', icon: 'fa-building' },
 ];
 
 export function SettingsModal({
@@ -161,6 +163,7 @@ export function SettingsModal({
                 <AreaConstraintsPage mode="admin" />
               </div>
             )}
+            {active.id === 'workflow-config' && <WorkflowConfigPanel />}
           </section>
         </div>
       </div>
@@ -1675,5 +1678,118 @@ function PortEditor({
         </button>
       </div>
     </form>
+  );
+}
+
+function WorkflowConfigPanel() {
+  const cfg = useWorkflowConfig();
+  const logoInputRef = useRef<HTMLInputElement>(null);
+
+  const pickLogo = () => logoInputRef.current?.click();
+  const onLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setWorkflowConfig({ companyLogoDataUrl: reader.result as string });
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  return (
+    <div className="fv-settings-wf">
+      <p className="fv-settings-wf__intro">
+        Configure company identity and module interaction based on your department structure.
+      </p>
+
+      {/* Company Identity */}
+      <div className="fv-settings-wf__group">
+        <div className="fv-settings-wf__group-title"><i className="fas fa-building" aria-hidden="true" /> Company Identity</div>
+        <div className="fv-settings-wf__fields">
+
+          <div className="fv-settings-wf__field-row">
+            <label className="fv-settings-wf__field">
+              <span className="fv-settings-wf__field-label">Company Name</span>
+              <input
+                className="fv-settings-wf__input"
+                value={cfg.companyName}
+                placeholder="e.g. Oceanic Freight Pte. Ltd."
+                onChange={(e) => setWorkflowConfig({ companyName: e.target.value })}
+              />
+              <span className="fv-settings-wf__field-hint">Printed on invoices, hire SOA, freight &amp; laytime documents.</span>
+            </label>
+          </div>
+
+          <div className="fv-settings-wf__field-row">
+            <label className="fv-settings-wf__field">
+              <span className="fv-settings-wf__field-label">Company Address</span>
+              <textarea
+                className="fv-settings-wf__textarea"
+                value={cfg.companyAddress}
+                placeholder={"e.g. 1 Maritime Square, #10-01\nHarbourFront Centre\nSingapore 099253"}
+                rows={4}
+                onChange={(e) => setWorkflowConfig({ companyAddress: e.target.value })}
+              />
+              <span className="fv-settings-wf__field-hint">Full address block — appears on document headers.</span>
+            </label>
+          </div>
+
+          <div className="fv-settings-wf__field-row">
+            <div className="fv-settings-wf__field">
+              <span className="fv-settings-wf__field-label">Company Logo</span>
+              <div className="fv-settings-wf__logo-area">
+                {cfg.companyLogoDataUrl ? (
+                  <div className="fv-settings-wf__logo-preview-wrap">
+                    <img src={cfg.companyLogoDataUrl} alt="Company logo" className="fv-settings-wf__logo-preview" />
+                    <div className="fv-settings-wf__logo-actions">
+                      <button type="button" className="fv-settings-wf__logo-btn" onClick={pickLogo}>
+                        <i className="fas fa-arrow-up-from-bracket" aria-hidden="true" /> Replace
+                      </button>
+                      <button type="button" className="fv-settings-wf__logo-btn fv-settings-wf__logo-btn--danger" onClick={() => setWorkflowConfig({ companyLogoDataUrl: '' })}>
+                        <i className="fas fa-trash" aria-hidden="true" /> Remove
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button type="button" className="fv-settings-wf__logo-upload" onClick={pickLogo}>
+                    <i className="fas fa-image" aria-hidden="true" />
+                    <span>Upload logo</span>
+                    <small>PNG, JPG or SVG · recommended 300 × 80 px</small>
+                  </button>
+                )}
+                <input ref={logoInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={onLogoFile} />
+              </div>
+              <span className="fv-settings-wf__field-hint">Shown in the top-left of printed documents.</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      {/* Postfix workflow */}
+      <div className="fv-settings-wf__group">
+        <div className="fv-settings-wf__group-title"><i className="fas fa-file-signature" aria-hidden="true" /> Postfix Department</div>
+        <label className="fv-settings-wf__row">
+          <div className="fv-settings-wf__row-text">
+            <span className="fv-settings-wf__row-label">Always show Operations voyages in Postfix</span>
+            <span className="fv-settings-wf__row-desc">
+              <b>ON</b> — every voyage in Operations automatically appears in the Postfix fleet list.
+              Use this when your Operations team handles freight settlement (no separate Postfix dept).
+              &nbsp;<b>OFF</b> — a voyage appears in Postfix only after Operations clicks <em>Copy to Postfix</em> on the
+              Freight Invoices or Laytime Calculations card. Use this when you have a dedicated post-fixture settlement team.
+            </span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={cfg.postfixAlwaysShowOpsVoyages}
+            className={`fv-settings-wf__toggle${cfg.postfixAlwaysShowOpsVoyages ? ' fv-settings-wf__toggle--on' : ''}`}
+            onClick={() => setWorkflowConfig({ postfixAlwaysShowOpsVoyages: !cfg.postfixAlwaysShowOpsVoyages })}
+          >
+            <span className="fv-settings-wf__toggle-knob" />
+            <span className="fv-settings-wf__toggle-label">{cfg.postfixAlwaysShowOpsVoyages ? 'ON' : 'OFF'}</span>
+          </button>
+        </label>
+      </div>
+    </div>
   );
 }

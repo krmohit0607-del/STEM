@@ -30,6 +30,7 @@ import {
   writeSelectedAccountVessel,
 } from '../data/accounts';
 import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, estStatusColor, estStatusLabel, useHandedOver, useModuleLifecycles, moduleLifecycleOf, usePostfixHanded, useFixtureNumbers } from '../data/workflow';
+import { useWorkflowConfig } from '../data/workflowConfig';
 import { useSavedEstimates } from '../data/savedEstimates';
 import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
 import { AppFooterControls } from './AppFooterControls';
@@ -200,6 +201,7 @@ export function FleetMenu() {
   const handedOver = useHandedOver();
   const moduleLifecycles = useModuleLifecycles();
   const postfixHanded = usePostfixHanded();
+  const workflowConfig = useWorkflowConfig();
   const fixtureNos = useFixtureNumbers();
   const savedEstimates = useSavedEstimates();
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
@@ -273,7 +275,7 @@ export function FleetMenu() {
       }
       if (module === 'Postfix') {
         return moduleLifecycleOf(moduleLifecycles, 'Postfix', v.id)
-          ?? (postfixHanded.includes(v.id) ? 'active' : lifecycleOf(v));
+          ?? (workflowConfig.postfixAlwaysShowOpsVoyages || postfixHanded.includes(v.id) ? 'active' : lifecycleOf(v));
       }
       if (module === 'Performance' && handedOver.includes(v.id)) return 'active';
       return lifecycleOf(v);
@@ -331,7 +333,7 @@ export function FleetMenu() {
     }
     if (module === 'Postfix') {
       return moduleLifecycleOf(moduleLifecycles, 'Postfix', v.id)
-        ?? (postfixHanded.includes(v.id) ? 'active' : lifecycleOf(v));
+        ?? (workflowConfig.postfixAlwaysShowOpsVoyages || postfixHanded.includes(v.id) ? 'active' : lifecycleOf(v));
     }
     if (module === 'Performance' && handedOver.includes(v.id)) return 'active';
     return lifecycleOf(v);
@@ -350,24 +352,52 @@ export function FleetMenu() {
 
   // Accounts: aggregate the ledger per vessel for the current bucket + type filter.
   const accountRows = useMemo(() => {
-    const map = new Map<string, { vessel: string; reference: string; payable: number; receivable: number; overdue: number; approvals: number; count: number }>();
+    const map = new Map<string, { vessel: string; payable: number; receivable: number; overdue: number; open: number; settled: number; total: number }>();
     for (const tx of accountAll) {
-      if (bucketOfTxn(tx) !== status) continue;
       if (!matchesAccountType(tx, voyageType)) continue;
-      const e = map.get(tx.vessel) ?? { vessel: tx.vessel, reference: tx.reference, payable: 0, receivable: 0, overdue: 0, approvals: 0, count: 0 };
-      if (tx.kind === 'Payable') e.payable += tx.amount; else e.receivable += tx.amount;
+      const e = map.get(tx.vessel) ?? { vessel: tx.vessel, payable: 0, receivable: 0, overdue: 0, open: 0, settled: 0, total: 0 };
+      const isS = tx.status === 'Paid' || tx.status === 'Received' || tx.status === 'Cancelled';
+      if (tx.kind === 'Payable' && !isS) e.payable += tx.amount;
+      else if (tx.kind === 'Receivable' && !isS) e.receivable += tx.amount;
       if (isOverdue(tx)) e.overdue += 1;
-      if (tx.approval === 'Pending') e.approvals += 1;
-      e.count += 1;
-      e.reference = tx.reference;
+      if (!isS) e.open += 1;
+      else e.settled += 1;
+      e.total += 1;
       map.set(tx.vessel, e);
     }
     const q = query.trim().toLowerCase();
-    let out = Array.from(map.values()).map((e) => ({ ...e, net: e.receivable - e.payable }));
-    if (q) out = out.filter((r) => `${r.vessel} ${r.reference}`.toLowerCase().includes(q));
-    out.sort((a, b) => b.payable + b.receivable - (a.payable + a.receivable));
+    // Compute per-vessel next upcoming and last settled transaction
+    const active = accountAll.filter(t => t.status !== 'Paid' && t.status !== 'Received' && t.status !== 'Cancelled');
+    const settled = accountAll.filter(t => t.status === 'Paid' || t.status === 'Received');
+    let out = Array.from(map.values()).map((e) => {
+      const net = e.receivable - e.payable;
+      const vesselActive = active.filter(t => t.vessel === e.vessel).sort((a, b) => a.dueIso.localeCompare(b.dueIso));
+      // nextTxn: pick from the selected bucket first, then any active
+      const bucketTxns = active.filter(t => t.vessel === e.vessel && bucketOfTxn(t) === status).sort((a, b) => a.dueIso.localeCompare(b.dueIso));
+      const nextTxn = bucketTxns[0] ?? vesselActive[0] ?? null;
+      const lastSettled = settled.filter(t => t.vessel === e.vessel).sort((a, b) => b.dueIso.localeCompare(a.dueIso))[0] ?? null;
+      const dot: 'red' | 'amber' | 'green' = e.overdue > 0 ? 'red' : e.open > 0 ? 'amber' : 'green';
+      return { ...e, net, nextTxn, lastSettled, dot };
+    });
+    // Filter vessels: show only those that have at least one txn matching the selected bucket
+    const vesselMatchesBucket = (vessel: string) => accountAll.some(t => t.vessel === vessel && bucketOfTxn(t) === status);
+    if (q) out = out.filter((r) => r.vessel.toLowerCase().includes(q));
+    out = out.filter((r) => vesselMatchesBucket(r.vessel));
+    out.sort((a, b) => (b.overdue - a.overdue) || (b.open - a.open) || (b.payable + b.receivable - (a.payable + a.receivable)));
+    // Pin the selected vessel at the top even if it belongs to a different bucket
+    if (selectedAccountVessel && !out.find(r => r.vessel === selectedAccountVessel)) {
+      const pinned = Array.from(map.values()).find(e => e.vessel === selectedAccountVessel);
+      if (pinned) {
+        const net = pinned.receivable - pinned.payable;
+        const vesselActive = active.filter(t => t.vessel === pinned.vessel).sort((a, b) => a.dueIso.localeCompare(b.dueIso));
+        const nextTxn = vesselActive.find(isOverdue) ?? vesselActive[0] ?? null;
+        const lastSettled = settled.filter(t => t.vessel === pinned.vessel).sort((a, b) => b.dueIso.localeCompare(a.dueIso))[0] ?? null;
+        const dot: 'red' | 'amber' | 'green' = pinned.overdue > 0 ? 'red' : pinned.open > 0 ? 'amber' : 'green';
+        out.unshift({ ...pinned, net, nextTxn, lastSettled, dot });
+      }
+    }
     return out;
-  }, [accountAll, status, voyageType, query]);
+  }, [accountAll, status, voyageType, query, selectedAccountVessel]);
 
   const toggleCollapsed = () => {
     setCollapsed((c) => {
@@ -535,34 +565,54 @@ export function FleetMenu() {
           ))}
         </ul>
       ) : isAccounts ? (
-        <ul className="fv-fleetmenu__list">
-          {accountRows.length === 0 && (
-            <li className="fv-fleetmenu__empty">{t('noAccounts', 'No transactions')}</li>
-          )}
-          {accountRows.map((r) => (
-            <li key={r.vessel}>
-              <button
-                type="button"
-                className={`fv-fleetmenu__item${r.vessel === selectedAccountVessel ? ' fv-fleetmenu__item--active' : ''}`}
-                onClick={() => { writeSelectedAccountVessel(r.vessel); navigate('/accounts'); }}
-              >
-                <div className="fv-fleetmenu__item-top">
-                  <span className="fv-fleetmenu__vessel">{r.vessel}</span>
-                  <span className="fv-fleetmenu__order">{r.reference}</span>
-                </div>
-                <div className="fv-fleetmenu__item-route">
-                  Net <b className={r.net >= 0 ? 'fv-fleetmenu__pos' : 'fv-fleetmenu__neg'}>{usdAbbr(r.net)}</b>
-                  <span className="fv-fleetmenu__acct-split"> · Pay {usdAbbr(r.payable)} · Rec {usdAbbr(r.receivable)}</span>
-                </div>
-                <div className="fv-fleetmenu__item-meta">
-                  {r.overdue > 0 && <span className="fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--due" style={{ background: 'rgba(255,107,107,.16)', color: '#ff6b6b' }}>{r.overdue} overdue</span>}
-                  {r.approvals > 0 && <span className="fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--approval">{r.approvals} to approve</span>}
-                  <span className="fv-fleetmenu__acct-count">{r.count} txn</span>
-                </div>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="fv-fleetmenu__acct-panel">
+          <ul className="fv-fleetmenu__acct-buckets">
+            {accountRows.map((r) => {
+              const isSettled = r.open === 0;
+              const nextDate = r.nextTxn?.dueDate?.split(' ').slice(0, 2).join(' ') ?? '';
+              const lastDate = r.lastSettled?.dueDate?.split(' ').slice(0, 2).join(' ') ?? '';
+              const dotColor = r.dot === 'red' ? '#ff6b6b' : r.dot === 'amber' ? '#e3b341' : '#6fdc8c';
+              const nextIsOverdue = r.nextTxn ? isOverdue(r.nextTxn) : false;
+              return (
+                <li key={r.vessel}>
+                  <button type="button" className={`fv-fleetmenu__item fv-fleetmenu__acct-item${r.vessel === selectedAccountVessel ? ' fv-fleetmenu__item--active' : ''}`}
+                    onClick={() => { writeSelectedAccountVessel(r.vessel); navigate('/accounts'); }}>
+                    {/* Row 1: dot + vessel name + net amount */}
+                    <div className="fv-fleetmenu__acct-row1">
+                      <span className="fv-fleetmenu__acct-dot" style={{background: dotColor}} />
+                      <span className="fv-fleetmenu__vessel">{r.vessel}</span>
+                      <span className={r.net < 0 ? 'fv-fleetmenu__neg' : r.net > 0 ? 'fv-fleetmenu__pos' : 'fv-fleetmenu__muted'}>
+                        {r.net > 0 ? '+' : ''}{usdAbbr(r.net)}
+                      </span>
+                    </div>
+                    {/* Row 2: overdue count + open count (or settled summary) */}
+                    <div className="fv-fleetmenu__acct-row2">
+                      {isSettled ? (
+                        <span className="fv-fleetmenu__acct-settled">Settled &bull; {r.settled} transactions</span>
+                      ) : (
+                        <>
+                          {r.overdue > 0 && <span className="fv-fleetmenu__acct-od">{r.overdue} overdue</span>}
+                          {r.overdue > 0 && r.open > 0 && <span className="fv-fleetmenu__acct-sep">&bull;</span>}
+                          <span className="fv-fleetmenu__acct-open">{r.open} open</span>
+                        </>
+                      )}
+                    </div>
+                    {/* Row 3: next transaction info */}
+                    <div className="fv-fleetmenu__acct-row3">
+                      {isSettled ? (
+                        lastDate ? <span>{'\u2514'} Last: {lastDate}</span> : null
+                      ) : r.nextTxn ? (
+                        <span className={nextIsOverdue ? 'fv-fleetmenu__acct-od' : ''}>
+                          {nextIsOverdue ? 'Overdue: ' : '\u2514 '}{r.nextTxn.category} {usdAbbr(r.nextTxn.amount)} &bull; {nextDate}
+                        </span>
+                      ) : null}
+                    </div>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       ) : (
         <ul className="fv-fleetmenu__list">
           {rows.length === 0 && savedRows.length === 0 && (

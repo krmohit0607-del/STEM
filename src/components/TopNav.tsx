@@ -3,8 +3,11 @@ import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useNotifications } from '../data/workflow';
+import { useAccountAlerts } from '../data/accounts';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useCommsDraft } from '../data/commsStore';
 import { GenerateCommsModal } from './GenerateCommsModal';
+import { AiAssistantPanel } from './AiAssistantPanel';
 
 /**
  * Universal top navigation bar (shared across all modules).
@@ -19,10 +22,18 @@ export function TopNav() {
   const l = useL();
   const navigate = useNavigate();
   const notifications = useNotifications();
+  const acctAlerts = useAccountAlerts();
   const selectedVoyage = useSelectedVoyage();
   const [notifOpen, setNotifOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [commsOpen, setCommsOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const commsDraft = useCommsDraft();
+
+  // Auto-open Comms modal when a forecast draft is queued
+  useEffect(() => {
+    if (commsDraft) setCommsOpen(true);
+  }, [commsDraft]);
   const notifRef = useRef<HTMLDivElement | null>(null);
   const createRef = useRef<HTMLDivElement | null>(null);
   const t = (key: string, fallback: string) => {
@@ -78,15 +89,21 @@ export function TopNav() {
             onClick={() => setNotifOpen((v) => !v)}
           >
             <i className="fas fa-bell" aria-hidden="true" />
-            {notifications.length > 0 && <span className="fv-topnav__notif-dot">{notifications.length}</span>}
+            {(notifications.length + acctAlerts.length) > 0 && <span className="fv-topnav__notif-dot">{notifications.length + acctAlerts.length}</span>}
           </button>
           {notifOpen && (
             <div className="fv-topnav__notif-panel">
               <div className="fv-topnav__notif-head">Notifications</div>
-              {notifications.length === 0 ? (
+              {notifications.length === 0 && acctAlerts.length === 0 ? (
                 <div className="fv-topnav__notif-empty">No notifications.</div>
               ) : (
                 <ul>
+                  {acctAlerts.map((a) => (
+                    <li key={a.id} className={`fv-topnav__notif-acct fv-topnav__notif-acct--${a.tone}`}>
+                      <i className={`fas ${a.icon}`} aria-hidden="true" />
+                      <div><span>{a.text}</span><small>{a.sub}</small></div>
+                    </li>
+                  ))}
                   {notifications.map((n) => (
                     <li key={n.id}>
                       <i className="fas fa-bullhorn" aria-hidden="true" />
@@ -106,6 +123,15 @@ export function TopNav() {
           onClick={() => setCommsOpen(true)}
         >
           <i className="fas fa-envelope" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="fv-topnav__icon-button fv-topnav__icon-button--ai"
+          title="Voyage AI Assistant"
+          aria-label="Voyage AI Assistant"
+          onClick={() => setAiOpen(true)}
+        >
+          <i className="fas fa-robot" aria-hidden="true" />
         </button>
 
         <div className="fv-topnav__create" ref={createRef}>
@@ -155,6 +181,7 @@ export function TopNav() {
         </div>
       </div>
       {commsOpen && <GenerateCommsModal voyage={selectedVoyage} onClose={() => setCommsOpen(false)} />}
+      {aiOpen && <AiAssistantPanel onClose={() => setAiOpen(false)} />}
     </div>
   );
 }

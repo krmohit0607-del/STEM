@@ -28,6 +28,7 @@ import { setVesselPosition } from '../data/vesselPosition';
 import { setRouteReportMarkers } from '../data/routeReportMarkers';
 import { useActiveSimRoute } from '../data/routeSimulatorStore';
 import { loadVoyageShared } from '../data/voyageOverrides';
+import { queueCommsDraft } from '../data/commsStore';
 import {
   fromDateInput,
   fromTimeInput,
@@ -554,6 +555,8 @@ export function TracksheetGrid() {
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [savedFlash, setSavedFlash] = useState(false);
   const [validating, setValidating] = useState(false);
+  const [forecasting, setForecasting] = useState(false);
+  const [forecastData, setForecastData] = useState<{ lat: number; lng: number; label: string; windSpd: string; wavHt: string; time: string }[] | null>(null);
 
   const allChecked = rows.length > 0 && checkedIds.length === rows.length;
   const someChecked = checkedIds.length > 0;
@@ -565,6 +568,98 @@ export function TracksheetGrid() {
 
   const toggleAll = () =>
     setCheckedIds((prev) => (prev.length === rows.length ? [] : rows.map((r) => r.id)));
+
+  // Sample evenly-spaced waypoints from the active route and queue forecast email in Comms modal
+  const sendForecast = async () => {
+    setForecasting(true);
+    try {
+      const waypoints = activeRoute?.path ?? [];
+      const step = Math.max(1, Math.floor(waypoints.length / 20));
+      const sample = waypoints.filter((_, i) => i % step === 0).slice(0, 20);
+      const etd = activeRoute?.etdIso ? new Date(activeRoute.etdIso) : new Date();
+      const lastHour = activeRoute?.timeHours ? activeRoute.timeHours[activeRoute.timeHours.length - 1] : sample.length * 6;
+      const etaFinal = new Date(etd.getTime() + lastHour * 3600_000);
+      const fmtDate = (d: Date) => d.toUTCString().replace(' GMT', '').slice(0, -4);
+      const fmtLatLng = (lat: number, lng: number) => {
+        const latD = Math.abs(lat), lngD = Math.abs(lng);
+        return `${Math.floor(latD)}° ${((latD % 1) * 60).toFixed(1)}' ${lat >= 0 ? 'N' : 'S'}  ${Math.floor(lngD)}° ${((lngD % 1) * 60).toFixed(1)}' ${lng >= 0 ? 'E' : 'W'}`;
+      };
+
+      const wxRows = await Promise.all(
+        sample.map(async ([lat, lng], idx) => {
+          const t = new Date(etd.getTime() + idx * (lastHour / sample.length) * 3600_000);
+          try {
+            const wx = await fetchPointWeatherAt(lat, lng, t);
+            const wind = wx['wind']?.magnitude ?? 0;
+            const windDir = wx['wind']?.directionDeg ?? 0;
+            const wave = wx['waves']?.magnitude ?? 0;
+            const waveDir = wx['waves']?.directionDeg;
+            const curr = wx['currents']?.magnitude ?? 0;
+            const windKt = (wind * 1.944).toFixed(1);
+            const gustKt = ((wind * 1.944) * 1.5).toFixed(1);
+            const waveDirStr = waveDir != null ? Math.round(waveDir).toString() : '--';
+            return `${fmtDate(t).padEnd(22)} ${wave.toFixed(1).padStart(14)}  ${waveDirStr.padStart(10)}  ${windKt.padStart(14)}  ${Math.round(windDir).toString().padStart(10)}  ${gustKt.padStart(19)}  ${curr.toFixed(1).padStart(10)}  at-sea`;
+          } catch {
+            return `${fmtDate(t).padEnd(22)} ${'—'.padStart(14)}  ${'—'.padStart(10)}  ${'—'.padStart(14)}  ${'—'.padStart(10)}  ${'—'.padStart(19)}  ${'—'.padStart(10)}  at-sea`;
+          }
+        }),
+      );
+
+      const rpmRows = rows.slice(0, 5).map((r) =>
+        `${(r.date + ' ' + r.time).padEnd(22)} ${'68'.padStart(4)} ${(r.avgSpeedO ?? 10.5).toFixed(1).padStart(20)} ${'14.0'.padStart(20)} ${'24.0'.padStart(14)}`
+      );
+
+      const locationList = sample.map(([lat, lng], idx) => {
+        const t = new Date(etd.getTime() + idx * 6 * 3600_000);
+        return `${(idx + 1).toString().padStart(3)}  ${fmtDate(t)}  ${fmtLatLng(lat, lng)}`;
+      });
+
+      const body = [
+        `Hello Master of ${vesselName},`,
+        ``,
+        `Advised to stay on the current route. Your predicted arrival details at ${selectedVoyage?.portTo ?? 'destination'} are below:`,
+        `  Predicted ETA: ${fmtDate(etaFinal)} utc`,
+        `  Predicted Average SOG Remaining: ${activeRoute?.distanceNm ? (activeRoute.distanceNm / lastHour).toFixed(1) : '10.0'} kt`,
+        `  Route: ${routeLabel}`,
+        ``,
+        `Voyage constraints: Average speed: -   RTA: On ${fmtDate(etaFinal).slice(0, 12)}   Max daily M/E fuel consumption: -`,
+        ``,
+        `RPM SETTING AND SPEED OPTIMIZATION:`,
+        `Adjust vessel main engine rpm at the following times to achieve predicted speeds.`,
+        `${'─'.repeat(80)}`,
+        `${'Date/Time (utc)'.padEnd(22)} ${'RPM'.padStart(4)} ${'Predicted SOG (kt)'.padStart(20)} ${'M/E Consumption (mt)'.padStart(20)} ${'Duration (hr)'.padStart(14)}`,
+        `${'─'.repeat(80)}`,
+        ...(rpmRows.length ? rpmRows : [`${fmtDate(etd).padEnd(22)} ${'68'.padStart(4)} ${'10.5'.padStart(20)} ${'14.0'.padStart(20)} ${'24.0'.padStart(14)}`]),
+        ``,
+        `WEATHER SUMMARY:`,
+        `${'─'.repeat(105)}`,
+        `${'Date/Time (utc)'.padEnd(22)} ${'Max SigWaveHt (m)'.padStart(14)}  ${'WaveDir (deg)'.padStart(10)}  ${'Max Wind (kt)'.padStart(14)}  ${'WindDir (deg)'.padStart(10)}  ${'Max Wind Gust (kt)'.padStart(19)}  ${'Avg CF (kt)'.padStart(10)}  Status`,
+        `${'─'.repeat(105)}`,
+        ...wxRows,
+        ``,
+        `LOCATION LIST:`,
+        `${'─'.repeat(65)}`,
+        `${'#'.padStart(3)}  ${'ETA Date/Time (utc)'.padEnd(22)}  ${'Lat / Lon'}`,
+        `${'─'.repeat(65)}`,
+        ...locationList,
+        `${'─'.repeat(65)}`,
+        ``,
+        `Warm Regards,`,
+        `The ODAS Team`,
+        `routing@odas.com`,
+        `ODAS Help Center | For Emergencies Call: +1 (855) 229 9558`,
+      ].join('\n');
+
+      queueCommsDraft({
+        subject: `${vesselName} - Weather Forecast`,
+        to: `master@${(vesselName.toLowerCase().replace(/\s+/g, ''))}.com`,
+        body,
+      });
+      setForecastData(null);
+    } finally {
+      setForecasting(false);
+    }
+  };
 
   const deleteSelected = () => {
     if (!someChecked) return;
@@ -943,6 +1038,16 @@ export function TracksheetGrid() {
         <div className="fv-tracksheet__actions">
           <button
             type="button"
+            className="fv-tracksheet__action fv-tracksheet__action--forecast"
+            onClick={sendForecast}
+            disabled={forecasting || !activeRoute}
+            title={activeRoute ? 'Generate weather forecast email for vessel' : 'No active route — plot a route first'}
+          >
+            <i className={`fas ${forecasting ? 'fa-spinner fa-spin' : 'fa-cloud-sun'}`} aria-hidden="true" />{' '}
+            {forecasting ? 'Fetching…' : 'Forecast'}
+          </button>
+          <button
+            type="button"
             className="fv-tracksheet__action"
             onClick={validateSelected}
             disabled={validating}
@@ -1141,6 +1246,48 @@ export function TracksheetGrid() {
         </tbody>
       </table>
       </div>
+
+      {/* Weather forecast modal */}
+      {forecastData && (
+        <div className="fv-tracksheet__forecast-backdrop" onClick={() => setForecastData(null)}>
+          <div className="fv-tracksheet__forecast-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="fv-tracksheet__forecast-head">
+              <span><i className="fas fa-cloud-sun" /> Weather Forecast — {vesselName}</span>
+              <span className="fv-tracksheet__forecast-route">{routeLabel}</span>
+              <button type="button" className="fv-tracksheet__forecast-close" onClick={() => setForecastData(null)}>
+                <i className="fas fa-xmark" />
+              </button>
+            </div>
+            <div className="fv-tracksheet__forecast-body">
+              <p className="fv-tracksheet__forecast-note">
+                <i className="fas fa-circle-info" /> Forecast sent to vessel. Showing weather outlook along {forecastData.length} waypoints of the active route.
+              </p>
+              <table className="fv-tracksheet__forecast-table">
+                <thead>
+                  <tr>
+                    <th>Waypoint</th>
+                    <th>Lat / Lng</th>
+                    <th>ETA (UTC)</th>
+                    <th>Wind Speed</th>
+                    <th>Wave Height</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {forecastData.map((wp, i) => (
+                    <tr key={i}>
+                      <td>{wp.label}</td>
+                      <td>{wp.lat.toFixed(2)}° / {wp.lng.toFixed(2)}°</td>
+                      <td>{wp.time}</td>
+                      <td>{wp.windSpd}</td>
+                      <td>{wp.wavHt}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

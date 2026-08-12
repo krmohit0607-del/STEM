@@ -302,6 +302,7 @@ function RailIcon({ icon, label, active, badge, onClick }: { icon: string; label
     <button type="button" className={`fv-bk__rail-icon${active ? ' fv-bk__rail-icon--active' : ''}`} onClick={onClick} title={label} aria-label={label}>
       <i className={`fas ${icon}`} aria-hidden="true" />
       {badge != null && badge > 0 && <span className="fv-bk__rail-badge">{badge}</span>}
+      <span className="fv-bk__rail-icon-label">{label}</span>
     </button>
   );
 }
@@ -920,7 +921,7 @@ export function BunkerManagementPage({ mode }: { mode?: 'create' } = {}) {
   const selectedId = createMode ? null : (useSelectedBunkerId() ?? null);
   const [tab, setTab] = useState<WsTab>('order');
   const [compareId, setCompareId] = useState<string | null>(null);
-  const [rail, setRail] = useState<RailPanel>('notif');
+  const [rail, setRail] = useState<RailPanel>(null);
   const [newOpen, setNewOpen] = useState(false);
 
   useEffect(() => {

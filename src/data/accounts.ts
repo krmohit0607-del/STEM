@@ -11,7 +11,28 @@ import { useSyncExternalStore } from 'react';
  */
 
 export type TxnKind = 'Payable' | 'Receivable';
-export type TxnStatus = 'Approval Pending' | 'Due' | 'Scheduled' | 'On Hold' | 'Paid' | 'Received' | 'Cancelled';
+export type TxnStatus =
+  | 'Draft'
+  | 'Submitted'
+  | 'Accounts Review'
+  | 'Pending Approval'
+  | 'Approved'
+  | 'Scheduled'
+  | 'Payment Executed'
+  | 'Bank Confirmation'
+  | 'Reconciled'
+  | 'Closed'
+  | 'Rejected'
+  | 'On Hold'
+  | 'Cancelled'
+  | 'Partially Paid'
+  | 'Payment Failed'
+  // Legacy seed statuses kept for backward compat
+  | 'Due'
+  | 'Overdue'
+  | 'Paid'
+  | 'Received'
+  | 'Approval Pending';
 export type Approval = 'Auto' | 'Pending' | 'Approved' | 'Rejected';
 export type Priority = 'High' | 'Medium' | 'Low';
 
@@ -69,6 +90,7 @@ export interface FinTxn {
   method?: string;
   paymentDate?: string;
   paymentRef?: string;
+  swiftDocUrl?: string;
   remarks?: string;
   audit: AuditEntry[];
 }
@@ -81,9 +103,10 @@ export function daysUntil(iso: string): number {
   if (Number.isNaN(d.getTime())) return 0;
   return Math.round((d.getTime() - ACCT_NOW.getTime()) / 86_400_000);
 }
-/** Overdue = an unpaid payable/receivable whose due date has passed. */
+/** Overdue = an unpaid item whose due date has passed. */
 export function isOverdue(t: FinTxn): boolean {
-  return (t.status === 'Due' || t.status === 'Scheduled' || t.status === 'On Hold') && daysUntil(t.dueIso) < 0;
+  const active = new Set<TxnStatus>(['Draft','Submitted','Accounts Review','Pending Approval','Approval Pending','Approved','Scheduled','Due','Overdue','On Hold','Partially Paid']);
+  return active.has(t.status) && daysUntil(t.dueIso) < 0;
 }
 export function stamp(): string {
   const d = new Date();
@@ -91,6 +114,45 @@ export function stamp(): string {
   const p = (x: number) => String(x).padStart(2, '0');
   return `${p(d.getDate())} ${mon} ${d.getFullYear()}, ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+
+/** Valid next statuses from a given status — enforces the workflow. */
+const STATUS_FLOW: Partial<Record<TxnStatus, TxnStatus[]>> = {
+  Draft:                ['Submitted', 'Cancelled'],
+  Submitted:            ['Accounts Review', 'Rejected', 'On Hold', 'Cancelled'],
+  'Accounts Review':    ['Pending Approval', 'Rejected', 'On Hold', 'Cancelled'],
+  'Pending Approval':   ['Approved', 'Rejected', 'On Hold', 'Cancelled'],
+  'Approval Pending':   ['Approved', 'Rejected', 'On Hold', 'Cancelled'],
+  Approved:             ['Scheduled', 'On Hold', 'Cancelled'],
+  Scheduled:            ['Payment Executed', 'On Hold', 'Cancelled'],
+  Due:                  ['Payment Executed', 'Scheduled', 'Partially Paid', 'On Hold', 'Cancelled'],
+  Overdue:              ['Payment Executed', 'Scheduled', 'Partially Paid', 'On Hold', 'Cancelled'],
+  'Payment Executed':   ['Bank Confirmation', 'Payment Failed', 'Partially Paid'],
+  Paid:                 ['Reconciled'],
+  Received:             ['Reconciled'],
+  'Bank Confirmation':  ['Reconciled', 'Payment Failed'],
+  Reconciled:           ['Closed'],
+  Rejected:             ['Submitted', 'Cancelled'],
+  'On Hold':            ['Submitted', 'Accounts Review', 'Cancelled'],
+  'Partially Paid':     ['Payment Executed', 'On Hold', 'Cancelled'],
+  'Payment Failed':     ['Scheduled', 'On Hold', 'Cancelled'],
+  Closed:               [],
+  Cancelled:            [],
+};
+export function getValidTransitions(status: TxnStatus): TxnStatus[] {
+  return STATUS_FLOW[status] ?? [];
+}
+
+/** Status tone for pill colouring. */
+export const STATUS_TONES: Record<TxnStatus, string> = {
+  Draft: 'grey', Submitted: 'blue', 'Accounts Review': 'blue',
+  'Pending Approval': 'purple', 'Approval Pending': 'purple',
+  Approved: 'green', Scheduled: 'blue',
+  'Payment Executed': 'green', 'Bank Confirmation': 'green',
+  Reconciled: 'green', Closed: 'grey',
+  Rejected: 'red', 'On Hold': 'grey', Cancelled: 'grey',
+  'Partially Paid': 'amber', 'Payment Failed': 'red',
+  Due: 'amber', Overdue: 'red', Paid: 'green', Received: 'green',
+};
 
 /* ------------------------------------------------------------ mock ledger */
 
@@ -170,6 +232,20 @@ function seed(): FinTxn[] {
 /* ---------------------------------------------------------------- store */
 
 let txns: FinTxn[] = seed();
+
+/** Auto-promote 'Due' transactions past their due date to 'Overdue'. Only affects 'Due' status. */
+function autoMarkOverdue(): void {
+  txns = txns.map((t) => {
+    if (t.status === 'Due' && daysUntil(t.dueIso) < 0) {
+      return { ...t, status: 'Overdue' as TxnStatus };
+    }
+    return t;
+  });
+}
+
+// Run once at module load so seed data is immediately up to date
+autoMarkOverdue();
+
 const listeners = new Set<() => void>();
 function emit(): void {
   listeners.forEach((l) => l());
@@ -272,6 +348,57 @@ export function addPayable(p: PayableInput): void {
   emit();
 }
 
+export interface ReceivableInput {
+  reference: string;
+  vessel: string;
+  voyage?: string;
+  counterparty: string;
+  invoiceNo: string;
+  amount: number;
+  currency?: string;
+  invoiceDate?: string;
+  dueDate?: string;
+  dueIso?: string;
+  module?: string;
+  category?: TxnCategory;
+  remarks?: string;
+}
+
+/** Called by other modules (e.g. Operations, Chartering) to raise a receivable into Accounts. */
+export function addReceivable(p: ReceivableInput): void {
+  if (txns.some((x) => x.invoiceNo === p.invoiceNo)) return;
+  const at = stamp();
+  const txn: FinTxn = {
+    id: `TXN-${p.invoiceNo}`,
+    kind: 'Receivable',
+    category: p.category ?? 'Freight',
+    module: p.module ?? 'Operations',
+    company: 'ODAS Shipping Ltd',
+    vessel: p.vessel,
+    voyage: p.voyage ?? '',
+    reference: p.reference,
+    fixture: p.reference.replace('VOY', 'FIX'),
+    counterparty: p.counterparty,
+    invoiceNo: p.invoiceNo,
+    currency: p.currency ?? 'USD',
+    amount: p.amount,
+    exchangeRate: 1,
+    invoiceDate: p.invoiceDate ?? at,
+    dueDate: p.dueDate ?? '—',
+    dueIso: p.dueIso ?? '',
+    status: 'Due',
+    approval: 'Approved',
+    priority: 'Medium',
+    pic: 'A. Nair',
+    bank: 'HSBC — USD Operating',
+    method: 'TT',
+    remarks: p.remarks,
+    audit: [{ at, user: p.module ?? 'Operations', action: `Receivable received from ${p.module ?? 'Operations'} module` }],
+  };
+  txns = [txn, ...txns];
+  emit();
+}
+
 export function findTxnByInvoice(invoiceNo: string): FinTxn | undefined {
   return txns.find((x) => x.invoiceNo === invoiceNo);
 }
@@ -349,4 +476,43 @@ function subVessel(listener: () => void): () => void {
 }
 export function useSelectedAccountVessel(): string | undefined {
   return useSyncExternalStore(subVessel, getSelectedAccountVessel, getSelectedAccountVessel);
+}
+
+/* --------------------------------------------------- live accounts alerts */
+
+export interface AccountAlert {
+  id: string;
+  icon: string;
+  tone: 'red' | 'amber' | 'blue' | 'purple';
+  text: string;
+  sub: string;
+  txnId?: string;
+}
+
+/** Derives priority alerts from the live ledger — consumed by TopNav. */
+export function computeAccountAlerts(all: FinTxn[]): AccountAlert[] {
+  const out: AccountAlert[] = [];
+  const overdue = all.filter(isOverdue);
+  if (overdue.length > 0) {
+    const total = overdue.reduce((s, t) => s + t.amount, 0);
+    out.push({ id: 'acct-overdue', icon: 'fa-triangle-exclamation', tone: 'red', text: `${overdue.length} overdue invoice${overdue.length > 1 ? 's' : ''}`, sub: `USD ${(total / 1_000).toFixed(0)}K outstanding · Accounts` });
+  }
+  const dueToday = all.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.status !== 'Cancelled' && daysUntil(t.dueIso) === 0);
+  if (dueToday.length > 0) {
+    out.push({ id: 'acct-due-today', icon: 'fa-clock', tone: 'amber', text: `${dueToday.length} payment${dueToday.length > 1 ? 's' : ''} due today`, sub: `USD ${(dueToday.reduce((s,t)=>s+t.amount,0)/1_000).toFixed(0)}K to pay · Accounts` });
+  }
+  const pending = all.filter((t) => t.approval === 'Pending' && t.status !== 'Paid' && t.status !== 'Received' && t.status !== 'Cancelled');
+  if (pending.length > 0) {
+    out.push({ id: 'acct-approval', icon: 'fa-user-clock', tone: 'purple', text: `${pending.length} invoice${pending.length > 1 ? 's' : ''} awaiting approval`, sub: `USD ${(pending.reduce((s,t)=>s+t.amount,0)/1_000).toFixed(0)}K pending · Accounts` });
+  }
+  const dueTomorrow = all.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.status !== 'Cancelled' && daysUntil(t.dueIso) === 1);
+  if (dueTomorrow.length > 0) {
+    out.push({ id: 'acct-due-tmr', icon: 'fa-calendar-day', tone: 'blue', text: `${dueTomorrow.length} payment${dueTomorrow.length > 1 ? 's' : ''} due tomorrow`, sub: `USD ${(dueTomorrow.reduce((s,t)=>s+t.amount,0)/1_000).toFixed(0)}K · Accounts` });
+  }
+  return out;
+}
+
+export function useAccountAlerts(): AccountAlert[] {
+  const all = useAccountTxns();
+  return computeAccountAlerts(all);
 }

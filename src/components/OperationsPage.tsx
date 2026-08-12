@@ -6,8 +6,10 @@ import { useSelectedVoyage, writeSelectedVoyageId } from '../data/selectedVoyage
 import type { Voyage } from '../data/voyages';
 import { makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { addNotification, copyLaytimeToPostfix, useCpdds, useFixtureNumbers } from '../data/workflow';
+import { getWorkflowConfig } from '../data/workflowConfig';
 import { loadClients, saveClients, SERVICE_PROVIDER_TYPES } from '../data/clients';
 import { addBunkerRequirement } from '../data/bunker';
+import { addPayable, addReceivable } from '../data/accounts';
 import { useWorldPorts, type WorldPort } from '../data/ports';
 import { loadVessels, saveVessels } from '../data/vessels';
 import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
@@ -1507,7 +1509,7 @@ function Card({ title, icon, right, children, wide, span2, span3 }: { title: str
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'details', label: 'Voyage Details', icon: 'fa-clipboard-list' },
   { id: 'pnl', label: 'Live P&L', icon: 'fa-sack-dollar' },
-  { id: 'etarob', label: "ETA & ROB's", icon: 'fa-gauge-high' },
+  { id: 'etarob', label: "ETA & Bunker", icon: 'fa-gauge-high' },
   { id: 'stowage', label: 'Cargo & Stowage', icon: 'fa-boxes-stacked' },
   { id: 'hire', label: 'Hire & Claims', icon: 'fa-money-bill-wave' },
   { id: 'freight', label: 'Freight & Laytime', icon: 'fa-file-invoice-dollar' },
@@ -3189,23 +3191,43 @@ interface BunkerReqPort { port: string; eta: string; laycanStart: string; laycan
 function BunkerRequestModal({ recap, voyage, ports, onClose }: {
   recap: Recap; voyage: Voyage; ports: BunkerReqPort[]; onClose: () => void;
 }) {
-  const defIdx = Math.max(0, ports.findIndex((o) => o.supV + o.supM > 0));
-  const base = ports[defIdx] ?? { port: recap.dischargePort, eta: '', laycanStart: '', laycanEnd: '', supV: 0, supM: 0 };
+  // Pre-populate ALL ports that have supply values; fall back to first port if none.
+  const supplyPorts = ports.filter((o) => o.supV + o.supM > 0);
+  const initPorts = supplyPorts.length > 0 ? supplyPorts : [ports[0] ?? { port: recap.dischargePort, eta: '', laycanStart: '', laycanEnd: '', supV: 0, supM: 0 }];
 
   // Each entry is one port with its own fuel lines.
   const [portEntries, setPortEntries] = useState<Array<{
     port: string; eta: string; laycanStart: string; laycanEnd: string;
     lines: { fuel: string; qty: string }[];
-  }>>([{
-    port: base.port, eta: base.eta, laycanStart: base.laycanStart, laycanEnd: base.laycanEnd,
+  }>>(initPorts.map((o) => ({
+    port: o.port, eta: o.eta, laycanStart: o.laycanStart, laycanEnd: o.laycanEnd,
     lines: [
-      { fuel: 'VLSFO', qty: base.supV ? String(base.supV) : '' },
-      { fuel: 'LSMGO', qty: base.supM ? String(base.supM) : '' },
+      { fuel: 'VLSFO', qty: o.supV ? String(o.supV) : '' },
+      { fuel: 'LSMGO', qty: o.supM ? String(o.supM) : '' },
     ],
-  }]);
+  })));
   const [note, setNote] = useState('');
   const [done, setDone] = useState(false);
   const [doneIds, setDoneIds] = useState<string[]>([]);
+
+  // Convert dd-mm-yyyy HH:MM ↔ datetime-local value (yyyy-MM-ddTHH:mm).
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const dmyToDatetimeLocal = (s: string) => {
+    const d = parseDMY(s);
+    if (!d) return '';
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  };
+  const datetimeLocalToDmy = (s: string) => {
+    if (!s) return '';
+    const [datePart, timePart = '00:00'] = s.split('T');
+    const [y, mo, dd] = datePart.split('-');
+    return `${dd}-${mo}-${y} ${timePart}`;
+  };
+  const dateInputToDmy = (s: string) => {
+    if (!s) return '';
+    const [y, mo, dd] = s.split('-');
+    return `${dd}-${mo}-${y}`;
+  };
 
   const applyPort = (entryIdx: number, portIdx: number) => {
     const o = ports[portIdx];
@@ -3285,9 +3307,9 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
                       </select>
                     </label>
                     <label className="fv-ops__vd-field"><span>Port (edit)</span><input className="fv-ops__vd-in" value={entry.port} onChange={(e) => setEntryField(ei, { port: e.target.value })} /></label>
-                    <label className="fv-ops__vd-field"><span>ETA at Port</span><input className="fv-ops__vd-in" value={entry.eta} onChange={(e) => setEntryField(ei, { eta: e.target.value })} placeholder="dd-mm-yyyy HH:MM" /></label>
-                    <label className="fv-ops__vd-field"><span>Laycan Start</span><input className="fv-ops__vd-in" value={entry.laycanStart} onChange={(e) => setEntryField(ei, { laycanStart: e.target.value })} placeholder="dd-mm-yyyy" /></label>
-                    <label className="fv-ops__vd-field"><span>Laycan End</span><input className="fv-ops__vd-in" value={entry.laycanEnd} onChange={(e) => setEntryField(ei, { laycanEnd: e.target.value })} placeholder="dd-mm-yyyy" /></label>
+                    <label className="fv-ops__vd-field"><span>ETA at Port</span><input type="datetime-local" className="fv-ops__vd-in fv-ops__vd-in--dt" value={dmyToDatetimeLocal(entry.eta)} onChange={(e) => setEntryField(ei, { eta: datetimeLocalToDmy(e.target.value) })} /></label>
+                    <label className="fv-ops__vd-field"><span>Laycan Start</span><input type="datetime-local" className="fv-ops__vd-in fv-ops__vd-in--dt" value={dmyToDatetimeLocal(entry.laycanStart)} onChange={(e) => setEntryField(ei, { laycanStart: dateInputToDmy(e.target.value.split('T')[0]) })} /></label>
+                    <label className="fv-ops__vd-field"><span>Laycan End</span><input type="datetime-local" className="fv-ops__vd-in fv-ops__vd-in--dt" value={dmyToDatetimeLocal(entry.laycanEnd)} onChange={(e) => setEntryField(ei, { laycanEnd: dateInputToDmy(e.target.value.split('T')[0]) })} /></label>
                   </div>
                   <div className="fv-ops__vd-sub-head fv-ops__bnkreq-fuelhd"><i className="fas fa-gas-pump" aria-hidden="true" /> Fuel &amp; Quantity
                     <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={() => addLine(ei)}><i className="fas fa-plus" aria-hidden="true" /> Fuel</button>
@@ -4186,8 +4208,23 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
   const charterTotalOnHireDays = charterRows.reduce((s, r) => s + r.onHire, 0);
   const charterTotalOffHireDays = charterRows.reduce((s, r) => s + r.offHire, 0);
 
-  // Workflow transitions per installment.
-  const advance = (key: string, to: HireStatus) => setState(key, { status: to });
+  // Workflow transitions per installment — push to Accounts when sent for approval.
+  const advance = (key: string, to: HireStatus) => {
+    setState(key, { status: to });
+    if (to === 'Sent For Approval') {
+      const row = rows.find((r) => r.key === key);
+      if (row) {
+        addPayable({
+          reference: voyage.id, vessel: recap.vesselName, voyage: voyage.id,
+          supplier: recap.owners || 'Owners',
+          invoiceNo: `HIR-${voyage.id}-${key}`,
+          amount: row.amount, currency: recap.hireCurrency || 'USD',
+          module: 'Operations', category: 'Hire',
+        });
+        addNotification(`Hire payment ${row.name} for ${recap.vesselName} sent to Accounts.`, 'Accounts');
+      }
+    }
+  };
   const setHireName = (key: string, name: string) => setState(key, { name: name.trim() || undefined });
   const [soaRow, setSoaRow] = useState<number | null>(null);
   const [editNameKey, setEditNameKey] = useState<string | null>(null);
@@ -4273,7 +4310,7 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
       table{border-collapse:collapse;width:100%;margin:8px 0}
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>Hire Payment Schedule — ${sel.length} installment${sel.length > 1 ? 's' : ''}</h1>
       <p class="sub">${recap.vesselName} · Owners ${recap.owners || '—'} · CP ${recap.cpDate || '—'} · ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()}</p>
       <table><thead><tr><th>Hire</th><th>Account</th><th>From</th><th>To</th><th class="r">On Hire (d)</th><th class="r">Off-Hire (d)</th><th class="r">Amount Payable</th><th>Due Date</th><th>Status</th></tr></thead>
@@ -4332,7 +4369,7 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
       table{border-collapse:collapse;width:100%;margin:8px 0}
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>Charterers Hire Payment Schedule — ${sel.length} installment${sel.length > 1 ? 's' : ''}</h1>
       <p class="sub">${recap.vesselName} · Charterers ${recap.charterers || '—'} · CP ${recap.charterersCpDate || recap.cpDate || '—'} · ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()}</p>
       <table><thead><tr><th>Hire</th><th>Account</th><th>From</th><th>To</th><th class="r">On Hire (d)</th><th class="r">Off-Hire (d)</th><th class="r">Amount Payable</th><th>Due Date</th><th>Status</th></tr></thead>
@@ -5135,7 +5172,7 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right} tfoot td{font-weight:700;background:#f2f2f2}
       .tot{font-size:13px}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>Statement of Account — ${row.name}</h1>
       <p class="sub">${recap.vesselName} · CP ${cpDate} · ${isCharterMode ? 'Charterers' : 'Owners'} ${cpCounterparty} · SOA ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()} · Status ${row.status}</p>
       <p class="sub">On-Hire ${fmtDT(fromD)} → ${fmtDT(toD)} · Days ${fmt(onHire, 2)} · Off-Hire ${fmt(offTotal, 2)} · Nett ${fmt(nett, 2)}</p>
@@ -5496,7 +5533,7 @@ function VoyageCashflowCard({ recap, setRecap }: { recap: Recap; setRecap: Dispa
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right}tfoot td{background:#f2f2f2}
       thead tr:first-child th{background:#f7caa5;text-align:center}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <p class="sub">${esc(recap.vesselName)} · Owners ${esc(recap.owners)} · CP ${esc(recap.cpDate || '—')}</p>
       <table><thead>${headHtml}</thead><tbody>${bodyHtml()}</tbody><tfoot>${footHtml}</tfoot></table>
       <p class="sub">*Estimated · E&amp;OE.</p></body></html>`);
@@ -5881,6 +5918,23 @@ function laytimePdfSection(port: LaytimePort, recap: Recap): string {
 }
 
 /** Open a print window wrapping the given HTML sections in a standard stylesheet. */
+/** Returns an HTML block with the company logo, name, and address for PDF document headers. */
+function pdfCompanyHeader(): string {
+  const cfg = getWorkflowConfig();
+  if (!cfg.companyName && !cfg.companyAddress && !cfg.companyLogoDataUrl) return '';
+  const logo = cfg.companyLogoDataUrl
+    ? `<img src="${cfg.companyLogoDataUrl}" style="max-height:60px;max-width:220px;object-fit:contain;display:block" alt="${cfg.companyName}" />`
+    : '';
+  const name = cfg.companyName ? `<div style="font-size:14px;font-weight:700;color:#111;margin-bottom:3px">${cfg.companyName}</div>` : '';
+  const addr = cfg.companyAddress
+    ? `<div style="font-size:11px;color:#555;white-space:pre-line;text-align:right">${cfg.companyAddress}</div>`
+    : '';
+  return `<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #111;padding-bottom:10px;margin-bottom:14px">
+    <div>${logo}</div>
+    <div style="text-align:right">${name}${addr}</div>
+  </div>`;
+}
+
 function printSections(title: string, sections: string): void {
   const w = window.open('', '_blank', 'width=1000,height=1100');
   if (!w) return;
@@ -5892,7 +5946,7 @@ function printSections(title: string, sections: string): void {
     th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}.tot{font-size:13px}
     .meta{margin:0 0 12px;font-size:11px}.meta span{display:inline-block;min-width:130px;color:#555}
     section{page-break-after:always}section:last-child{page-break-after:auto}
-  </style></head><body>${sections}<p class="sub">*E&amp;OE.</p></body></html>`);
+  </style></head><body>${pdfCompanyHeader()}${sections}<p class="sub">*E&amp;OE.</p></body></html>`);
   w.document.close();
   w.focus();
   w.print();
@@ -6011,7 +6065,7 @@ export function EuaCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<
       table{border-collapse:collapse;width:100%;margin:4px 0}
       th,td{border:1px solid #bbb;padding:3px 6px;text-align:left}
       td.r,th.r{text-align:right}tfoot td{background:#f2f2f2;font-weight:700}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>EU ETS Allowance (EUA) — ${esc(recap.vesselName)}</h1>
       <p class="sub">${esc(recap.loadPort)} → ${esc(recap.dischargePort)} · Surrender phase-in ${esc(view.phaseInPct)}%</p>
       <h2>EUA Calculation</h2>${calcTableHtml()}
@@ -6156,16 +6210,22 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
 
   const [invoiceId, setInvoiceId] = useState<string | null>(null);
   const [laytimeId, setLaytimeId] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedInvoices, setCopiedInvoices] = useState(false);
+  const [copiedLaytime, setCopiedLaytime] = useState(false);
   const [selInvoices, setSelInvoices] = useState<Set<string>>(new Set());
   const [selLaytimes, setSelLaytimes] = useState<Set<string>>(new Set());
   const toggleInv = (id: string) => setSelInvoices((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleLay = (id: string) => setSelLaytimes((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const copyToPostfix = () => {
+  const copyInvoicesToPostfix = () => {
     copyLaytimeToPostfix(voyage.id);
-    addNotification(`Laytime for ${voyage.vessel} (${voyage.id}) copied to Postfix.`, 'Postfix');
-    setCopied(true);
+    addNotification(`Freight invoices for ${voyage.vessel} (${voyage.id}) sent to Postfix.`, 'Postfix');
+    setCopiedInvoices(true);
+  };
+  const copyLaytimeCalcToPostfix = () => {
+    copyLaytimeToPostfix(voyage.id);
+    addNotification(`Laytime calculations for ${voyage.vessel} (${voyage.id}) sent to Postfix.`, 'Postfix');
+    setCopiedLaytime(true);
   };
 
   // --- Invoice list operations ---
@@ -6372,6 +6432,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
             <button type="button" className="fv-ops__btn" onClick={duplicateSelInvoices} disabled={selInvoices.size === 0} title="Duplicate selected invoices"><i className="fas fa-copy" aria-hidden="true" /> Duplicate{selInvoices.size > 0 ? ` (${selInvoices.size})` : ''}</button>
             <button type="button" className="fv-ops__btn" onClick={pdfSelInvoices} disabled={selInvoices.size === 0} title="Generate PDF of selected invoices"><i className="fas fa-file-pdf" aria-hidden="true" /> PDF{selInvoices.size > 0 ? ` (${selInvoices.size})` : ''}</button>
             <button type="button" className="fv-ops__btn" onClick={deleteSelInvoices} disabled={selInvoices.size === 0} title="Delete selected invoices"><i className="fas fa-trash" aria-hidden="true" /> Delete{selInvoices.size > 0 ? ` (${selInvoices.size})` : ''}</button>
+            <button type="button" className={`fv-ops__btn${copiedInvoices ? '' : ' fv-ops__btn--primary'}`} onClick={copyInvoicesToPostfix} disabled={copiedInvoices} title="Send freight invoices to Postfix department"><i className={`fas ${copiedInvoices ? 'fa-circle-check' : 'fa-share-from-square'}`} aria-hidden="true" /> {copiedInvoices ? 'Sent to Postfix' : 'Copy to Postfix'}</button>
           </span>
         }>
         <table className="fv-ops__table">
@@ -6421,6 +6482,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
             <button type="button" className="fv-ops__btn" onClick={duplicateSelLaytimes} disabled={selLaytimes.size === 0} title="Duplicate selected laytime calculations"><i className="fas fa-copy" aria-hidden="true" /> Duplicate{selLaytimes.size > 0 ? ` (${selLaytimes.size})` : ''}</button>
             <button type="button" className="fv-ops__btn" onClick={pdfSelLaytimes} disabled={selLaytimes.size === 0} title="Generate PDF of selected laytime calculations"><i className="fas fa-file-pdf" aria-hidden="true" /> PDF{selLaytimes.size > 0 ? ` (${selLaytimes.size})` : ''}</button>
             <button type="button" className="fv-ops__btn" onClick={deleteSelLaytimes} disabled={selLaytimes.size === 0} title="Delete selected laytime calculations"><i className="fas fa-trash" aria-hidden="true" /> Delete{selLaytimes.size > 0 ? ` (${selLaytimes.size})` : ''}</button>
+            <button type="button" className={`fv-ops__btn${copiedLaytime ? '' : ' fv-ops__btn--primary'}`} onClick={copyLaytimeCalcToPostfix} disabled={copiedLaytime} title="Send laytime calculations to Postfix department"><i className={`fas ${copiedLaytime ? 'fa-circle-check' : 'fa-share-from-square'}`} aria-hidden="true" /> {copiedLaytime ? 'Sent to Postfix' : 'Copy to Postfix'}</button>
           </span>
         }>
         <table className="fv-ops__table">
@@ -6616,12 +6678,6 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
         </div>
       </Card>}
 
-      {(section === 'all' || section === 'freight') && hasVoyageLeg && <div className="fv-ops__laytime-actions">
-        <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={copyToPostfix} disabled={copied}>
-          <i className={`fas ${copied ? 'fa-circle-check' : 'fa-share-from-square'}`} aria-hidden="true" />{' '}
-          {copied ? 'Copied to Postfix' : 'Copy Laytime to Postfix'}
-        </button>
-      </div>}
     </div>
 
     {hasVoyageLeg && openInvoice && (
@@ -7029,7 +7085,23 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
   const today = new Date();
   const p2 = (n: number) => String(n).padStart(2, '0');
 
-  const save = () => { onSave(draft); setEditing(false); };
+  const save = () => {
+    onSave(draft);
+    setEditing(false);
+    // Push finalised freight invoices to Accounts as Receivables.
+    if (draft.status === 'Final' || draft.status === 'Sent') {
+      const { total: amt } = calcInvoice(draft, recap, laytimes, claims);
+      addReceivable({
+        reference: voyage.id, vessel: recap.vesselName, voyage: voyage.id,
+        counterparty: draft.invoiceTo || recap.charterers || 'Charterers',
+        invoiceNo: draft.invoiceNo || `FRE-${voyage.id}`,
+        amount: amt, currency: recap.freightCurrency || 'USD',
+        invoiceDate: draft.invoiceDate, dueDate: draft.dueDate, dueIso: '',
+        module: 'Operations', category: 'Freight',
+      });
+      addNotification(`Freight invoice ${draft.invoiceNo} for ${recap.vesselName} sent to Accounts.`, 'Accounts');
+    }
+  };
   const discard = () => { setDraft(inv); setEditing(false); };
 
   const inp = (val: string, on: (v: string) => void, w?: number, ph?: string) => (
@@ -7057,7 +7129,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}.tot{font-size:13px}
       .meta{margin:0 0 12px;font-size:11px}.meta span{display:inline-block;min-width:130px;color:#555}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>${view.kind === 'Freight' ? `${view.freightType} Freight Invoice` : view.title}</h1>
       <p class="sub">${recap.vesselName} · IMO ${voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
       <div class="meta">
@@ -7253,7 +7325,7 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}
       .meta{margin:0 0 12px;font-size:11px}.meta span{display:inline-block;min-width:150px;color:#555}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>Laytime Calculation — ${view.name} (${view.op})</h1>
       <p class="sub">${recap.vesselName} · Cargo ${view.cargo} · CP ${recap.cpDate || '—'}</p>
       <div class="meta">
@@ -7509,7 +7581,7 @@ function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
       th,td{border:1px solid #bbb;padding:3px 5px;text-align:left}
       td.r,th.r{text-align:right}thead th{background:#f2f2f2}
       @page{size:landscape}
-    </style></head><body>
+    </style></head><body>${pdfCompanyHeader()}
       <h1>Vessel Reports — ${esc(recap.vesselName)}</h1>
       <p class="sub">Owners ${esc(recap.owners)} · ${esc(recap.loadPort)} → ${esc(recap.dischargePort)} · CP ${esc(recap.cpDate || '—')}</p>
       <table>${tableHtml()}</table>
