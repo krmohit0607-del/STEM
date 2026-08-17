@@ -15511,3 +15511,331 @@ select.fv-voyage__input {
 /* ==========================================================================
    Bunker Management module (.fv-bk)
    ========================================================================== */
+
+/* ==========================================================================
+   Login screen (.odas-login)
+   ========================================================================== */
+.odas-login {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  background: #0b1220;
+  color: #e6edf3;
+  font-family: inherit;
+  overflow: auto;
+  z-index: 1;
+}
+
+/* --- Left hero panel ------------------------------------------------------ */
+.odas-login__hero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 56px 60px;
+  background-image:
+    linear-gradient(120deg, rgba(6, 14, 28, 0.86) 0%, rgba(9, 24, 48, 0.72) 55%, rgba(12, 34, 66, 0.55) 100%),
+    url('https://images.unsplash.com/photo-1494412574643-ff11b0a5c1c3?auto=format&fit=crop&w=1600&q=80');
+  background-size: cover;
+  background-position: center;
+  color: #fff;
+  min-height: 100vh;
+}
+
+.odas-login__hero-overlay {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(1200px 600px at 20% 0%, rgba(31, 111, 235, 0.18), transparent 60%);
+  pointer-events: none;
+}
+
+.odas-login__hero-content {
+  position: relative;
+  max-width: 520px;
+}
+
+.odas-login__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  color: #58a6ff;
+}
+.odas-login__brand i {
+  font-size: 24px;
+}
+.odas-login__brand--compact {
+  font-size: 20px;
+  letter-spacing: 2px;
+  margin-bottom: 22px;
+}
+
+.odas-login__headline {
+  margin: 26px 0 14px;
+  font-size: 34px;
+  line-height: 1.15;
+  font-weight: 700;
+  color: #fff;
+}
+
+.odas-login__tagline {
+  margin: 0 0 34px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #c4d0e0;
+  max-width: 460px;
+}
+
+.odas-login__highlights {
+  list-style: none;
+  margin: 0 0 36px;
+  padding: 0;
+  display: grid;
+  gap: 18px;
+}
+.odas-login__highlight {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.odas-login__highlight strong {
+  display: block;
+  font-size: 15px;
+  color: #fff;
+  margin-bottom: 2px;
+}
+.odas-login__highlight-text {
+  display: block;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #a9b7ca;
+}
+.odas-login__highlight-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: rgba(88, 166, 255, 0.16);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  color: #7cc0ff;
+  font-size: 16px;
+}
+
+.odas-login__stats {
+  display: flex;
+  gap: 34px;
+  padding-top: 26px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.odas-login__stat {
+  display: flex;
+  flex-direction: column;
+}
+.odas-login__stat-value {
+  font-size: 24px;
+  font-weight: 800;
+  color: #fff;
+}
+.odas-login__stat-label {
+  font-size: 12px;
+  color: #9fb0c5;
+  letter-spacing: 0.4px;
+}
+
+/* --- Right form panel ----------------------------------------------------- */
+.odas-login__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 40px;
+  background: #0d1626;
+  min-height: 100vh;
+}
+
+.odas-login__card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+}
+
+.odas-login__title {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #fff;
+}
+.odas-login__subtitle {
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #8b98ad;
+}
+
+.odas-login__error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(180, 35, 24, 0.14);
+  border: 1px solid rgba(240, 68, 56, 0.4);
+  color: #ff9f9f;
+  font-size: 13px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+
+.odas-login__field {
+  display: block;
+  margin-bottom: 16px;
+}
+.odas-login__label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #c4d0e0;
+  margin-bottom: 7px;
+  letter-spacing: 0.3px;
+}
+.odas-login__input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #0b1220;
+  border: 1px solid #2a3447;
+  border-radius: 8px;
+  padding: 0 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.odas-login__input-wrap:focus-within {
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.25);
+}
+.odas-login__input-wrap i {
+  color: #6e7f96;
+  font-size: 13px;
+}
+.odas-login__input-wrap input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e6edf3;
+  font-size: 14px;
+  padding: 11px 0;
+}
+.odas-login__input-wrap input::placeholder {
+  color: #5a697e;
+}
+
+.odas-login__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0 22px;
+}
+.odas-login__remember {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #b6c2d3;
+  cursor: pointer;
+}
+.odas-login__remember input {
+  accent-color: #1f6feb;
+  width: 15px;
+  height: 15px;
+}
+
+.odas-login__link {
+  color: #58a6ff;
+  font-size: 13px;
+  text-decoration: none;
+}
+.odas-login__link:hover {
+  text-decoration: underline;
+}
+
+.odas-login__submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+  background: #1f6feb;
+  border: 1px solid #1f6feb;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+.odas-login__submit:hover {
+  background: #388bfd;
+}
+.odas-login__submit:active {
+  transform: translateY(1px);
+}
+
+.odas-login__foot {
+  margin: 20px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #8b98ad;
+  text-align: center;
+}
+
+.odas-login__legal {
+  margin: 0;
+  font-size: 11.5px;
+  color: #5a697e;
+}
+
+/* --- Responsive ----------------------------------------------------------- */
+@media (max-width: 900px) {
+  .odas-login {
+    grid-template-columns: 1fr;
+  }
+  .odas-login__hero {
+    display: none;
+  }
+  .odas-login__panel {
+    min-height: 100vh;
+  }
+}
+
+/* --- Light theme ---------------------------------------------------------- */
+.fv-light .odas-login {
+  background: #eef2f8;
+  color: #1b2430;
+}
+.fv-light .odas-login__panel {
+  background: #ffffff;
+}
+.fv-light .odas-login__title {
+  color: #0d1424;
+}
+.fv-light .odas-login__label {
+  color: #3a4658;
+}
+.fv-light .odas-login__input-wrap {
+  background: #f4f6fb;
+  border-color: #d7dde8;
+}
+.fv-light .odas-login__input-wrap input {
+  color: #1b2430;
+}
+.fv-light .odas-login__foot,
+.fv-light .odas-login__subtitle {
+  color: #5b6675;
+}

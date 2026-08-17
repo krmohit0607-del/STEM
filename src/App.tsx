@@ -5,6 +5,7 @@ import { FleetViewProvider } from './context/FleetViewContext';
 import { LocalizationProvider } from './i18n/LocalizationProvider';
 import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { LoginPage } from './components/LoginPage';
 import { FleetListPage } from './components/FleetListPage';
 import { InterimDashboardPage } from './components/InterimDashboardPage';
 import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
@@ -37,11 +38,23 @@ import { PerformanceReportPage } from './components/PerformanceReportPage';
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
 import { PageShell } from './components/PageShell';
 
+/** True once the user has signed in on the login screen. */
+function isAuthenticated(): boolean {
+  try {
+    return Boolean(
+      window.localStorage.getItem('odas.auth') || window.sessionStorage.getItem('odas.auth'),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Home route. When opened with `?voyage=<id>` (e.g. from the Fleet
  * List View's clickable Voyage ID link) it shows the live
- * voyage-tracking view. Otherwise it redirects to `/main`, which is
- * the application's startup page.
+ * voyage-tracking view. Otherwise it sends the user to the login
+ * screen (the default landing page) or straight to `/main` once
+ * they are signed in.
  */
 function HomeRoute() {
   const [params] = useSearchParams();
@@ -53,7 +66,7 @@ function HomeRoute() {
       </Layout>
     );
   }
-  return <Navigate to="/main" replace />;
+  return <Navigate to={isAuthenticated() ? '/main' : '/login'} replace />;
 }
 
 export function App() {
@@ -64,6 +77,7 @@ export function App() {
             <RoutedErrorBoundary>
             <Routes>
               <Route path="/" element={<HomeRoute />} />
+              <Route path="/login" element={<LoginPage />} />
               <Route
               path="/main"
               element={
