@@ -12,6 +12,10 @@
 import type { Voyage } from './voyages';
 import { VOYAGES } from './voyages';
 import { ACCOUNT_TYPES, SERVICE_PROVIDER_TYPES, loadClients } from './clients';
+import { getAccountTxns } from './accounts';
+import { getBunkerRequirements } from './bunker';
+import { loadOpsRecap } from './opsRecap';
+import { loadEmissionsDoc } from './emissions';
 
 /**
  * A recipient type kept in a template's To / CC field. One of:
@@ -52,6 +56,40 @@ export interface EmailTemplate {
   subject?: string;
   /** Email body — HTML (rich text). Legacy templates may hold plain text. */
   body: string;
+}
+
+export interface EmailDistributionList {
+  id: string;
+  name: string;
+  recipients: { company: string; email: string }[];
+}
+
+const DISTRIBUTION_LISTS_KEY = 'fv.emailDistributionLists';
+
+export function loadEmailDistributionLists(): EmailDistributionList[] {
+  try {
+    const raw = window.localStorage.getItem(DISTRIBUTION_LISTS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (typeof item !== 'object' || item === null || typeof (item as EmailDistributionList).id !== 'string') return [];
+      const value = item as Partial<EmailDistributionList> & { company?: string; emails?: string[] };
+      if (typeof value.name === 'string' && Array.isArray(value.recipients)) return [{ id: value.id!, name: value.name, recipients: value.recipients.filter((r) => typeof r?.company === 'string' && typeof r?.email === 'string') }];
+      if (typeof value.company === 'string' && Array.isArray(value.emails)) return [{ id: value.id!, name: value.company, recipients: value.emails.filter((email) => typeof email === 'string').map((email) => ({ company: '', email })) }];
+      return [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function saveEmailDistributionLists(lists: EmailDistributionList[]): void {
+  try { window.localStorage.setItem(DISTRIBUTION_LISTS_KEY, JSON.stringify(lists)); } catch { /* ignore */ }
+}
+
+export function newDistributionListId(): string {
+  return `dist-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
 export const EMAIL_TEMPLATE_CATEGORIES = [
@@ -438,11 +476,79 @@ export function newTemplateId(): string {
   return `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+// --- Shared module auto-tokens ----------------------------------------------
+// These fields are available to templates generated from any module. The
+// module prefix in each label keeps similarly named fields distinguishable.
+const MODULE_EMAIL_TOKENS: [string, string][] = [
+  ...[
+    ['{{voyageId}}', 'Voyage: internal ID'], ['{{vesselName}}', 'Operations: vessel name'], ['{{vesselEmail}}', 'Operations: vessel email'],
+    ['{{voyageFixType}}', 'Operations: voyage fix type'], ['{{owners}}', 'Operations: owners'], ['{{cpDate}}', 'Operations: CP date'],
+    ['{{laycanStart}}', 'Operations: laycan start'], ['{{laycanEnd}}', 'Operations: laycan end'], ['{{ownersBroker}}', 'Operations: owners broker'],
+    ['{{hirePerDay}}', 'Operations: hire per day'], ['{{charterers}}', 'Operations: charterers'], ['{{charterersCpDate}}', 'Operations: charterers CP date'],
+    ['{{charterersLaycanStart}}', 'Operations: charterers laycan start'], ['{{charterersLaycanEnd}}', 'Operations: charterers laycan end'], ['{{charterersBroker}}', 'Operations: charterers broker'],
+    ['{{freightPerMt}}', 'Operations: freight per MT'], ['{{demDespatch}}', 'Operations: demurrage / despatch'], ['{{deliveryPort}}', 'Operations: delivery port'],
+    ['{{deliveryDateTime}}', 'Operations: delivery date/time'], ['{{redeliveryPort}}', 'Operations: redelivery port'], ['{{redeliveryDateTime}}', 'Operations: redelivery date/time'],
+    ['{{cargoName}}', 'Operations: cargo name'], ['{{cpQuantity}}', 'Operations: CP quantity'], ['{{finalQtyLoaded}}', 'Operations: final quantity loaded'],
+    ['{{loadPort}}', 'Operations: load port'], ['{{loadRate}}', 'Operations: load rate'], ['{{dischargePort}}', 'Operations: discharge port'],
+    ['{{dischRate}}', 'Operations: discharge rate'], ['{{frtPaymentTerms}}', 'Operations: freight payment terms'], ['{{loiStatus}}', 'Operations: LOI status'],
+    ['{{foCons}}', 'Operations: FO consumption'], ['{{foPrice}}', 'Operations: FO price'], ['{{doCons}}', 'Operations: DO consumption'],
+    ['{{doPrice}}', 'Operations: DO price'], ['{{portDaLoad}}', 'Operations: load port DA'], ['{{portDaDisch}}', 'Operations: discharge port DA'],
+    ['{{otherCost}}', 'Operations: other cost'], ['{{miscIncome}}', 'Operations: miscellaneous income'], ['{{actualSpeed}}', 'Operations: actual speed'],
+    ['{{actualFoPerDay}}', 'Operations: actual FO per day'], ['{{actualDoPerDay}}', 'Operations: actual DO per day'], ['{{charterHirePerDay}}', 'Operations: charter hire per day'],
+    ['{{freightPaymentDays}}', 'Operations: freight payment days'], ['{{freightPaymentBasis}}', 'Operations: freight payment basis'], ['{{bunkerSpecs}}', 'Operations: bunker specifications'], ['{{notes}}', 'Operations: notes'],
+  ] as [string, string][],
+  ...[
+    ['{{accountId}}', 'Accounts: transaction ID'], ['{{accountKind}}', 'Accounts: payable / receivable'], ['{{accountCategory}}', 'Accounts: category'],
+    ['{{accountModule}}', 'Accounts: source module'], ['{{accountCompany}}', 'Accounts: company'], ['{{accountReference}}', 'Accounts: reference'],
+    ['{{counterparty}}', 'Accounts: counterparty'], ['{{invoiceNo}}', 'Accounts: invoice number'], ['{{currency}}', 'Accounts: currency'],
+    ['{{amount}}', 'Accounts: amount'], ['{{exchangeRate}}', 'Accounts: exchange rate'], ['{{invoiceDate}}', 'Accounts: invoice date'],
+    ['{{dueDate}}', 'Accounts: due date'], ['{{accountStatus}}', 'Accounts: payment status'], ['{{approvalStatus}}', 'Accounts: approval status'],
+    ['{{accountPriority}}', 'Accounts: priority'], ['{{bank}}', 'Accounts: bank'], ['{{paymentMethod}}', 'Accounts: payment method'],
+    ['{{paymentDate}}', 'Accounts: payment date'], ['{{paymentReference}}', 'Accounts: payment reference'], ['{{accountRemarks}}', 'Accounts: remarks'],
+  ] as [string, string][],
+  ...[
+    ['{{bunkerId}}', 'Bunker: requirement ID'], ['{{bunkerStatus}}', 'Bunker: requirement status'], ['{{bunkerReference}}', 'Bunker: reference'],
+    ['{{bunkerLeg}}', 'Bunker: leg'], ['{{bunkerRoute}}', 'Bunker: route'], ['{{bunkerPort}}', 'Bunker: bunker port'], ['{{bunkerEta}}', 'Bunker: ETA'],
+    ['{{requiredOn}}', 'Bunker: required on'], ['{{fuelType}}', 'Bunker: fuel type'], ['{{fuelGrade}}', 'Bunker: fuel grade'], ['{{bunkerQuantity}}', 'Bunker: quantity'],
+    ['{{robArrival}}', 'Bunker: ROB on arrival'], ['{{expectedCons}}', 'Bunker: expected consumption'], ['{{supplier}}', 'Bunker: supplier'], ['{{pricePerMt}}', 'Bunker: price per MT'],
+    ['{{totalCost}}', 'Bunker: total cost'], ['{{poNo}}', 'Bunker: purchase order number'], ['{{contractRef}}', 'Bunker: contract reference'], ['{{suppliedQty}}', 'Bunker: supplied quantity'],
+    ['{{deliveredQty}}', 'Bunker: delivered quantity'], ['{{supplyDateTime}}', 'Bunker: supply date/time'], ['{{bunkerInvoiceNo}}', 'Bunker: invoice number'], ['{{bunkerInvoiceAmount}}', 'Bunker: invoice amount'],
+    ['{{paymentTerms}}', 'Bunker: payment terms'], ['{{bunkerDueDate}}', 'Bunker: due date'], ['{{amountPaid}}', 'Bunker: amount paid'], ['{{bunkerPaymentRef}}', 'Bunker: payment reference'],
+    ['{{bunkerPaymentDate}}', 'Bunker: payment date'], ['{{bunkerApprovalStatus}}', 'Bunker: approval status'], ['{{bunkerPaymentStatus}}', 'Bunker: payment status'],
+  ] as [string, string][],
+  ...[
+    ['{{cargoId}}', 'Chartering Cargo Book: cargo ID'], ['{{commodity}}', 'Chartering Cargo Book: commodity'], ['{{cargoType}}', 'Chartering Cargo Book: cargo type'],
+    ['{{cargoQuantity}}', 'Chartering Cargo Book: quantity'], ['{{cargoTolerance}}', 'Chartering Cargo Book: tolerance'], ['{{cargoLoadPort}}', 'Chartering Cargo Book: load port'],
+    ['{{cargoDischargePort}}', 'Chartering Cargo Book: discharge port'], ['{{cargoLoadRate}}', 'Chartering Cargo Book: load rate'], ['{{cargoDischargeRate}}', 'Chartering Cargo Book: discharge rate'],
+    ['{{cargoTerms}}', 'Chartering Cargo Book: terms'], ['{{cargoLaycanStart}}', 'Chartering Cargo Book: laycan start'], ['{{cargoLaycanEnd}}', 'Chartering Cargo Book: laycan end'],
+    ['{{cargoNominationDeadline}}', 'Chartering Cargo Book: nomination deadline'], ['{{cargoStatus}}', 'Chartering Cargo Book: cargo status'], ['{{commercialStatus}}', 'Chartering: commercial status'],
+    ['{{cargoAccount}}', 'Chartering Cargo Book: account'], ['{{cargoRemarks}}', 'Chartering Cargo Book: remarks'], ['{{tonnageId}}', 'Chartering Tonnage Book: tonnage ID'],
+    ['{{tonnageVessel}}', 'Chartering Tonnage Book: vessel'], ['{{tonnageImo}}', 'Chartering Tonnage Book: IMO'], ['{{tonnageVesselType}}', 'Chartering Tonnage Book: vessel type'],
+    ['{{tonnageDwt}}', 'Chartering Tonnage Book: DWT'], ['{{tonnageFlag}}', 'Chartering Tonnage Book: flag'], ['{{openArea}}', 'Chartering Tonnage Book: open area'],
+    ['{{openPort}}', 'Chartering Tonnage Book: open port'], ['{{openDate}}', 'Chartering Tonnage Book: open date'], ['{{earliestOpen}}', 'Chartering Tonnage Book: earliest open'],
+    ['{{latestOpen}}', 'Chartering Tonnage Book: latest open'], ['{{tonnageVoyageType}}', 'Chartering Tonnage Book: voyage type'], ['{{tonnageSource}}', 'Chartering Tonnage Book: source'], ['{{owner}}', 'Chartering Tonnage Book: owner'],
+  ] as [string, string][],
+  ...[
+    ['{{reportId}}', 'Performance: report ID'], ['{{nextPort}}', 'Performance: next port'], ['{{reportType}}', 'Performance: report type'], ['{{reportDate}}', 'Performance: report date'],
+    ['{{reportTime}}', 'Performance: report time'], ['{{reportHours}}', 'Performance: steaming hours'], ['{{latitude}}', 'Performance: latitude'], ['{{longitude}}', 'Performance: longitude'],
+    ['{{vlsfoRob}}', 'Performance: VLSFO ROB'], ['{{vlsfoBunkered}}', 'Performance: VLSFO bunkered'], ['{{lsmgoRob}}', 'Performance: LSMGO ROB'], ['{{lsmgoBunkered}}', 'Performance: LSMGO bunkered'],
+    ['{{distanceReported}}', 'Performance: distance reported'], ['{{distanceObserved}}', 'Performance: distance observed'], ['{{distanceToGo}}', 'Performance: distance to go'],
+    ['{{averageSpeed}}', 'Performance: average speed'], ['{{rpm}}', 'Performance: RPM'], ['{{enginePower}}', 'Performance: engine power'], ['{{slip}}', 'Performance: slip'],
+    ['{{course}}', 'Performance: course'], ['{{cargoAmount}}', 'Performance: cargo amount'], ['{{vesselWeather}}', 'Performance: vessel weather'], ['{{windFactor}}', 'Performance: wind factor'],
+    ['{{waveFactor}}', 'Performance: wave factor'], ['{{currentFactor}}', 'Performance: current factor'], ['{{averageWeatherFactor}}', 'Performance: average weather factor'],
+  ] as [string, string][],
+  ...[
+    ['{{complianceYear}}', 'Emissions: compliance year'], ['{{trade}}', 'Emissions: trade'], ['{{euaPriceEur}}', 'Emissions: EUA price'], ['{{co2AdjustmentT}}', 'Emissions: CO2 adjustment'],
+    ['{{emissionsApprovedBy}}', 'Emissions: approved by'], ['{{emissionsApprovedDate}}', 'Emissions: approved date'], ['{{co2}}', 'Emissions: CO2'], ['{{co2e}}', 'Emissions: CO2e'],
+    ['{{co2PerDay}}', 'Emissions: CO2 per day'], ['{{co2PerNm}}', 'Emissions: CO2 per nautical mile'], ['{{co2PerCargo}}', 'Emissions: CO2 per cargo tonne'],
+    ['{{euasRequired}}', 'Emissions: EUAs required'], ['{{euaBalance}}', 'Emissions: EUA balance'], ['{{carbonCost}}', 'Emissions: carbon cost'], ['{{aer}}', 'Emissions: AER'],
+    ['{{eeoi}}', 'Emissions: EEOI'], ['{{ghgIntensity}}', 'Emissions: GHG intensity'], ['{{fuelEuTarget}}', 'Emissions: FuelEU target'], ['{{complianceBalanceT}}', 'Emissions: compliance balance'], ['{{emissionsStatus}}', 'Emissions: compliance status'],
+  ] as [string, string][],
+];
+
 // --- Voyage auto-tokens ------------------------------------------------------
 // Templates can embed {{token}} placeholders that are replaced with the
-// selected voyage's live data when composing. To add a new token, extend both
-// EMAIL_TOKENS (for the reference list shown to admins) and the map inside
-// applyVoyageTokens below.
+// selected voyage's live data when composing.
 
 /** Reference list of the auto tokens available in template bodies / titles. */
 export const EMAIL_TOKENS: { token: string; label: string }[] = [
@@ -461,7 +567,85 @@ export const EMAIL_TOKENS: { token: string; label: string }[] = [
   { token: '{{etd}}', label: 'ETD' },
   { token: '{{lastNoon}}', label: 'Last noon report time' },
   { token: '{{today}}', label: "Today's date" },
+  { token: '{{priority}}', label: 'Priority' },
+  { token: '{{dueLt}}', label: 'Due LT' },
+  { token: '{{dueUtc}}', label: 'Due UTC' },
+  { token: '{{remaining}}', label: 'Remaining time' },
+  { token: '{{service}}', label: 'Service' },
+  { token: '{{status}}', label: 'Voyage status' },
+  { token: '{{wx}}', label: 'Weather status' },
+  { token: '{{int}}', label: 'Interim status' },
+  { token: '{{eov}}', label: 'End of voyage' },
+  { token: '{{opt}}', label: 'Optimization status' },
+  { token: '{{openTasks}}', label: 'Open tasks' },
+  { token: '{{tags}}', label: 'Voyage tags' },
+  { token: '{{aiAlert}}', label: 'AI alert' },
+  { token: '{{health}}', label: 'Vessel health' },
+  { token: '{{handoverNote}}', label: 'Handover note' },
+  { token: '{{open}}', label: 'Open status' },
+  { token: '{{built}}', label: 'Year built' },
+  { token: '{{loa}}', label: 'Length overall' },
+  { token: '{{beam}}', label: 'Beam' },
+  { token: '{{enginePower}}', label: 'Engine power' },
+  { token: '{{clientEmail}}', label: 'Account email' },
+  { token: '{{price}}', label: 'Freight price' },
+  { token: '{{pricingBasis}}', label: 'Pricing basis' },
+  { token: '{{ecdisModel}}', label: 'ECDIS model' },
+  { token: '{{interimPort}}', label: 'Interim port' },
+  { token: '{{etdDisplay}}', label: 'ETD display' },
+  { token: '{{etdIso}}', label: 'ETD ISO' },
+  { token: '{{routeRef}}', label: 'Route reference' },
+  { token: '{{cpSpeed}}', label: 'CP speed' },
+  { token: '{{cpCons}}', label: 'CP consumption' },
+  { token: '{{instSpeed}}', label: 'Instruction speed' },
+  { token: '{{instCons}}', label: 'Instruction consumption' },
+  { token: '{{costPerDay}}', label: 'Cost per day' },
+  { token: '{{foCost}}', label: 'FO cost' },
+  { token: '{{goCost}}', label: 'GO cost' },
+  { token: '{{euaCost}}', label: 'EUA cost' },
+  { token: '{{seed}}', label: 'Voyage seed' },
+  ...MODULE_EMAIL_TOKENS.map(([token, label]) => ({ token, label })),
 ];
+
+function storedBookRows(key: string): Record<string, unknown>[] {
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === 'object')) : [];
+  } catch {
+    return [];
+  }
+}
+
+function stringRecord(value: Record<string, unknown> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(value ?? {}).map(([key, item]) => [key, String(item ?? '')]));
+}
+
+/** Merge the current voyage's persisted module records into email token data. */
+function moduleTokenValues(voyage: Voyage | undefined): Record<string, string> {
+  if (!voyage) return {};
+  const recap = loadOpsRecap(voyage.id);
+  const emissions = loadEmissionsDoc(voyage.id);
+  const account = getAccountTxns().filter((item) => item.vessel === voyage.vessel || item.voyage === voyage.id).sort((a, b) => b.dueIso.localeCompare(a.dueIso))[0];
+  const bunker = getBunkerRequirements().filter((item) => item.vessel === voyage.vessel || item.reference === voyage.id).sort((a, b) => b.lastUpdated.localeCompare(a.lastUpdated))[0];
+  const cargo = storedBookRows('fv.chartering.cargoBook').find((item) => item.account === voyage.client || item.loadPort === voyage.portFrom || item.dischargePort === voyage.portTo);
+  const tonnage = storedBookRows('fv.chartering.tonnageBook').find((item) => item.vessel === voyage.vessel || item.imo === voyage.imo);
+  const values: Record<string, string> = {};
+  const add = (prefix: string, record: Record<string, unknown> | undefined) => Object.entries(stringRecord(record)).forEach(([key, value]) => { values[`${prefix}${key[0].toUpperCase()}${key.slice(1)}`] = value; });
+  add('', recap);
+  add('emissions', emissions as unknown as Record<string, unknown> | undefined);
+  add('account', account as unknown as Record<string, unknown> | undefined);
+  add('bunker', bunker as unknown as Record<string, unknown> | undefined);
+  add('cargo', cargo);
+  add('tonnage', tonnage);
+  values.complianceYear = values.emissionsComplianceYear ?? '';
+  values.trade = values.emissionsTrade ?? '';
+  values.euaPriceEur = values.emissionsEuaPriceEur ?? '';
+  values.co2AdjustmentT = values.emissionsCo2AdjustmentT ?? '';
+  values.emissionsApprovedBy = values.emissionsApprovedBy ?? '';
+  values.emissionsApprovedDate = values.emissionsApprovedDate ?? '';
+  return values;
+}
 
 /** Replace {{token}} placeholders in `text` with the voyage's live values. */
 export function applyVoyageTokens(text: string, voyage?: Voyage): string {
@@ -470,10 +654,17 @@ export function applyVoyageTokens(text: string, voyage?: Voyage): string {
     month: 'short',
     year: 'numeric',
   });
+  const voyageFields: Record<string, string> = Object.fromEntries(
+    Object.entries(voyage ?? {}).map(([key, value]) => [key, String(value ?? '')]),
+  );
   const map: Record<string, string> = {
+    ...moduleTokenValues(voyage),
+    ...voyageFields,
     vessel: voyage?.vessel ?? '',
+    vesselName: voyage?.vessel ?? '',
     imo: voyage?.imo ?? '',
     voyageNo: voyage?.id ?? '',
+    voyageId: voyage?.id ?? '',
     vesselType: voyage?.vesselType ?? '',
     flag: voyage?.flag ?? '',
     dwt: voyage?.dwt ?? '',
@@ -481,6 +672,14 @@ export function applyVoyageTokens(text: string, voyage?: Voyage): string {
     pic: voyage?.pic ?? '',
     portFrom: voyage?.portFrom ?? '',
     portTo: voyage?.portTo ?? '',
+    cargoLoadPort: voyage?.portFrom ?? '',
+    cargoDischargePort: voyage?.portTo ?? '',
+    cargoAccount: voyage?.client ?? '',
+    tonnageVessel: voyage?.vessel ?? '',
+    tonnageImo: voyage?.imo ?? '',
+    tonnageVesselType: voyage?.vesselType ?? '',
+    tonnageDwt: voyage?.dwt ?? '',
+    tonnageFlag: voyage?.flag ?? '',
     route: voyage ? `${voyage.portFrom} → ${voyage.portTo}` : '',
     eta: voyage?.eta ?? '',
     etd: voyage?.etdDisplay ?? '',

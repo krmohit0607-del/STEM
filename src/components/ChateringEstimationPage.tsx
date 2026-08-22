@@ -9,6 +9,7 @@ import { useWorldPorts, resolveWorldPort } from '../data/ports';
 import { accountNames } from '../data/clients';
 import { loadVessels } from '../data/vessels';
 import { VesselSearchInput } from './VesselSearchInput';
+import { ModuleVesselSearch } from './ModuleVesselSearch';
 import { EstimationRouteMap } from './EstimationRouteMap';
 import { generateSeaRoute } from '../data/seaRoute';
 import { upsertSavedEstimate, getSavedEstimate, setSavedEstimateStatus, nextEstimateNo } from '../data/savedEstimates';
@@ -1115,7 +1116,7 @@ function CeAutocomplete({ value, onChange, options, placeholder, disabled, min }
 
 export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
-  const selectedVoyage = useSelectedVoyage();
+  const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   // "create" mode (prop or ?new=1) opens a blank estimate — no vessel required.
   const createMode = mode === 'create' || searchParams.get('new') === '1';
   // Opening a previously saved estimate from the sidebar (?est=<id>).
@@ -2027,6 +2028,7 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       <header className="fv-ce__header">
         <div className="fv-ce__title-block">
           <div className="fv-ce__title-row">
+            <ModuleVesselSearch />
             <i className="fas fa-file-signature fv-ce__title-icon" aria-hidden="true" />
             <h1>Voyage Estimation</h1>
             <span className={`fv-ce__badge fv-ce__badge--${stat.color}`}>{estStatusLabel(status)}</span>

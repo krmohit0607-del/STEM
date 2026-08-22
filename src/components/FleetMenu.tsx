@@ -28,6 +28,7 @@ import {
   useAccountTxns,
   useSelectedAccountVessel,
   writeSelectedAccountVessel,
+  clearSelectedAccountVessel,
 } from '../data/accounts';
 import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, estStatusColor, estStatusLabel, useHandedOver, useModuleLifecycles, moduleLifecycleOf, usePostfixHanded, useFixtureNumbers } from '../data/workflow';
 import { useWorkflowConfig } from '../data/workflowConfig';
@@ -215,6 +216,10 @@ export function FleetMenu() {
   const isAccounts = module === 'Accounts';
   const isChartering = module === 'Chartering';
   const isOperations = module === 'Operations';
+  const charteringBook = isChartering
+    ? new URLSearchParams(location.search).get('book')
+    : null;
+  const isCharteringBook = charteringBook === 'cargo' || charteringBook === 'tonnage';
 
   const applyModule = (next: ModuleName, forceReset = false) => {
     if (next !== module) {
@@ -339,6 +344,15 @@ export function FleetMenu() {
     return lifecycleOf(v);
   };
 
+  useEffect(() => {
+    if (!selectedId || isBunker || isAccounts) return;
+    const selected = voyages.find((v) => v.id === selectedId);
+    if (selected) {
+      const nextBucket = rowBucket(selected);
+      if (status !== nextBucket) setStatus(nextBucket);
+    }
+  }, [selectedId, voyages, isBunker, isAccounts, status, moduleLifecycles, estStatuses, handedOver, postfixHanded, workflowConfig]);
+
   // Bunker requirements filtered by the coarse status tab + the "Type" fine filter.
   const bunkerRows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -384,18 +398,6 @@ export function FleetMenu() {
     if (q) out = out.filter((r) => r.vessel.toLowerCase().includes(q));
     out = out.filter((r) => vesselMatchesBucket(r.vessel));
     out.sort((a, b) => (b.overdue - a.overdue) || (b.open - a.open) || (b.payable + b.receivable - (a.payable + a.receivable)));
-    // Pin the selected vessel at the top even if it belongs to a different bucket
-    if (selectedAccountVessel && !out.find(r => r.vessel === selectedAccountVessel)) {
-      const pinned = Array.from(map.values()).find(e => e.vessel === selectedAccountVessel);
-      if (pinned) {
-        const net = pinned.receivable - pinned.payable;
-        const vesselActive = active.filter(t => t.vessel === pinned.vessel).sort((a, b) => a.dueIso.localeCompare(b.dueIso));
-        const nextTxn = vesselActive.find(isOverdue) ?? vesselActive[0] ?? null;
-        const lastSettled = settled.filter(t => t.vessel === pinned.vessel).sort((a, b) => b.dueIso.localeCompare(a.dueIso))[0] ?? null;
-        const dot: 'red' | 'amber' | 'green' = pinned.overdue > 0 ? 'red' : pinned.open > 0 ? 'amber' : 'green';
-        out.unshift({ ...pinned, net, nextTxn, lastSettled, dot });
-      }
-    }
     return out;
   }, [accountAll, status, voyageType, query, selectedAccountVessel]);
 
@@ -417,6 +419,17 @@ export function FleetMenu() {
   const openVoyage = (v: Voyage) => {
     writeSelectedVoyageId(v.id);
     navigate(moduleRoute(module));
+  };
+
+  const changeBucket = (next: string) => {
+    if (isCharteringBook) {
+      navigate('/chartering');
+    }
+    if (next === status && !isCharteringBook) return;
+    setStatus(next);
+    clearSelectedVoyageId();
+    clearSelectedBunkerId();
+    clearSelectedAccountVessel();
   };
 
   const openSavedEstimate = (id: string) => {
@@ -482,7 +495,7 @@ export function FleetMenu() {
         </button>
       </div>
 
-      <div className="fv-fleetmenu__filters">
+      {!isCharteringBook && <div className="fv-fleetmenu__filters">
         {!isBunker && !isAccounts && (
           <select
             value={pic}
@@ -507,7 +520,7 @@ export function FleetMenu() {
             </option>
           ))}
         </select>
-      </div>
+      </div>}
 
       <div className="fv-fleetmenu__tabs" role="tablist">
         {(MODULE_STATUSES[module] ?? MODULE_STATUSES.Performance).map((s) => (
@@ -515,16 +528,20 @@ export function FleetMenu() {
             key={s.key}
             type="button"
             role="tab"
-            aria-selected={status === s.key}
-            className={`fv-fleetmenu__tab${status === s.key ? ' fv-fleetmenu__tab--active' : ''}`}
-            onClick={() => setStatus(s.key)}
+            aria-selected={!isCharteringBook && status === s.key}
+            className={`fv-fleetmenu__tab${!isCharteringBook && status === s.key ? ' fv-fleetmenu__tab--active' : ''}`}
+            onClick={() => changeBucket(s.key)}
           >
             {s.label}
           </button>
         ))}
       </div>
+      {isChartering && <div className="fv-fleetmenu__book-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={charteringBook === 'cargo'} className={`fv-fleetmenu__tab${charteringBook === 'cargo' ? ' fv-fleetmenu__tab--active' : ''}`} onClick={() => navigate('/chartering?book=cargo')}>Cargo Book</button>
+        <button type="button" role="tab" aria-selected={charteringBook === 'tonnage'} className={`fv-fleetmenu__tab${charteringBook === 'tonnage' ? ' fv-fleetmenu__tab--active' : ''}`} onClick={() => navigate('/chartering?book=tonnage')}>Tonnage Book</button>
+      </div>}
 
-      <div className="fv-fleetmenu__search">
+      {!isCharteringBook && <div className="fv-fleetmenu__search">
         <i className="fas fa-magnifying-glass" aria-hidden="true" />
         <input
           type="text"
@@ -533,9 +550,9 @@ export function FleetMenu() {
           onChange={(e) => setQuery(e.target.value)}
           aria-label={t('searchVesselOrder', 'Search vessel / order')}
         />
-      </div>
+      </div>}
 
-      {isBunker ? (
+      {!isCharteringBook && (isBunker ? (
         <ul className="fv-fleetmenu__list">
           {bunkerRows.length === 0 && (
             <li className="fv-fleetmenu__empty">{t('noRequirements', 'No requirements')}</li>
@@ -576,7 +593,13 @@ export function FleetMenu() {
               return (
                 <li key={r.vessel}>
                   <button type="button" className={`fv-fleetmenu__item fv-fleetmenu__acct-item${r.vessel === selectedAccountVessel ? ' fv-fleetmenu__item--active' : ''}`}
-                    onClick={() => { writeSelectedAccountVessel(r.vessel); navigate('/accounts'); }}>
+                    onClick={() => {
+                      writeSelectedAccountVessel(r.vessel);
+                      const voyage = voyages.find((v) => v.vessel === r.vessel);
+                      if (voyage) writeSelectedVoyageId(voyage.id);
+                      else clearSelectedVoyageId();
+                      navigate('/accounts');
+                    }}>
                     {/* Row 1: dot + vessel name + net amount */}
                     <div className="fv-fleetmenu__acct-row1">
                       <span className="fv-fleetmenu__acct-dot" style={{background: dotColor}} />
@@ -669,7 +692,7 @@ export function FleetMenu() {
             </li>
           ))}
         </ul>
-      )}
+      ))}
 
       <div className="fv-fleetmenu__footer">
         <AppFooterControls />

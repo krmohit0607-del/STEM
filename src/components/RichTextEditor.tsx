@@ -26,6 +26,7 @@ export function RichTextEditor({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [preview, setPreview] = useState(false);
+  const [tokenQuery, setTokenQuery] = useState('');
 
   // Sync DOM only when the value changes from outside (avoids caret jumps).
   useEffect(() => {
@@ -46,7 +47,12 @@ export function RichTextEditor({
     ref.current?.focus();
     document.execCommand('insertText', false, token);
     emit();
+    setTokenQuery('');
   };
+
+  const tokenSuggestions = (tokens ?? [])
+    .filter((tok) => `${tok.token} ${tok.label}`.toLowerCase().includes(tokenQuery.trim().toLowerCase()))
+    .slice(0, 8);
 
   const addLink = () => {
     const url = window.prompt('Link URL', 'https://');
@@ -65,6 +71,8 @@ export function RichTextEditor({
         <button type="button" onClick={addLink} disabled={preview} title="Insert link" aria-label="Insert link"><i className="fas fa-link" /></button>
         <span className="fv-rte__sep" />
         <button type="button" onClick={() => exec('removeFormat')} disabled={preview} title="Clear formatting" aria-label="Clear formatting"><i className="fas fa-eraser" /></button>
+        <label className="fv-rte__color" title="Text color"><i className="fas fa-font" aria-hidden="true" /><input type="color" defaultValue="#e6edf3" disabled={preview} onChange={(e) => exec('foreColor', e.target.value)} aria-label="Text color" /></label>
+        <label className="fv-rte__color" title="Highlight color"><i className="fas fa-highlighter" aria-hidden="true" /><input type="color" defaultValue="#f0b429" disabled={preview} onChange={(e) => exec('hiliteColor', e.target.value)} aria-label="Highlight color" /></label>
         {renderPreview && (
           <>
             <span className="fv-rte__spacer" />
@@ -101,18 +109,28 @@ export function RichTextEditor({
         />
       )}
       {tokens && tokens.length > 0 && !preview && (
-        <div className="fv-rte__tokens">
-          {tokens.map((tok) => (
-            <button
-              key={tok.token}
-              type="button"
-              className="fv-rte__token"
-              title={tok.label}
-              onClick={() => insertToken(tok.token)}
-            >
-              {tok.token}
-            </button>
-          ))}
+        <div className="fv-rte__token-picker">
+          <label htmlFor="fv-rte-token-search"><i className="fas fa-code" aria-hidden="true" /> Insert token</label>
+          <input
+            id="fv-rte-token-search"
+            value={tokenQuery}
+            onChange={(e) => setTokenQuery(e.target.value)}
+            placeholder="Search fields…"
+            list="fv-rte-token-options"
+            aria-label="Search email tokens"
+          />
+          <datalist id="fv-rte-token-options">
+            {tokens.map((tok) => <option key={tok.token} value={tok.token}>{tok.label}</option>)}
+          </datalist>
+          {tokenQuery.trim() && tokenSuggestions.length > 0 && (
+            <div className="fv-rte__token-suggestions">
+              {tokenSuggestions.map((tok) => (
+                <button key={tok.token} type="button" title={`${tok.label} — insert at cursor`} onClick={() => insertToken(tok.token)}>
+                  <strong>{tok.token}</strong><span>{tok.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

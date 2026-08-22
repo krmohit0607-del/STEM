@@ -10,6 +10,7 @@ import {
   type EmissionsDoc, type EmissionAdjustment,
 } from '../data/emissions';
 import { NoVesselSelected } from './NoVesselSelected';
+import { ModuleVesselSearch } from './ModuleVesselSearch';
 import { EuaCard, seedRecap, type Recap } from './OperationsPage';
 import { EmBadge, EmStat, EmSection, EmCard, EmCalc, EmLine, EmBars, EmDonut, EmRatingBand, type Tone } from './EmissionsWidgets';
 
@@ -143,7 +144,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 export function EmissionsPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
-  const selectedVoyage = useSelectedVoyage();
+  const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   const createMode = mode === 'create' || searchParams.get('new') === '1';
   const blankVoyage = useMemo(() => makeBlankVoyage(), []);
   const voyage = createMode ? blankVoyage : selectedVoyage;
@@ -291,9 +292,10 @@ function EmissionsWorkspace({ voyage, recap, setRecap, doc, setDoc }: {
       {/* ===== Vessel header ===== */}
       <header className="fv-em__header">
         <div className="fv-em__id">
+          <ModuleVesselSearch />
           <span className="fv-em__id-icon"><i className="fas fa-leaf" aria-hidden="true" /></span>
           <div>
-            <h1>{recap.vesselName}</h1>
+            <h1>Emissions &amp; Compliance</h1>
             <div className="fv-em__id-meta">
               <span>IMO <b>{voyage.imo || '—'}</b></span>
               <span>Voyage <b>{voyage.id}</b></span>

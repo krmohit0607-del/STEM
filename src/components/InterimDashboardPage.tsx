@@ -1,12 +1,11 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { useSelectedLegNo } from '../data/selectedLeg';
 import { buildView } from './voyage/buildView';
 import { InterimTabs } from './InterimTabs';
-import { STUB_ROWS as TRACKSHEET_ROWS, computeCons } from './TracksheetGrid';
-import type { Voyage } from '../data/voyages';
+import { STUB_ROWS as TRACKSHEET_ROWS, computeCons, type TrackRow } from './TracksheetGrid';
 import type { LegRow } from './voyage/types';
 
 /** One noon-to-noon day plotted on the performance graph (sourced from the
@@ -115,30 +114,6 @@ const DISPLAY_OPTIONS = [
 ] as const;
 
 type DisplayKey = (typeof DISPLAY_OPTIONS)[number]['key'];
-
-interface VesselInfo {
-  name: string;
-  imo: string;
-  type: string;
-  flag: string;
-  dwt: string;
-  built: number;
-  loa: string;
-  beam: string;
-  enginePower: string;
-}
-
-const STUB_VESSEL: VesselInfo = {
-  name: 'MV FleetView Demo',
-  imo: 'IMO 9876543',
-  type: 'Bulk Carrier (Capesize)',
-  flag: 'Singapore',
-  dwt: '180,000 MT',
-  built: 2018,
-  loa: '292 m',
-  beam: '45 m',
-  enginePower: '11,500 kW @ 76 RPM',
-};
 
 /** Parse a number out of a string like "7,896 kW" or "-0.2 kt". */
 function parseNum(value: string): number {
@@ -402,41 +377,6 @@ const STUB_NOON_REPORTS: NoonReportRow[] = [
   },
 ];
 
-const NOON_COLUMNS: { key: keyof NoonReportRow | 'expand'; label: string; width?: number }[] = [
-  { key: 'expand', label: '', width: 32 },
-  { key: 'reportType', label: 'Report Type', width: 110 },
-  { key: 'initial', label: 'Initial', width: 70 },
-  { key: 'current', label: 'Current', width: 80 },
-  { key: 'timestamp', label: 'Timestamp', width: 130 },
-  { key: 'hoursSlr', label: 'Hours SLR', width: 90 },
-  { key: 'distance', label: 'Distance', width: 90 },
-  { key: 'sog', label: 'SOG', width: 80 },
-  { key: 'fo', label: 'FO', width: 90 },
-  { key: 'doGo', label: 'DO/GO', width: 90 },
-  { key: 'sigWaveHeight', label: 'Sig. Wave Height', width: 130 },
-  { key: 'bf', label: 'BF', width: 60 },
-  { key: 'currentFactor', label: 'Current Factor', width: 120 },
-  { key: 'rpm', label: 'RPM', width: 70 },
-  { key: 'mePower', label: 'M/E Power', width: 100 },
-  { key: 'received', label: 'Received', width: 130 },
-  { key: 'delayedBy', label: 'Delayed by', width: 100 },
-];
-
-/** Build the Interim vessel-info card from a shared voyage. */
-function voyageToVesselInfo(v: Voyage): VesselInfo {
-  return {
-    name: v.vessel,
-    imo: `IMO ${v.imo}`,
-    type: v.vesselType,
-    flag: v.flag,
-    dwt: v.dwt,
-    built: v.built,
-    loa: v.loa,
-    beam: v.beam,
-    enginePower: v.enginePower,
-  };
-}
-
 function formatHours(value: number): string {
   return `${value.toFixed(2)} HRS`;
 }
@@ -470,6 +410,84 @@ function projectionFuelCell(deltaFuel: number): InterimSummaryCell {
   };
 }
 
+function PerformanceReportsTable({ rows }: { rows: TrackRow[] }) {
+  const allReports = rows.filter((row) => row.rt === 'N' || row.rt === 'E');
+  const reports = allReports.slice(-12).reverse();
+  const noonRows = rows.filter((row) => row.rt === 'N');
+  const reportValues = (row: TrackRow) => {
+    const noonIndex = noonRows.findIndex((item) => item.id === row.id);
+    return {
+      consFo: noonIndex >= 0 ? computeCons(noonRows, noonIndex, 'vlsfo') : null,
+      consGo: noonIndex >= 0 ? computeCons(noonRows, noonIndex, 'lsmgo') : null,
+    };
+  };
+  const headers = ['Report Type', 'Date/Time UTC', 'Date/Time LT', 'Duration (hrs)', 'Position', 'Avg Spd GPS', 'Avg Spd LOG', 'Dist Since Last (nm)', 'Total Dist (nm)', 'ROB FO', 'ROB DO', 'Cons FO', 'Cons DO', 'RPM', '% MCR', 'Slip', 'Vessel Weather', 'System Weather', 'Remarks'];
+  const valuesFor = (row: TrackRow): string[] => {
+    const values = reportValues(row);
+    return [row.rt || 'Report', `${fmtTrackDate(row.date)} ${fmtTrackTime(row.time)}`, '—', String(row.hrs ?? '—'), `${row.lat || '—'} / ${row.lng || '—'}`, String(row.avgSpeedO ?? '—'), '—', String(row.distR ?? '—'), String(row.distO ?? '—'), String(row.vlsfoRob ?? '—'), String(row.lsmgoRob ?? '—'), values.consFo == null ? '—' : values.consFo.toFixed(3), values.consGo == null ? '—' : values.consGo.toFixed(3), String(row.rpm ?? '—'), '—', String(row.slip ?? '—'), `${row.windO || '—'} / ${row.wavesO || '—'}`, `Wind ${row.windF.toFixed(2)} · Wave ${row.waveF.toFixed(2)} · Curr ${row.currF.toFixed(2)}`, 'Tracksheet system row'];
+  };
+  const esc = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const exportExcel = () => {
+    const body = allReports.map((row) => `<tr>${valuesFor(row).map((value) => `<td>${esc(value)}</td>`).join('')}</tr>`).join('');
+    const html = `<html><head><meta charset="utf-8"></head><body><table border="1"><thead><tr>${headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></body></html>`;
+    const url = URL.createObjectURL(new Blob([html], { type: 'application/vnd.ms-excel' }));
+    const link = document.createElement('a'); link.href = url; link.download = 'Performance_Vessel_Reports.xls'; link.click(); URL.revokeObjectURL(url);
+  };
+  const exportPdf = () => {
+    const win = window.open('', '_blank', 'width=1400,height=900');
+    if (!win) return;
+    const body = allReports.map((row) => `<tr>${valuesFor(row).map((value) => `<td>${esc(value)}</td>`).join('')}</tr>`).join('');
+    win.document.write(`<html><head><title>Performance Vessel Reports</title><style>body{font:10px Arial;margin:20px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:4px;text-align:left;white-space:nowrap}th{background:#eee;white-space:normal}@page{size:landscape}</style></head><body><h1>Performance Vessel Reports</h1><table><thead><tr>${headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></body></html>`);
+    win.document.close(); win.focus(); win.print();
+  };
+  return (
+    <section className="fv-interim__stats-card fv-interim__reports-card">
+      <div className="fv-interim__reports-head">
+        <h3>Vessel Reports &amp; Weather Comparison</h3>
+        <span>Vessel reported weather vs tracksheet system weather</span>
+        <span className="fv-interim__reports-actions"><button type="button" onClick={exportExcel}><i className="fas fa-file-excel" aria-hidden="true" /> Excel</button><button type="button" onClick={exportPdf}><i className="fas fa-file-pdf" aria-hidden="true" /> PDF</button></span>
+      </div>
+      <div className="fv-interim__reports-scroll">
+        <table className="fv-interim__reports-table">
+          <thead>
+            <tr>
+              {headers.map((header) => <th key={header}>{header}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {reports.length === 0 && <tr><td colSpan={18}>No tracksheet reports available.</td></tr>}
+            {reports.map((row) => (
+              <tr key={row.id}>
+                {(() => { const values = reportValues(row); return <>
+                  <td>{row.rt || 'Report'}</td>
+                  <td>{fmtTrackDate(row.date)} {fmtTrackTime(row.time)}</td>
+                  <td>—</td>
+                  <td className="fv-interim__reports-num">{row.hrs ?? '—'}</td>
+                  <td>{row.lat || '—'} / {row.lng || '—'}</td>
+                  <td className="fv-interim__reports-num">{row.avgSpeedO ?? '—'}</td>
+                  <td className="fv-interim__reports-num">—</td>
+                  <td className="fv-interim__reports-num">{row.distR ?? '—'}</td>
+                  <td className="fv-interim__reports-num">{row.distO ?? '—'}</td>
+                  <td className="fv-interim__reports-num">{row.vlsfoRob ?? '—'}</td>
+                  <td className="fv-interim__reports-num">{row.lsmgoRob ?? '—'}</td>
+                  <td className="fv-interim__reports-num">{values.consFo == null ? '—' : values.consFo.toFixed(3)}</td>
+                  <td className="fv-interim__reports-num">{values.consGo == null ? '—' : values.consGo.toFixed(3)}</td>
+                  <td className="fv-interim__reports-num">{row.rpm ?? '—'}</td>
+                  <td className="fv-interim__reports-num">—</td>
+                  <td className="fv-interim__reports-num">{row.slip ?? '—'}</td>
+                  <td>{row.windO || '—'} / {row.wavesO || '—'}</td>
+                  <td>Wind {row.windF.toFixed(2)} · Wave {row.waveF.toFixed(2)} · Curr {row.currF.toFixed(2)}</td>
+                  <td>Tracksheet system row</td>
+                </>; })()}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export function InterimDashboardPage() {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -478,8 +496,6 @@ export function InterimDashboardPage() {
   };
 
   const selectedVoyage = useSelectedVoyage();
-  const vessel = selectedVoyage ? voyageToVesselInfo(selectedVoyage) : STUB_VESSEL;
-
   // The active leg follows the leg picked in the top header (ODAS row) dropdown.
   const legs = useMemo(
     () => (selectedVoyage ? buildView(selectedVoyage).legs : []),
@@ -492,7 +508,6 @@ export function InterimDashboardPage() {
       return acc;
     }, {}),
   );
-  const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
 
   const activeLeg = useMemo(
     () => legs.find((leg) => leg.no === selectedLegNo) ?? legs[0],
@@ -522,10 +537,6 @@ export function InterimDashboardPage() {
 
   const toggleSeries = (key: string) => {
     setVisibleSeries((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
-  const toggleRow = (idx: number) => {
-    setExpandedRows((prev) => ({ ...prev, [idx]: !prev[idx] }));
   };
 
   const visibleSeriesKeys = (Object.keys(SERIES_DEFS) as DisplayKey[]).filter(
@@ -571,32 +582,6 @@ export function InterimDashboardPage() {
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
-
-  const noonSummary = useMemo(() => {
-    const reports = STUB_NOON_REPORTS;
-    const sum = (fn: (r: NoonReportRow) => number) =>
-      reports.reduce((acc, r) => acc + fn(r), 0);
-    const totalHours = sum((r) => r.hoursSlr);
-    const totalDistance = sum((r) => parseNum(r.distance));
-    const totalFo = sum((r) => parseNum(r.fo));
-    const totalGo = sum((r) => parseNum(r.doGo));
-    const avgSpeed = totalHours > 0 ? totalDistance / totalHours : 0;
-    const avgFoPerDay = totalHours > 0 ? (totalFo / totalHours) * 24 : 0;
-    const avgGoPerDay = totalHours > 0 ? (totalGo / totalHours) * 24 : 0;
-    return {
-      count: reports.length,
-      latest: reports[0],
-      from: reports[reports.length - 1].timestamp,
-      to: reports[0].timestamp,
-      totalHours,
-      totalDistance,
-      totalFo,
-      totalGo,
-      avgSpeed,
-      avgFoPerDay,
-      avgGoPerDay,
-    };
   }, []);
 
   const interimSummaryRows = useMemo<InterimSummaryRow[]>(() => {
@@ -821,145 +806,9 @@ export function InterimDashboardPage() {
             </tbody>
           </table>
         </section>
+        <PerformanceReportsTable rows={TRACKSHEET_ROWS.map((row, index) => ({ ...row, id: `interim-${index}`, nextPort: '' }))} />
       </div>
 
-      <div className="fv-interim__noon">
-        <div className="fv-interim__noon-header">
-          <div className="fv-interim__noon-titlebar">
-            <h3 className="fv-interim__noon-title">
-              {t('noonReportSummary', 'Noon Report Summary')}
-            </h3>
-            <span className="fv-interim__noon-vessel">
-              {vessel.name}{activeLeg ? ` · ${legLabel(activeLeg)}` : ''}
-            </span>
-          </div>
-          <ul className="fv-interim__noon-kpis">
-            <li>
-              <span>Reports</span>
-              <strong>{noonSummary.count}</strong>
-            </li>
-            <li>
-              <span>Period</span>
-              <strong>
-                {noonSummary.from} → {noonSummary.to}
-              </strong>
-            </li>
-            <li>
-              <span>Latest Received</span>
-              <strong>{noonSummary.latest.received}</strong>
-            </li>
-            <li>
-              <span>Total Distance</span>
-              <strong>{noonSummary.totalDistance.toFixed(0)} NM</strong>
-            </li>
-            <li>
-              <span>Avg SOG</span>
-              <strong>{noonSummary.avgSpeed.toFixed(2)} kt</strong>
-            </li>
-            <li>
-              <span>Total FO</span>
-              <strong>{noonSummary.totalFo.toFixed(2)} MT</strong>
-            </li>
-            <li>
-              <span>Total DO/GO</span>
-              <strong>{noonSummary.totalGo.toFixed(2)} MT</strong>
-            </li>
-            <li>
-              <span>Avg FO / day</span>
-              <strong>{noonSummary.avgFoPerDay.toFixed(2)} MT</strong>
-            </li>
-            <li>
-              <span>Avg GO / day</span>
-              <strong>{noonSummary.avgGoPerDay.toFixed(2)} MT</strong>
-            </li>
-          </ul>
-        </div>
-
-        <div className="fv-interim__noon-scroll">
-          <table className="fv-interim__noon-grid">
-            <thead>
-              <tr>
-                {NOON_COLUMNS.map((col) => (
-                  <th
-                    key={col.key as string}
-                    style={col.width ? { minWidth: col.width, width: col.width } : undefined}
-                  >
-                    {col.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {STUB_NOON_REPORTS.map((row, idx) => {
-                const expanded = !!expandedRows[idx];
-                return (
-                  <Fragment key={`noon-${idx}`}>
-                    <tr>
-                      {NOON_COLUMNS.map((col) => {
-                        if (col.key === 'expand') {
-                          return (
-                            <td key="expand" className="fv-interim__noon-expand-cell">
-                              <button
-                                type="button"
-                                className="fv-interim__noon-expand-btn"
-                                aria-expanded={expanded}
-                                aria-label={expanded ? 'Collapse row' : 'Expand row'}
-                                onClick={() => toggleRow(idx)}
-                              >
-                                <i
-                                  className={`fas ${
-                                    expanded ? 'fa-chevron-down' : 'fa-chevron-right'
-                                  }`}
-                                  aria-hidden="true"
-                                />
-                              </button>
-                            </td>
-                          );
-                        }
-                        const value = row[col.key as keyof NoonReportRow];
-                        if (typeof value === 'boolean') {
-                          return (
-                            <td key={col.key as string} className="fv-interim__noon-bool">
-                              {value ? (
-                                <i
-                                  className="fas fa-check-circle fv-interim__noon-check"
-                                  aria-hidden="true"
-                                />
-                              ) : (
-                                ''
-                              )}
-                            </td>
-                          );
-                        }
-                        return (
-                          <td key={col.key as string}>{String(value ?? '')}</td>
-                        );
-                      })}
-                    </tr>
-                    {expanded && (
-                      <tr className="fv-interim__noon-detail-row">
-                        <td colSpan={NOON_COLUMNS.length}>
-                          <div className="fv-interim__noon-detail">
-                            <h4>{t('fullReport', 'Full report received from vessel')}</h4>
-                            <dl>
-                              {row.fullReport.map(([label, value]) => (
-                                <div key={label} className="fv-interim__noon-detail-item">
-                                  <dt>{label}</dt>
-                                  <dd>{value}</dd>
-                                </div>
-                              ))}
-                            </dl>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
     </div>
   );
 }

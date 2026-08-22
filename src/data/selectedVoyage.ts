@@ -24,6 +24,7 @@ import { getVoyageById, getVoyages, type Voyage } from './voyages';
 const STORAGE_KEY = 'fv.selectedVoyage';
 
 let current: string | undefined = read();
+let explicitlyCleared = false;
 const listeners = new Set<() => void>();
 
 function read(): string | undefined {
@@ -45,6 +46,7 @@ export function getSelectedVoyageId(): string | undefined {
 export function writeSelectedVoyageId(id: string): void {
   if (current === id) return;
   current = id;
+  explicitlyCleared = false;
   try {
     window.localStorage.setItem(STORAGE_KEY, id);
   } catch {
@@ -55,6 +57,7 @@ export function writeSelectedVoyageId(id: string): void {
 
 /** Clear the active selection so detail pages fall back to their blank state. */
 export function clearSelectedVoyageId(): void {
+  explicitlyCleared = true;
   if (current === undefined) return;
   current = undefined;
   try {
@@ -63,6 +66,10 @@ export function clearSelectedVoyageId(): void {
     /* ignore */
   }
   listeners.forEach((listener) => listener());
+}
+
+export function useSelectedVoyageCleared(): boolean {
+  return useSyncExternalStore(subscribe, () => explicitlyCleared, () => explicitlyCleared);
 }
 
 function subscribe(listener: () => void): () => void {
@@ -87,8 +94,10 @@ export function useSelectedVoyageId(): string | undefined {
 }
 
 /** Resolve the active `Voyage` object (undefined when nothing matches). */
-export function useSelectedVoyage(): Voyage | undefined {
+export function useSelectedVoyage(options?: { emptyWhenCleared?: boolean }): Voyage | undefined {
   const id = useSelectedVoyageId();
+  const cleared = useSelectedVoyageCleared();
+  if (options?.emptyWhenCleared && cleared && !id) return undefined;
   const selected = getVoyageById(id);
   if (selected) return selected;
 

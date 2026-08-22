@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 import { FUEL_TYPE_OPTIONS } from './voyage/types';
+import { ModuleVesselSearch } from './ModuleVesselSearch';
 
 import {
   useBunkerRequirements,
@@ -968,6 +969,7 @@ export function BunkerManagementPage({ mode }: { mode?: 'create' } = {}) {
         {/* Header with compact stats */}
         <header className="fv-bk__topbar">
           <div className="fv-bk__topbar-title">
+            <ModuleVesselSearch />
             <i className="fas fa-gas-pump" aria-hidden="true" />
             <h1>Bunker</h1>
           </div>

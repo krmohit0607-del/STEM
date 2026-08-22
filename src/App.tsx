@@ -12,6 +12,7 @@ import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
 import { RobCalculationPage } from './components/RobCalculationPage';
 import { VoyageEstimationPage } from './components/VoyageEstimationPage';
 import { ChateringEstimationPage } from './components/ChateringEstimationPage';
+import { CharteringBooksPage } from './components/CharteringBooksPage';
 import { OperationsPage } from './components/OperationsPage';
 import { EmissionsPage } from './components/EmissionsPage';
 import { BunkerManagementPage } from './components/BunkerManagementPage';
@@ -69,6 +70,13 @@ function HomeRoute() {
   return <Navigate to={isAuthenticated() ? '/main' : '/login'} replace />;
 }
 
+function CharteringRoute() {
+  const [params] = useSearchParams();
+  return params.get('book') === 'cargo' || params.get('book') === 'tonnage'
+    ? <CharteringBooksPage />
+    : <ChateringEstimationPage />;
+}
+
 export function App() {
   return (
     <FleetViewProvider>
@@ -122,7 +130,7 @@ export function App() {
               path="/chartering"
               element={
                 <Layout showModuleChrome={false}>
-                  <ChateringEstimationPage />
+                  <CharteringRoute />
                 </Layout>
               }
             />

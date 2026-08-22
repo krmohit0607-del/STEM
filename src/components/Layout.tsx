@@ -7,6 +7,7 @@ import { MapView } from './MapView';
 import { ModuleBar } from './ModuleBar';
 import { TopNav } from './TopNav';
 import { BottomPanel } from './BottomPanel';
+import { VoyageTagsStrip } from './VoyageTagsStrip';
 
 /**
  * Top-level layout. Mirrors the structure of the legacy `Index.cshtml`:
@@ -64,6 +65,7 @@ export function Layout({
         {showModuleChrome && <LeftSidebar />}
         <div id="portal" className="portal-container">
           {showModuleChrome && <ModuleBar />}
+          {showModuleChrome && <VoyageTagsStrip />}
           {children ?? <MapView />}
           {showModuleChrome && <BottomPanel />}
         </div>

@@ -10,6 +10,8 @@ import { makeBlankVoyage } from '../data/voyages';
 import { NoVesselSelected } from './NoVesselSelected';
 import { loadOpsRecap, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
 import { seedRecap, VoyageDetailsTab, HireTab, FreightTab, computePnl, type Recap, type Pnl } from './OperationsPage';
+import { ModuleVesselSearch } from './ModuleVesselSearch';
+import { VoyageTagsStrip } from './VoyageTagsStrip';
 
 /**
  * Postfix Department — Voyage Settlement & Claims Management Center.
@@ -162,7 +164,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
 
 export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
-  const selectedVoyage = useSelectedVoyage();
+  const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   const createMode = mode === 'create' || searchParams.get('new') === '1';
   const blankVoyage = useMemo(() => makeBlankVoyage(), []);
   const voyage = createMode ? blankVoyage : selectedVoyage;
@@ -206,10 +208,10 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
         {/* header */}
         <div className="fv-ops__topbar fv-pf__topbar">
           <div className="fv-ops__recap-title">
+            <ModuleVesselSearch />
             <i className="fas fa-file-signature" aria-hidden="true" />
             <div>
-              <h1>{voyage.vessel} · Voyage Settlement</h1>
-              <span className="fv-ops__recap-sub">{voyage.id} · IMO {voyage.imo} · {b.load} → {b.disch} · {voyage.client}{cpdds[voyage.id] ? ` / CPDD ${cpdds[voyage.id]}` : ''}</span>
+              <span className="fv-ops__recap-sub fv-ops__recap-details">{voyage.id} · IMO {voyage.imo} · {b.load} → {b.disch} · {voyage.client}{cpdds[voyage.id] ? ` / CPDD ${cpdds[voyage.id]}` : ''}</span>
             </div>
             <span className="fv-ops__recap-badge">Settlement In Progress</span>
             <div className="fv-pf__topbar-status">
@@ -217,6 +219,7 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
             </div>
           </div>
         </div>
+        <VoyageTagsStrip />
 
         {/* tabs */}
         <nav className="fv-ops__tabs" aria-label="Postfix sections">
@@ -233,15 +236,15 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
           )}
 
           {tab === 'hire' && (
-            <HireTab recap={recap} setRecap={setRecap} pnl={pnl} voyage={voyage} />
+            <HireTab recap={recap} setRecap={setRecap} pnl={pnl} voyage={voyage} module="Postfix" />
           )}
 
           {tab === 'freightlaytime' && (
-            <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} section="freight" />
+            <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} section="freight" module="Postfix" />
           )}
 
           {tab === 'pdaservices' && (
-            <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} section="pda-services" />
+            <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} section="pda-services" module="Postfix" />
           )}
 
           {tab === 'history' && (

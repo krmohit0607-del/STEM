@@ -19,6 +19,10 @@ import {
   type EmailTemplate,
   type EmailAttachment,
   type RecipientTypeGroup,
+  loadEmailDistributionLists,
+  newDistributionListId,
+  saveEmailDistributionLists,
+  type EmailDistributionList,
 } from '../data/emailTemplates';
 import {
   ACCOUNT_TYPES,
@@ -65,6 +69,7 @@ interface SettingsSection {
 
 const SECTIONS: SettingsSection[] = [
   { id: 'email-templates', labelKey: 'emailTemplates', labelFallback: 'Email Templates', icon: 'fa-envelope' },
+  { id: 'email-distribution', labelKey: 'emailDistribution', labelFallback: 'Email Distribution List', icon: 'fa-users' },
   { id: 'report-templates', labelKey: 'reportTemplates', labelFallback: 'Report Templates', icon: 'fa-file-lines' },
   { id: 'vessel-details', labelKey: 'vesselsDetails', labelFallback: 'Vessels Details', icon: 'fa-ship' },
   { id: 'estimation-options', labelKey: 'estimationOptions', labelFallback: 'Estimation Options', icon: 'fa-sliders' },
@@ -153,6 +158,7 @@ export function SettingsModal({
               {t(active.labelKey, active.labelFallback)}
             </h4>
             {active.id === 'email-templates' && <EmailTemplatesPanel />}
+            {active.id === 'email-distribution' && <EmailDistributionPanel />}
             {active.id === 'vessel-details' && <VesselsPanel />}
             {active.id === 'estimation-options' && <EstimationOptionsPanel />}
             {active.id === 'client-details' && <ClientsPanel kind="Account" />}
@@ -266,6 +272,63 @@ function EstimationOptionsPanel() {
   );
 }
 
+function EmailDistributionPanel() {
+  const [lists, setLists] = useState<EmailDistributionList[]>(() => loadEmailDistributionLists());
+  const [editing, setEditing] = useState<EmailDistributionList | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => { saveEmailDistributionLists(lists); }, [lists]);
+
+  const startNew = () => setEditing({ id: '', name: '', recipients: [{ company: '', email: '' }] });
+  const startEdit = (list: EmailDistributionList) => setEditing({ ...list, recipients: list.recipients.map((recipient) => ({ ...recipient })) });
+  const save = () => {
+    if (!editing) return;
+    const name = editing.name.trim();
+    const recipients = editing.recipients.map((recipient) => ({ company: recipient.company.trim(), email: recipient.email.trim() })).filter((recipient) => recipient.company || recipient.email);
+    if (!name || recipients.length === 0 || recipients.some((recipient) => !recipient.company || !recipient.email)) return;
+    const next = { ...editing, id: editing.id || newDistributionListId(), name, recipients };
+    setLists((current) => editing.id ? current.map((item) => item.id === editing.id ? next : item) : [next, ...current]);
+    setEditing(null);
+  };
+  const remove = (id: string) => {
+    if (window.confirm('Delete this distribution list?')) setLists((current) => current.filter((item) => item.id !== id));
+  };
+
+  return (
+    <div className="fv-email-templates">
+      <div className="fv-email-templates__bar">
+        <span className="fv-settings-panel__hint">Create reusable company email groups for email generation.</span>
+        <button type="button" className="fv-email-templates__new" onClick={startNew}><i className="fas fa-plus" aria-hidden="true" /> New Distribution List</button>
+      </div>
+      {editing && (
+        <div className="fv-email-template__editor">
+          <label className="fv-email-template__field"><span>Distribution List Name</span><input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="e.g. Voyage Operations" /></label>
+          <div className="fv-email-template__field"><span>Companies and Email Addresses</span>
+            {editing.recipients.map((recipient, index) => (
+              <div key={index} className="fv-email-template__recipient-row">
+                <input value={recipient.company} onChange={(e) => setEditing({ ...editing, recipients: editing.recipients.map((value, i) => i === index ? { ...value, company: e.target.value } : value) })} placeholder="Company name" />
+                <input type="email" value={recipient.email} onChange={(e) => setEditing({ ...editing, recipients: editing.recipients.map((value, i) => i === index ? { ...value, email: e.target.value } : value) })} placeholder="name@company.com" />
+                <button type="button" className="fv-email-template__attach-rm" onClick={() => setEditing({ ...editing, recipients: editing.recipients.filter((_, i) => i !== index) })} aria-label="Remove company"><i className="fas fa-xmark" aria-hidden="true" /></button>
+              </div>
+            ))}
+            <button type="button" className="fv-email-templates__btn" onClick={() => setEditing({ ...editing, recipients: [...editing.recipients, { company: '', email: '' }] })}><i className="fas fa-plus" aria-hidden="true" /> Add Company</button>
+          </div>
+          <div className="fv-email-template__edit-actions"><button type="button" className="fv-email-templates__btn" onClick={() => setEditing(null)}>Cancel</button><button type="button" className="fv-email-templates__btn fv-email-templates__btn--primary" onClick={save} disabled={!editing.name.trim() || editing.recipients.length === 0 || editing.recipients.some((recipient) => !recipient.company.trim() || !recipient.email.trim())}><i className="fas fa-check" aria-hidden="true" /> Save</button></div>
+        </div>
+      )}
+      <div className="fv-email-templates__grid">
+        {lists.length === 0 && <div className="fv-email-templates__empty">No distribution lists yet.</div>}
+        {lists.map((list) => (
+          <article key={list.id} className="fv-email-template__card">
+            <div className="fv-email-template__card-head"><div><h5><i className="fas fa-list" aria-hidden="true" /> {list.name}</h5><span>{list.recipients.length} compan{list.recipients.length === 1 ? 'y' : 'ies'}</span></div><div><button type="button" className="fv-email-templates__btn" onClick={() => setExpanded((current) => { const next = new Set(current); next.has(list.id) ? next.delete(list.id) : next.add(list.id); return next; })}><i className={`fas ${expanded.has(list.id) ? 'fa-chevron-up' : 'fa-chevron-down'}`} aria-hidden="true" /> {expanded.has(list.id) ? 'Hide' : 'View'}</button><button type="button" className="fv-email-templates__btn" onClick={() => startEdit(list)}><i className="fas fa-pen" aria-hidden="true" /> Edit</button><button type="button" className="fv-email-template__attach-rm" onClick={() => remove(list.id)} aria-label="Delete distribution list"><i className="fas fa-trash" aria-hidden="true" /></button></div></div>
+            {expanded.has(list.id) && <ul className="fv-email-template__attachments">{list.recipients.map((recipient) => <li key={`${recipient.company}-${recipient.email}`}><i className="fas fa-building" aria-hidden="true" /> <b>{recipient.company}</b> · {recipient.email}</li>)}</ul>}
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function EmailTemplatesPanel() {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -275,6 +338,9 @@ function EmailTemplatesPanel() {
 
   const [templates, setTemplates] = useState<EmailTemplate[]>(() => loadEmailTemplates());
   const [query, setQuery] = useState('');
+  const [category, setCategory] = useState('');
+  const [subCategory, setSubCategory] = useState('');
+  const [subSubCategory, setSubSubCategory] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   // `editing` holds the template currently in the editor (id === '' for a new one).
   const [editing, setEditing] = useState<EmailTemplate | null>(null);
@@ -285,16 +351,15 @@ function EmailTemplatesPanel() {
   }, [templates]);
 
   const q = query.trim().toLowerCase();
-  const filtered = q
-    ? templates.filter(
-        (tpl) =>
-          tpl.title.toLowerCase().includes(q) ||
-          tpl.body.toLowerCase().includes(q) ||
-          tpl.category.toLowerCase().includes(q) ||
-          (tpl.subCategory ?? '').toLowerCase().includes(q) ||
-          (tpl.subSubCategory ?? '').toLowerCase().includes(q),
-      )
-    : templates;
+  const categories = Array.from(new Set(templates.map((tpl) => tpl.category).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const subCategories = Array.from(new Set(templates.filter((tpl) => !category || tpl.category === category).map((tpl) => tpl.subCategory ?? '').filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const subSubCategories = Array.from(new Set(templates.filter((tpl) => (!category || tpl.category === category) && (!subCategory || (tpl.subCategory ?? '') === subCategory)).map((tpl) => tpl.subSubCategory ?? '').filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const filtered = templates.filter((tpl) => {
+    if (category && tpl.category !== category) return false;
+    if (subCategory && (tpl.subCategory ?? '') !== subCategory) return false;
+    if (subSubCategory && (tpl.subSubCategory ?? '') !== subSubCategory) return false;
+    return !q || tpl.title.toLowerCase().includes(q) || tpl.body.toLowerCase().includes(q) || tpl.category.toLowerCase().includes(q) || (tpl.subCategory ?? '').toLowerCase().includes(q) || (tpl.subSubCategory ?? '').toLowerCase().includes(q);
+  });
 
   const copy = async (id: string, body: string) => {
     try {
@@ -370,6 +435,11 @@ function EmailTemplatesPanel() {
 
   return (
     <div className="fv-email-templates">
+      <div className="fv-email-templates__category-row" aria-label="Filter templates by category">
+        <label><span>Main Category</span><select value={category} onChange={(e) => { setCategory(e.target.value); setSubCategory(''); setSubSubCategory(''); }}><option value="">All categories</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+        <label><span>Sub Category</span><select value={subCategory} onChange={(e) => { setSubCategory(e.target.value); setSubSubCategory(''); }} disabled={!category && subCategories.length === 0}><option value="">All sub categories</option>{subCategories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+        <label><span>Sub-Sub Category</span><select value={subSubCategory} onChange={(e) => setSubSubCategory(e.target.value)} disabled={!subCategory && subSubCategories.length === 0}><option value="">All sub-sub categories</option>{subSubCategories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+      </div>
       <div className="fv-email-templates__bar">
         <div className="fv-email-templates__search">
           <i className="fas fa-magnifying-glass" aria-hidden="true" />
@@ -583,6 +653,9 @@ function TemplateEditor({
   const canSave = value.title.trim().length > 0 && value.body.trim().length > 0;
   // Options sourced live from the directory so new accounts / service providers appear automatically.
   const typeGroups = useMemo(() => getRecipientTypeOptions(), []);
+  const [customMain, setCustomMain] = useState(() => !EMAIL_MAIN_CATEGORIES.some((category) => category === value.category));
+  const [customSub, setCustomSub] = useState(() => Boolean(value.subCategory && !EMAIL_SUB_CATEGORIES.includes(value.subCategory)));
+  const [customSubSub, setCustomSubSub] = useState(() => Boolean(value.subSubCategory && !EMAIL_SUB_SUB_CATEGORIES.includes(value.subSubCategory)));
   return (
     <form
       className="fv-email-template fv-email-template--edit"
@@ -623,21 +696,31 @@ function TemplateEditor({
           <label className="fv-email-template__field">
             <span>{t('mainCategory', 'Main Category')}</span>
             <select
-              value={value.category}
-              onChange={(e) => onChange({ ...value, category: e.target.value })}
+              value={customMain ? '__custom__' : value.category}
+              onChange={(e) => {
+                const isCustom = e.target.value === '__custom__';
+                setCustomMain(isCustom);
+                onChange({ ...value, category: isCustom ? '' : e.target.value });
+              }}
             >
               {EMAIL_MAIN_CATEGORIES.map((c) => (
                 <option key={c} value={c}>
                   {c}
                 </option>
               ))}
+              <option value="__custom__">Add new category…</option>
             </select>
+            {customMain && <input type="text" value={value.category} placeholder="Enter new main category" onChange={(e) => onChange({ ...value, category: e.target.value })} />}
           </label>
           <label className="fv-email-template__field">
             <span>{t('subCategory', 'Sub Category')}</span>
             <select
-              value={value.subCategory ?? ''}
-              onChange={(e) => onChange({ ...value, subCategory: e.target.value })}
+              value={customSub ? '__custom__' : value.subCategory ?? ''}
+              onChange={(e) => {
+                const isCustom = e.target.value === '__custom__';
+                setCustomSub(isCustom);
+                onChange({ ...value, subCategory: isCustom ? '' : e.target.value });
+              }}
             >
               <option value="">{t('none', 'None')}</option>
               {EMAIL_SUB_CATEGORIES.map((c) => (
@@ -645,13 +728,19 @@ function TemplateEditor({
                   {c}
                 </option>
               ))}
+              <option value="__custom__">Add new sub-category…</option>
             </select>
+            {customSub && <input type="text" value={value.subCategory ?? ''} placeholder="Enter new sub-category" onChange={(e) => onChange({ ...value, subCategory: e.target.value })} />}
           </label>
           <label className="fv-email-template__field">
             <span>{t('subSubCategory', 'Sub-Sub Category')}</span>
             <select
-              value={value.subSubCategory ?? ''}
-              onChange={(e) => onChange({ ...value, subSubCategory: e.target.value })}
+              value={customSubSub ? '__custom__' : value.subSubCategory ?? ''}
+              onChange={(e) => {
+                const isCustom = e.target.value === '__custom__';
+                setCustomSubSub(isCustom);
+                onChange({ ...value, subSubCategory: isCustom ? '' : e.target.value });
+              }}
             >
               <option value="">{t('none', 'None')}</option>
               {EMAIL_SUB_SUB_CATEGORIES.map((c) => (
@@ -659,7 +748,9 @@ function TemplateEditor({
                   {c}
                 </option>
               ))}
+              <option value="__custom__">Add new sub-sub-category…</option>
             </select>
+            {customSubSub && <input type="text" value={value.subSubCategory ?? ''} placeholder="Enter new sub-sub-category" onChange={(e) => onChange({ ...value, subSubCategory: e.target.value })} />}
           </label>
         </div>
       </div>

@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
@@ -12,8 +12,6 @@ import {
   STATUS_TONES,
   stamp,
   useSelectedAccountVessel,
-  clearSelectedAccountVessel,
-  writeSelectedAccountVessel,
   type FinTxn,
   type TxnStatus,
   type Approval,
@@ -21,6 +19,9 @@ import {
   type TxnCategory,
 } from '../data/accounts';
 import { addNotification } from '../data/workflow';
+import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useFixtureNumbers } from '../data/workflow';
+import { ModuleVesselSearch } from './ModuleVesselSearch';
 import { getBunkerRequirements, updateBunkerRequirement } from '../data/bunker';
 
 /**
@@ -45,6 +46,31 @@ function num(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+function downloadAccountFile(filename: string, content: string, type: string): void {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function accountExcel(headers: string[], rows: (string | number | undefined)[][]): string {
+  const cell = (value: string | number | undefined) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</td>`;
+  return `<table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map(cell).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+function accountPdf(headers: string[], rows: (string | number | undefined)[][]): void {
+  const popup = window.open('', '_blank', 'width=1200,height=800');
+  if (!popup) return;
+  const esc = (value: string | number | undefined) => String(value ?? '').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character] ?? character));
+  popup.document.write(`<html><head><title>Accounts Reports</title><style>body{font:10px Arial;margin:20px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:4px;text-align:left}th{background:#e8edf5}</style></head><body><h2>Accounts Reports</h2><table><thead><tr>${headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${esc(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table><script>window.onload=function(){window.print()}</script></body></html>`);
+  popup.document.close();
+}
+
 const CAT_COLOR: Record<TxnCategory, string> = {
   Hire: '#58a6ff', Freight: '#6fdc8c', PDA: '#b98cff', FDA: '#8a6cff', Bunker: '#e3b341',
   Agency: '#4fd1c5', Port: '#f0883e', Canal: '#f0a35e', Demurrage: '#ff6b6b', Despatch: '#4fd1c5',
@@ -61,6 +87,14 @@ const ALL_STATUSES: TxnStatus[] = [
   'Overdue','Due','On Hold','Partially Paid','Payment Failed','Rejected','Cancelled',
   'Paid','Received',
 ];
+
+const ACCOUNT_REPORTS = [
+  ['cashflow', 'Cash Flow', 'All incoming and outgoing transactions'], ['receivables', 'Receivables', 'Open and settled customer receipts'], ['payables', 'Payables', 'Open and settled supplier payments'],
+  ['outstanding', 'Outstanding', 'Unpaid balances by transaction'], ['ageing', 'Ageing Analysis', 'Due dates and ageing status'], ['hire', 'Hire Payments', 'Hire-related ledger entries'],
+  ['freight', 'Freight', 'Freight-related ledger entries'], ['pda-fda', 'PDA / FDA', 'PDA and FDA ledger entries'], ['bunker', 'Bunker', 'Bunker-related ledger entries'],
+  ['vendor', 'Vendor Ledger', 'Payables grouped by counterparty'], ['customer', 'Customer Ledger', 'Receivables grouped by counterparty'], ['voyage', 'Voyage Financials', 'Transactions with voyage references'],
+  ['pnl', 'Profit & Loss', 'All financial entries for the selected scope'], ['payment-history', 'Payment History', 'Payment and settlement entries'], ['collection-history', 'Collection History', 'Receivable collection entries'], ['audit', 'Audit Trail', 'Transaction workflow history'],
+] as const;
 
 /* --------- small ui atoms --------- */
 
@@ -463,11 +497,16 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
   const [calShowRec, setCalShowRec] = useState(true);
   const [calShowPay, setCalShowPay] = useState(true);
   const [detail, setDetail] = useState<FinTxn | null>(null);
-  const [vesselSearch, setVesselSearch] = useState('');
-  const [vesselDropOpen, setVesselDropOpen] = useState(false);
+  const [selectedReports, setSelectedReports] = useState<string[]>(['cashflow']);
 
+  const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
+  const fixtureNo = useFixtureNumbers()[selectedVoyage?.id ?? ''];
   const vessels = useMemo(() => ['All', ...Array.from(new Set(rows.map((t) => t.vessel)))], [rows]);
   const modules = useMemo(() => ['All', ...Array.from(new Set(rows.map((t) => t.module)))], [rows]);
+
+  useEffect(() => {
+    if (!sidebarVessel && !selectedVoyage && vessel !== 'All') setVessel('All');
+  }, [sidebarVessel, selectedVoyage, vessel]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -615,48 +654,9 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
       <div className="fv-acct__header">
         <header className="fv-acct__topbar">
           <div className="fv-acct__topbar-left">
+            <ModuleVesselSearch />
             <h1><i className="fas fa-building-columns" aria-hidden="true" /> Accounts</h1>
-          </div>
-          {/* Vessel-only search — selecting a vessel filters all tabs and highlights it in the sidebar */}
-          <div className="fv-acct__header-search" style={{position:'relative'}}>
-            <i className="fas fa-ship" style={{color:'var(--a-muted)',fontSize:11}} />
-            {sidebarVessel ? (
-              <span className="fv-acct__search-vessel-chip">
-                {sidebarVessel}
-                <button type="button" title="Clear vessel filter" onClick={() => { clearSelectedAccountVessel(); setVesselSearch(''); }}>
-                  <i className="fas fa-xmark" />
-                </button>
-              </span>
-            ) : (
-              <input
-                value={vesselSearch}
-                placeholder="Search vessel…"
-                onChange={e => { setVesselSearch(e.target.value); setVesselDropOpen(true); }}
-                onFocus={() => setVesselDropOpen(true)}
-                onBlur={() => setTimeout(() => setVesselDropOpen(false), 150)}
-              />
-            )}
-            {!sidebarVessel && vesselSearch && (
-              <button type="button" className="fv-acct__icon-btn" style={{width:18,height:18}} onClick={() => setVesselSearch('')}>
-                <i className="fas fa-xmark" />
-              </button>
-            )}
-            {/* Vessel autocomplete dropdown */}
-            {vesselDropOpen && vesselSearch && !sidebarVessel && (() => {
-              const matches = vessels.filter(v => v !== 'All' && v.toLowerCase().includes(vesselSearch.toLowerCase()));
-              if (!matches.length) return null;
-              return (
-                <ul className="fv-acct__vessel-drop">
-                  {matches.map(v => (
-                    <li key={v}>
-                      <button type="button" onMouseDown={() => { writeSelectedAccountVessel(v); setVesselSearch(''); setVesselDropOpen(false); }}>
-                        <i className="fas fa-ship" /> {v}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              );
-            })()}
+            {selectedVoyage && <span className="fv-acct__vessel-meta">{fixtureNo || selectedVoyage.id} · IMO {selectedVoyage.imo || '—'} · {selectedVoyage.portFrom || '—'} → {selectedVoyage.portTo || '—'} · {selectedVoyage.client || '—'}</span>}
           </div>
           <div className="fv-acct__actions">
             <button type="button" className="fv-acct__btn fv-acct__btn--ghost" onClick={() => setTab('reports')}><i className="fas fa-file-export" /> Export</button>
@@ -1072,7 +1072,7 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
                         {info.pay > 0 && calShowPay && <span className="fv-acct__cal-dot fv-acct__cal-dot--out" title={`Pay ${money(info.pay)}`}>{abbr(info.pay)}</span>}
                         {dayTxns.filter(t => (t.kind==='Receivable'?calShowRec:calShowPay)).slice(0,2).map(t => (
                           <button key={t.id} type="button" className="fv-acct__cal-txn" onClick={() => setDetail(t)} title={`${t.category} · ${t.vessel} · ${money(t.amount)}`}>
-                            <span className="fv-acct__cat-dot" style={{background:CAT_COLOR[t.category]??'#8b98ad'}}/> {t.category}
+                            <span className="fv-acct__cat-dot" style={{background:CAT_COLOR[t.category]??'#8b98ad'}}/> {!sidebarVessel && vessel === 'All' ? `${t.vessel} · ` : ''}{t.category}
                           </button>
                         ))}
                         {dayTxns.filter(t => (t.kind==='Receivable'?calShowRec:calShowPay)).length > 2 && <span className="fv-acct__cal-more">+{dayTxns.filter(t => (t.kind==='Receivable'?calShowRec:calShowPay)).length - 2}</span>}
@@ -1141,19 +1141,36 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
         )}
 
         {/* ---- REPORTS ---- */}
-        {tab === 'reports' && (
-          <section className="fv-acct__card">
-            <div className="fv-acct__card-head"><i className="fas fa-file-lines" /> Reports &amp; Exports</div>
-            <div className="fv-acct__card-body">
-              <div className="fv-acct__reports">
-                {['Cash Flow','Receivables','Payables','Outstanding','Ageing Analysis','Hire Payments','Freight','PDA / FDA','Bunker','Vendor Ledger','Customer Ledger','Voyage Financials','Profit & Loss','Payment History','Collection History','Audit Trail'].map((r) => (
-                  <button key={r} type="button" className="fv-acct__report"><i className="fas fa-file-chart-column" /> {r}</button>
-                ))}
-              </div>
-              <div className="fv-acct__export"><span>Export all data:</span><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-excel" /> Excel</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-pdf" /> PDF</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost"><i className="fas fa-file-csv" /> CSV</button></div>
-            </div>
-          </section>
-        )}
+        {tab === 'reports' && (() => {
+                const headers = ['Report', 'Transaction ID', 'Date', 'Vessel', 'Module', 'Category', 'Counterparty', 'Invoice', 'Kind', 'Currency', 'Amount', 'Due Date', 'Status', 'Approval', 'Reference'];
+                const reportRows = (id: string): (string | number | undefined)[][] => {
+                  if (id === 'audit') return filtered.flatMap((t) => t.audit.map((entry) => [id, t.id, entry.at, t.vessel, t.module, t.category, entry.user, t.invoiceNo, t.kind, t.currency, t.amount, t.dueDate, `${entry.from ?? ''} → ${entry.to ?? ''}`, t.approval, t.reference]));
+                  const source: FinTxn[] = id === 'receivables' || id === 'customer' || id === 'collection-history' ? filtered.filter((t) => t.kind === 'Receivable')
+                    : id === 'payables' || id === 'vendor' || id === 'hire' || id === 'freight' || id === 'pda-fda' || id === 'bunker' ? filtered.filter((t) => t.kind === 'Payable')
+                    : id === 'outstanding' || id === 'ageing' ? filtered.filter((t) => !['Paid', 'Received', 'Cancelled', 'Closed'].includes(t.status))
+                    : id === 'payment-history' ? filtered.filter((t) => ['Paid', 'Received', 'Payment Executed', 'Bank Confirmation', 'Reconciled'].includes(t.status))
+                    : filtered;
+                  return source.map((t) => [id, t.id, t.invoiceDate, t.vessel, t.module, t.category, t.counterparty, t.invoiceNo, t.kind, t.currency, t.amount, t.dueDate, t.status, t.approval, t.reference]);
+                };
+                const selectedData = selectedReports.flatMap((id) => reportRows(id));
+                const previewRows = selectedReports.length > 0 ? reportRows(selectedReports[0]) : [];
+                const toggle = (id: string) => setSelectedReports((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+                const allReportsSelected = selectedReports.length === ACCOUNT_REPORTS.length;
+                const toggleAllReports = () => setSelectedReports(allReportsSelected ? [] : ACCOUNT_REPORTS.map(([id]) => id));
+                const downloadExcel = () => downloadAccountFile('accounts-reports.xls', accountExcel(headers, selectedData), 'application/vnd.ms-excel');
+                const downloadJson = () => downloadAccountFile('accounts-reports.json', JSON.stringify({ reports: selectedReports, transactions: selectedData }, null, 2), 'application/json;charset=utf-8');
+                const downloadPdf = () => accountPdf(headers, selectedData);
+                return <section className="fv-acct__card">
+                  <div className="fv-acct__card-head"><span><i className="fas fa-file-lines" /> Accounts Reports</span><div className="fv-acct__report-header-actions"><button type="button" className="fv-acct__btn fv-acct__btn--ghost" disabled={selectedReports.length === 0} onClick={downloadExcel}><i className="fas fa-file-excel" /> Excel</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost" disabled={selectedReports.length === 0} onClick={downloadJson}><i className="fas fa-file-code" /> JSON</button><button type="button" className="fv-acct__btn fv-acct__btn--ghost" disabled={selectedReports.length === 0} onClick={downloadPdf}><i className="fas fa-file-pdf" /> PDF</button></div></div>
+                  <div className="fv-acct__card-body"><div className="fv-acct__reports-layout">
+                  <div className="fv-acct__report-list">
+                    <div className="fv-acct__report-list-head"><b>Available reports</b><button type="button" className="fv-acct__link-btn" onClick={toggleAllReports}>{allReportsSelected ? 'Unselect all' : 'Select all'}</button></div>
+                    {ACCOUNT_REPORTS.map(([id, title, description]) => <label key={id} className="fv-acct__report-option"><input type="checkbox" checked={selectedReports.includes(id)} onChange={() => toggle(id)} /><span><b>{title}</b><small>{description}</small></span></label>)}
+                  </div>
+                  <div className="fv-acct__report-preview"><div className="fv-acct__report-preview-head"><b>Preview</b><span>{previewRows.length} rows · {selectedReports.length} selected</span></div><div className="fv-acct__report-preview-scroll"><table className="fv-acct__table fv-acct__table--compact"><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{previewRows.slice(0, 20).map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{String(cell ?? '—')}</td>)}</tr>)}</tbody></table></div></div>
+                  </div></div>
+                </section>;
+              })()}
       </div>
 
       {detail && <TxnDetail t={detail} onClose={() => setDetail(null)} />}

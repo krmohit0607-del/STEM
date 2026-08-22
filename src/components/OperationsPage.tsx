@@ -9,7 +9,7 @@ import { addNotification, copyLaytimeToPostfix, useCpdds, useFixtureNumbers } fr
 import { getWorkflowConfig } from '../data/workflowConfig';
 import { loadClients, saveClients, SERVICE_PROVIDER_TYPES } from '../data/clients';
 import { addBunkerRequirement } from '../data/bunker';
-import { addPayable, addReceivable } from '../data/accounts';
+import { addPayable, useAccountTxns } from '../data/accounts';
 import { useWorldPorts, type WorldPort } from '../data/ports';
 import { loadVessels, saveVessels } from '../data/vessels';
 import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
@@ -19,6 +19,10 @@ import { LAYTIME_TERMS_OPTIONS, PORT_TYPE_OPTIONS } from '../data/estimationOpti
 import { EtaCalculation, RobCalculation } from './EtaRobCalculation';
 import { VoyageEstimation } from './VoyageEstimation';
 import { WeatherMargins } from './WeatherMargins';
+import { ModuleVesselSearch } from './ModuleVesselSearch';
+import { RichTextEditor } from './RichTextEditor';
+import { VoyageTagsStrip } from './VoyageTagsStrip';
+import { useFleetView } from '../context/FleetViewContext';
 
 /**
  * Operations module — the voyage-operations workspace for a fixed vessel.
@@ -35,11 +39,27 @@ import { WeatherMargins } from './WeatherMargins';
 
 /* ------------------------------------------------------------------ types */
 
-type TabId = 'details' | 'pnl' | 'etarob' | 'stowage' | 'hire' | 'freight' | 'reports' | 'costs';
+type TabId = 'details' | 'pnl' | 'etarob' | 'stowage' | 'hire' | 'freight' | 'reports' | 'notes' | 'costs';
 
 export interface Recap {
   vesselName: string;
   vesselEmail: string;
+  vesselLoa?: string;
+  vesselBeam?: string;
+  draftBallast?: string;
+  draftLaden?: string;
+  engineRpmMin?: string;
+  engineRpmMax?: string;
+  engineMcrMin?: string;
+  engineMcrMax?: string;
+  scrubberFitted?: string;
+  scrubberType?: string;
+  craneCount?: string;
+  craneSwl?: string;
+  craneSafeLimit?: string;
+  grabCount?: string;
+  grabWeight?: string;
+  grabSafeLimit?: string;
   voyageFixType: string;
   owners: string;
   cpDate: string;
@@ -146,6 +166,9 @@ export interface Recap {
   cashflow?: CashflowData;
   // --- Vessel reports (Vessel Reports tab) -------------------------------
   vesselReports?: VesselReport[];
+  notes?: string;
+  additionalVoyageLegs?: { id: string; type: string; port: string; term: string; rate: string; pda: string; dateTime: string; notice: string; loi: string; loiStatus: string }[];
+  dischargePortDetails?: { loiObl: string; loiStatus: string }[];
   // --- EU ETS allowance records (Freight & Laytime tab) ------------------
   eua?: EuaData;
 }
@@ -304,6 +327,7 @@ interface LaytimePort {
   demurrageRate: string;   // USD / day
   despatchRate: string;    // USD / day
   events: LaytimeEvent[];
+  status?: HireStatus;
 }
 
 /** Freight invoice + per-port laytime data for the Freight & Laytime tab. */
@@ -316,7 +340,10 @@ interface FreightInvoice {
   invoiceTo: string;
   paymentTerms: string;
   dueDate: string;           // dd-mm-yyyy
-  status: string;            // Draft / Sent / Paid
+  status: string;
+  workflowStatus?: HireStatus;
+  paymentStatus?: string;
+  paymentStatusManual?: boolean;
   freightType: 'Initial' | 'Final';
   freightDifferential: string; // extra freight rate per MT (final invoice)
   pctFreightDue: string;       // % of total freight due (e.g. 90 or 100)
@@ -344,9 +371,13 @@ interface SettlementAttachment {
   at: string;
 }
 
-const STATUS_OPTIONS_PDA = ['PDA Draft', 'PDA Submitted', 'PDA Approved', 'FDA Received', 'Approved', 'Closed'];
-const STATUS_OPTIONS_AGENT_SERVICE = ['Open', 'Pending', 'Under Review', 'Approved', 'Paid', 'Closed', 'Settled'];
-const STATUS_OPTIONS_CLAIMS = ['Open', 'Under Review', 'Approved', 'Settled', 'Closed', 'Rejected'];
+const SETTLEMENT_STATUS_OPTIONS = ['Requested', 'Received', 'Under Review', 'Approved', 'Settled'];
+const PAYMENT_STATUS_OPTIONS = ['Pending', 'Paid', 'Partially Paid'];
+const STATUS_OPTIONS_PDA = SETTLEMENT_STATUS_OPTIONS;
+const STATUS_OPTIONS_AGENT_SERVICE = SETTLEMENT_STATUS_OPTIONS;
+const STATUS_OPTIONS_CLAIMS = SETTLEMENT_STATUS_OPTIONS;
+const settlementStatusValue = (value: string | undefined, fallback = 'Requested') => value && SETTLEMENT_STATUS_OPTIONS.includes(value) ? value : fallback;
+const settlementPaymentValue = (value: string | undefined) => value && PAYMENT_STATUS_OPTIONS.includes(value) ? value : 'Pending';
 const CLAIM_CHARGE_TO_OPTIONS = ['Owners', 'Charterers', 'Agents', 'Surveyor', 'Receiver', 'Shipper', 'P&I Club', 'Terminal'];
 
 interface PdaRow {
@@ -359,6 +390,9 @@ interface PdaRow {
   advance: number;
   fdaFinal: number;
   status: string;
+  fdaStatus?: string;
+  paymentStatus?: string;
+  workflowStatus?: HireStatus;
   approval: string;
   attachments?: SettlementAttachment[];
 }
@@ -377,6 +411,8 @@ interface AgentInvoiceRow {
   dept: string;
   accounts: string;
   status: string;
+  paymentStatus?: string;
+  workflowStatus?: HireStatus;
   attachments?: SettlementAttachment[];
 }
 
@@ -390,6 +426,8 @@ interface ServiceRow {
   tax: number;
   reason: string;
   status: string;
+  paymentStatus?: string;
+  workflowStatus?: HireStatus;
   attachments?: SettlementAttachment[];
 }
 
@@ -404,6 +442,8 @@ interface ClaimRow {
   amount: number;
   settlement: number;
   status: string;
+  paymentStatus?: string;
+  workflowStatus?: HireStatus;
   attachments?: SettlementAttachment[];
 }
 
@@ -442,12 +482,13 @@ interface VesselReport {
   consDo: string;        // DO consumed since last report (MT)
   rpm: string;
   mcr: string;           // % MCR
+  slip: string;          // slip percentage
   weather: string;       // winds / waves / currents
   remarks: string;
 }
 
 /** Recap keys whose value is a plain string (everything except arrays). */
-type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'cashflow' | 'vesselReports' | 'eua'>;
+type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'cashflow' | 'vesselReports' | 'notes' | 'eua' | 'additionalVoyageLegs' | 'dischargePortDetails'>;
 
 interface DocItem {
   id: string;
@@ -871,6 +912,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
       { fuel: 'ULSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
       { fuel: 'MGO', bod: '220.00', expBor: '220.00', cpPrice: '750.00', bookedPrice: '0.00', masterReq: '130.00', actualSupply: '5.91', actualBor: '' },
     ],
+    additionalVoyageLegs: [],
     pnlNotes: {},
     etaPlan: {
       startDep: '11-07-2025 15:00',
@@ -1492,9 +1534,9 @@ function seedAlerts(r: Recap, pnl: Pnl): Alert[] {
 
 /* -------------------------------------------------------- small UI helpers */
 
-function Card({ title, icon, right, children, wide, span2, span3 }: { title: string; icon: string; right?: ReactNode; children: ReactNode; wide?: boolean; span2?: boolean; span3?: boolean }) {
+function Card({ title, icon, right, children, wide, span2, span3, className }: { title: string; icon: string; right?: ReactNode; children: ReactNode; wide?: boolean; span2?: boolean; span3?: boolean; className?: string }) {
   return (
-    <section className={`fv-ops__card${wide ? ' fv-ops__card--wide' : ''}${span2 ? ' fv-ops__card--span2' : ''}${span3 ? ' fv-ops__card--span3' : ''}`}>
+    <section className={`fv-ops__card${wide ? ' fv-ops__card--wide' : ''}${span2 ? ' fv-ops__card--span2' : ''}${span3 ? ' fv-ops__card--span3' : ''}${className ? ` ${className}` : ''}`}>
       <header className="fv-ops__card-head">
         <span className="fv-ops__card-title">
           <i className={`fas ${icon}`} aria-hidden="true" /> {title}
@@ -1514,6 +1556,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'hire', label: 'Hire & Claims', icon: 'fa-money-bill-wave' },
   { id: 'freight', label: 'Freight & Laytime', icon: 'fa-file-invoice-dollar' },
   { id: 'reports', label: 'Vessel Reports', icon: 'fa-file-lines' },
+  { id: 'notes', label: 'Notes', icon: 'fa-note-sticky' },
   { id: 'costs', label: 'Tool', icon: 'fa-scale-balanced' },
 ];
 
@@ -1524,7 +1567,7 @@ type RailPanel = 'docs' | 'tasks' | 'alerts' | 'upload' | null;
 export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const selectedVoyage = useSelectedVoyage();
+  const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   // "create" mode (prop or ?new=1) opens a blank operations workspace.
   const createMode = mode === 'create' || searchParams.get('new') === '1';
   const blankVoyage = useMemo(() => makeBlankVoyage(), []);
@@ -1738,6 +1781,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
       <div className="fv-ops__main">
         {/* ===================== SLIM TOP BAR ===================== */}
         <RecapTopBar recap={recap} voyage={voyage} status={opsStatus} onStatus={setOpsStatus} />
+        <VoyageTagsStrip />
 
         {createMode && (
           <div className="fv-ops__create-actions">
@@ -1820,6 +1864,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
           {tab === 'freight' && <FreightTab recap={recap} setRecap={setRecap} voyage={voyage} />}
           {tab === 'costs' && <CostsTab />}
           {tab === 'reports' && <ReportsTab recap={recap} setRecap={setRecap} voyage={voyage} />}
+          {tab === 'notes' && <NotesTab recap={recap} setRecap={setRecap} />}
         </div>
       </div>
 
@@ -2065,11 +2110,11 @@ function VdPort({ label, value, onChange, ports, accent }: { label: string; valu
 }
 
 /** Numeric value paired with a unit / currency dropdown. */
-function VdValueUnit({ label, value, onValue, unit, onUnit, units, accent, num }: { label: string; value: string; onValue: (v: string) => void; unit: string; onUnit: (v: string) => void; units: string[]; accent?: boolean; num?: boolean }) {
+function VdValueUnit({ label, value, onValue, unit, onUnit, units, accent, num, className }: { label: string; value: string; onValue: (v: string) => void; unit: string; onUnit: (v: string) => void; units: string[]; accent?: boolean; num?: boolean; className?: string }) {
   return (
     <label className="fv-ops__vd-field">
       <span>{label}</span>
-      <span className="fv-ops__vd-unitwrap">
+      <span className={`fv-ops__vd-unitwrap${className ? ` ${className}` : ''}`}>
         <input className={`fv-ops__vd-in${accent ? ' fv-ops__vd-in--accent' : ''}`} inputMode={num ? 'decimal' : undefined} value={value} onChange={(e) => onValue(e.target.value)} />
         <select className="fv-ops__vd-unit" value={unit} onChange={(e) => onUnit(e.target.value)}>
           {units.map((u) => <option key={u} value={u}>{u}</option>)}
@@ -2088,10 +2133,10 @@ function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage
   return (
     <div className="fv-ops__topbar">
       <div className="fv-ops__recap-title">
+        <ModuleVesselSearch />
         <i className="fas fa-ship" aria-hidden="true" />
         <div>
-          <h1>{recap.vesselName}</h1>
-          <span className="fv-ops__recap-sub">
+          <span className="fv-ops__recap-sub fv-ops__recap-details">
             {recap.voyageFixType} · {account} / CPDD {cpdd || recap.cpDate || '—'} - {portFrom} - {portTo}
           </span>
         </div>
@@ -2112,6 +2157,25 @@ function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage
 
 export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; status: string }) {
   const set = (k: keyof Recap, v: string) => setRecap((r) => ({ ...r, [k]: v }));
+  const extraLegs = recap.additionalVoyageLegs ?? [];
+  const splitPorts = (value: string) => (value || '').split(/\s*(?:\+|\/|,|;)\s*/).map((port) => port.trim()).filter(Boolean);
+  const updatePortPart = (field: 'loadPort' | 'dischargePort', index: number, value: string) => setRecap((r) => {
+    const ports = splitPorts(r[field]);
+    ports[index] = value;
+    return { ...r, [field]: ports.join(' + ') };
+  });
+  const dischargeDetails = recap.dischargePortDetails ?? [];
+  const updateDischargeDetail = (index: number, patch: Partial<{ loiObl: string; loiStatus: string }>) => setRecap((r) => ({
+    ...r,
+    dischargePortDetails: splitPorts(r.dischargePort).map((_, detailIndex) => ({
+      loiObl: r.dischargePortDetails?.[detailIndex]?.loiObl ?? r.loiOblDPort,
+      loiStatus: r.dischargePortDetails?.[detailIndex]?.loiStatus ?? r.loiStatus,
+      ...(detailIndex === index ? patch : {}),
+    })),
+  }));
+  const addVoyageLeg = () => setRecap((r) => ({ ...r, additionalVoyageLegs: [...(r.additionalVoyageLegs ?? []), { id: `leg-${Date.now()}`, type: 'Port', port: '', term: '', rate: '', pda: '', dateTime: '', notice: '', loi: '', loiStatus: '' }] }));
+  const updateVoyageLeg = (id: string, patch: Partial<NonNullable<Recap['additionalVoyageLegs']>[number]>) => setRecap((r) => ({ ...r, additionalVoyageLegs: (r.additionalVoyageLegs ?? []).map((leg) => leg.id === id ? { ...leg, ...patch } : leg) }));
+  const removeVoyageLeg = (id: string) => setRecap((r) => ({ ...r, additionalVoyageLegs: (r.additionalVoyageLegs ?? []).filter((leg) => leg.id !== id) }));
 
   const OPS_ALLOWED_VOYAGE_TYPES = [
     'TCIN-TCOUT',
@@ -2263,8 +2327,6 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
             <VdSelect label="Voyage / Fix Type" value={recap.voyageFixType} onChange={(v) => set('voyageFixType', v)} options={OPS_ALLOWED_VOYAGE_TYPES} />
             {showVoyageCargo && <VdCombo label="Cargo Name" value={recap.cargoName} onChange={(v) => set('cargoName', v)} options={OPS_COMMON_CARGOES} accent />}
             {showVoyageCargo && <VdValueUnit label="CP Quantity" value={recap.cpQuantity} onValue={(v) => set('cpQuantity', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} />}
-            {showVoyageCargo && <VdValueUnit label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num />}
-            {showVoyageCargo && <VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} />}
             {showVoyageCargo && <VdSelect label="Hold Cleaning" value={recap.holdCleaning} onChange={(v) => set('holdCleaning', v)} options={OPS_HOLD_CLEANING} />}
             {showDelivery && (
               <label className="fv-ops__vd-field">
@@ -2277,11 +2339,42 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           </div>
         </Card>
 
+        <Card title="Vessel Profile" icon="fa-id-card" span2 className="fv-ops__vd-vessel-profile">
+          <div className="fv-ops__vd-sub-head"><i className="fas fa-ruler-combined" aria-hidden="true" /> Vessel &amp; Engine Details</div>
+          <div className="fv-ops__vd-fields">
+            <VdField label="LOA (m)" value={recap.vesselLoa || voyage.loa || ''} onChange={(v) => set('vesselLoa', v)} num />
+            <VdField label="Beam (m)" value={recap.vesselBeam || voyage.beam || ''} onChange={(v) => set('vesselBeam', v)} num />
+            <VdField label="Default Draft — Ballast (m)" value={recap.draftBallast || ''} onChange={(v) => set('draftBallast', v)} num />
+            <VdField label="Default Draft — Laden (m)" value={recap.draftLaden || ''} onChange={(v) => set('draftLaden', v)} num />
+            <VdField label="Engine RPM Min" value={recap.engineRpmMin || ''} onChange={(v) => set('engineRpmMin', v)} num />
+            <VdField label="Engine RPM Max" value={recap.engineRpmMax || ''} onChange={(v) => set('engineRpmMax', v)} num />
+            <VdField label="MCR Min (kW)" value={recap.engineMcrMin || ''} onChange={(v) => set('engineMcrMin', v)} num />
+            <VdField label="MCR Max (kW)" value={recap.engineMcrMax || voyage.enginePower || ''} onChange={(v) => set('engineMcrMax', v)} num />
+          </div>
+          <div className="fv-ops__vd-sub-head"><i className="fas fa-gears" aria-hidden="true" /> Scrubber, Cranes &amp; Grabs</div>
+          <div className="fv-ops__vd-fields">
+            <VdField label="Scrubber Fitted" value={recap.scrubberFitted || 'No'} onChange={(v) => set('scrubberFitted', v)} />
+            <VdField label="Scrubber Type" value={recap.scrubberType || ''} onChange={(v) => set('scrubberType', v)} />
+            <VdField label="Number of Cranes" value={recap.craneCount || ''} onChange={(v) => set('craneCount', v)} num />
+            <VdField label="Crane SWL (MT)" value={recap.craneSwl || ''} onChange={(v) => set('craneSwl', v)} num />
+            <VdField label="Crane Safe Limit (MT)" value={recap.craneSafeLimit || ''} onChange={(v) => set('craneSafeLimit', v)} num />
+            <VdField label="Number of Grabs" value={recap.grabCount || ''} onChange={(v) => set('grabCount', v)} num />
+            <VdField label="Grab Weight (MT)" value={recap.grabWeight || ''} onChange={(v) => set('grabWeight', v)} num />
+            <VdField label="Grab Safety Limit (MT)" value={recap.grabSafeLimit || ''} onChange={(v) => set('grabSafeLimit', v)} num />
+          </div>
+        </Card>
+
         <Card title="Owners" icon="fa-building">
           <div className="fv-ops__vd-fields">
             <VdCombo label="Owners" value={recap.owners} onChange={(v) => set('owners', v)} options={ownerNames} accent />
             <VdCombo label="Owners Broker" value={recap.ownersBroker} onChange={(v) => set('ownersBroker', v)} options={brokerNames} />
             <VdField label="CP Date" value={recap.cpDate} onChange={(v) => set('cpDate', v)} placeholder="dd-mm-yyyy" />
+            {recap.bunkers.map((fuel, index) => (
+              <Fragment key={`${fuel.fuel}-${index}`}>
+                <VdField label={`${fuel.fuel || 'Fuel'} BOD (MT)`} value={fuel.bod} onChange={(v) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, bod: v } : line) }))} num />
+                <VdField label={`${fuel.fuel || 'Fuel'} BOR (MT)`} value={fuel.actualBor} onChange={(v) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: v } : line) }))} num />
+              </Fragment>
+            ))}
             {showHireFields && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
           {showHireFields && (
@@ -2361,50 +2454,18 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           )}
         </Card>
 
-        {showDelivery && <Card title="Delivery / Redelivery" icon="fa-clock">
-          <div className="fv-ops__vd-dr">
-            <div className="fv-ops__vd-dr-col">
-              <VdPort label="Delivery Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} ports={worldPorts} accent />
-              <VdSelect label="Delivery Term" value={recap.deliveryTerm} onChange={(v) => set('deliveryTerm', v)} options={OPS_BERTH_TERMS} />
-              <VdDateTime label="Delivery Date / Time" value={recap.deliveryDateTime} onChange={(v) => set('deliveryDateTime', v)} accent />
-            </div>
-            <div className="fv-ops__vd-dr-col">
-              <VdPort label="Redelivery Port" value={recap.redeliveryPort} onChange={(v) => set('redeliveryPort', v)} ports={worldPorts} accent />
-              <VdSelect label="Redelivery Term" value={recap.redeliveryTerm} onChange={(v) => set('redeliveryTerm', v)} options={OPS_BERTH_TERMS} />
-              <VdDateTime label="Redelivery Date / Time" value={recap.redeliveryDateTime} onChange={(v) => set('redeliveryDateTime', v)} accent />
-            </div>
-          </div>
-          <div className="fv-ops__vd-sub">
-            <div className="fv-ops__vd-sub-head"><i className="fas fa-bell" aria-hidden="true" /> Delivery Notices — from Owners (days)</div>
-            <div className="fv-ops__vd-chips">
-              {delNotices.length === 0 && <span className="fv-ops__vd-empty">No notices set</span>}
-              {delNotices.map((d) => (
-                <span key={d} className="fv-ops__vd-chip">
-                  {d}
-                  <button type="button" aria-label={`Remove ${d} day delivery notice`} onClick={() => setDelNotices(delNotices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button>
-                </span>
-              ))}
-              <select className="fv-ops__vd-unit" value="" aria-label="Add delivery notice" onChange={(e) => { if (e.target.value) { setDelNotices([...delNotices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}>
-                <option value="">＋ Add</option>
-                {OPS_NOTICE_DAYS.filter((d) => !delNotices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="fv-ops__vd-sub">
-            <div className="fv-ops__vd-sub-head"><i className="fas fa-bell-slash" aria-hidden="true" /> Redelivery Notices — to Charterers &amp; Owners (days)</div>
-            <div className="fv-ops__vd-chips">
-              {notices.length === 0 && <span className="fv-ops__vd-empty">No notices set</span>}
-              {notices.map((d) => (
-                <span key={d} className="fv-ops__vd-chip">
-                  {d}
-                  <button type="button" aria-label={`Remove ${d} day notice`} onClick={() => setNotices(notices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button>
-                </span>
-              ))}
-              <select className="fv-ops__vd-unit" value="" aria-label="Add redelivery notice" onChange={(e) => { if (e.target.value) { setNotices([...notices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}>
-                <option value="">＋ Add</option>
-                {OPS_NOTICE_DAYS.filter((d) => !notices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}
-              </select>
-            </div>
+        {(showDelivery || showLoadDischarge) && <Card title="Delivery / Redelivery / Load Port / Discharge Port" icon="fa-route" className="fv-ops__vd-voyage-legs" right={<button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={addVoyageLeg}><i className="fas fa-plus" aria-hidden="true" /> Add Leg</button>}>
+          <div className="fv-ops__legs-table">
+            <div className="fv-ops__legs-head"><span>Type</span><span>Port</span><span>Delivery / NOR Terms</span><span>Date &amp; Time UTC / Rate / PDA</span><span>Notice / LOI-OBL / Status</span></div>
+            {showDelivery && <>
+              <div className="fv-ops__legs-row fv-ops__legs-row--delivery"><strong>Delivery</strong><VdPort label="Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} ports={worldPorts} accent /><VdSelect label="Term" value={recap.deliveryTerm} onChange={(v) => set('deliveryTerm', v)} options={OPS_BERTH_TERMS} /><VdDateTime label="Delivery Date & Time UTC" value={recap.deliveryDateTime} onChange={(v) => set('deliveryDateTime', v)} accent /><div className="fv-ops__legs-notice">{delNotices.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day delivery notice`} onClick={() => setDelNotices(delNotices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label="Add delivery notice" onChange={(e) => { if (e.target.value) { setDelNotices([...delNotices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">＋ Add</option>{OPS_NOTICE_DAYS.filter((d) => !delNotices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div></div>
+              <div className="fv-ops__legs-row fv-ops__legs-row--redelivery"><strong>Redelivery</strong><VdPort label="Port" value={recap.redeliveryPort} onChange={(v) => set('redeliveryPort', v)} ports={worldPorts} accent /><VdSelect label="Term" value={recap.redeliveryTerm} onChange={(v) => set('redeliveryTerm', v)} options={OPS_BERTH_TERMS} /><VdDateTime label="Redelivery Date & Time UTC" value={recap.redeliveryDateTime} onChange={(v) => set('redeliveryDateTime', v)} accent /><div className="fv-ops__legs-notice">{notices.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day notice`} onClick={() => setNotices(notices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label="Add redelivery notice" onChange={(e) => { if (e.target.value) { setNotices([...notices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">＋ Add</option>{OPS_NOTICE_DAYS.filter((d) => !notices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div></div>
+            </>}
+            {showLoadDischarge && <>
+              {splitPorts(recap.loadPort).map((port, index) => <div className="fv-ops__legs-row fv-ops__legs-row--loading" key={`load-${index}`}><strong>Loading</strong><VdPort label="Port" value={port} onChange={(v) => updatePortPart('loadPort', index, v)} ports={worldPorts} accent /><VdSelect label="NOR" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} /><div className="fv-ops__legs-stack"><VdField label="Load Rate" value={recap.loadRate} onChange={(v) => set('loadRate', v)} /><VdField label="PDA" value={recap.pdaLoadPort} onChange={(v) => set('pdaLoadPort', v)} /></div><div className="fv-ops__legs-stack"><VdValueUnit className="fv-ops__bl-qty" label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num /><VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} /></div></div>)}
+              {extraLegs.map((leg) => <div className="fv-ops__legs-row fv-ops__legs-row--manual" key={leg.id}><input className="fv-ops__vd-in" value={leg.type} aria-label="Leg type" onChange={(e) => updateVoyageLeg(leg.id, { type: e.target.value })} /><input className="fv-ops__vd-in" value={leg.port} aria-label="Leg port" onChange={(e) => updateVoyageLeg(leg.id, { port: e.target.value })} /><input className="fv-ops__vd-in" value={leg.term} aria-label="Leg term" onChange={(e) => updateVoyageLeg(leg.id, { term: e.target.value })} /><div className="fv-ops__legs-stack"><input className="fv-ops__vd-in" value={leg.dateTime} aria-label="Leg date and time" placeholder="UTC" onChange={(e) => updateVoyageLeg(leg.id, { dateTime: e.target.value })} /><input className="fv-ops__vd-in" value={leg.rate} aria-label="Leg rate" placeholder="Rate" onChange={(e) => updateVoyageLeg(leg.id, { rate: e.target.value })} /><input className="fv-ops__vd-in" value={leg.pda} aria-label="Leg PDA" placeholder="PDA" onChange={(e) => updateVoyageLeg(leg.id, { pda: e.target.value })} /></div><div className="fv-ops__legs-stack"><input className="fv-ops__vd-in" value={leg.notice} aria-label="Leg notice" placeholder="Notice" onChange={(e) => updateVoyageLeg(leg.id, { notice: e.target.value })} /><input className="fv-ops__vd-in" value={leg.loi} aria-label="Leg LOI or OBL" placeholder="LOI / OBL" onChange={(e) => updateVoyageLeg(leg.id, { loi: e.target.value })} /><input className="fv-ops__vd-in" value={leg.loiStatus} aria-label="Leg LOI status" placeholder="Status" onChange={(e) => updateVoyageLeg(leg.id, { loiStatus: e.target.value })} /><button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove leg" onClick={() => removeVoyageLeg(leg.id)}><i className="fas fa-trash" aria-hidden="true" /></button></div></div>)}
+              {splitPorts(recap.dischargePort).map((port, index) => <div className="fv-ops__legs-row fv-ops__legs-row--discharge" key={`discharge-${index}`}><strong>Discharge</strong><VdPort label="Port" value={port} onChange={(v) => updatePortPart('dischargePort', index, v)} ports={worldPorts} accent /><VdSelect label="NOR" value={recap.norAtDPort} onChange={(v) => set('norAtDPort', v)} options={OPS_NOR_TENDER_TERMS} /><div className="fv-ops__legs-stack"><VdField label="Disch. Rate" value={recap.dischRate} onChange={(v) => set('dischRate', v)} /><VdField label="PDA" value={recap.pdaDPort} onChange={(v) => set('pdaDPort', v)} /></div><div className="fv-ops__legs-stack"><VdSelect label="LOI / OBL" value={dischargeDetails[index]?.loiObl ?? recap.loiOblDPort} onChange={(v) => updateDischargeDetail(index, { loiObl: v })} options={OPS_LOI_OBL} />{(dischargeDetails[index]?.loiObl ?? recap.loiOblDPort) === 'LOI' && <VdSelect label="LOI Status" value={dischargeDetails[index]?.loiStatus ?? recap.loiStatus} onChange={(v) => updateDischargeDetail(index, { loiStatus: v })} options={OPS_LOI_STATUS} />}</div></div>)}
+            </>}
           </div>
         </Card>}
 
@@ -2421,25 +2482,6 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
             <VdField label="Hull Cleaning Clause" value={recap.hullCleaningClause} onChange={(v) => set('hullCleaningClause', v)} />
           </div>
         </Card>
-
-        {showLoadDischarge && <Card title="Load & Discharge Ports" icon="fa-anchor" span2>
-          <div className="fv-ops__vd-fields">
-            <VdPort label="Load Port" value={recap.loadPort} onChange={(v) => set('loadPort', v)} ports={worldPorts} accent />
-            <VdSelect label="NOR at Load Port" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} />
-            <VdField label="Load Rate" value={recap.loadRate} onChange={(v) => set('loadRate', v)} />
-            <VdField label="PDA Load Port" value={recap.pdaLoadPort} onChange={(v) => set('pdaLoadPort', v)} />
-            <VdPort label="Discharge Port" value={recap.dischargePort} onChange={(v) => set('dischargePort', v)} ports={worldPorts} accent />
-            <VdSelect label="NOR at D.Port" value={recap.norAtDPort} onChange={(v) => set('norAtDPort', v)} options={OPS_NOR_TENDER_TERMS} />
-            <VdField label="Disch. Rate" value={recap.dischRate} onChange={(v) => set('dischRate', v)} />
-            <VdField label="PDA D.Port" value={recap.pdaDPort} onChange={(v) => set('pdaDPort', v)} />
-            <VdSelect label="LOI / OBL at D.Port" value={recap.loiOblDPort} onChange={(v) => set('loiOblDPort', v)} options={OPS_LOI_OBL} />
-            {recap.loiOblDPort === 'LOI' && (
-              <VdSelect label="LOI Status" value={recap.loiStatus} onChange={(v) => set('loiStatus', v)} options={OPS_LOI_STATUS} />
-            )}
-          </div>
-        </Card>}
-
-        <BunkersCard recap={recap} setRecap={setRecap} />
 
         <Card
           title="Service Providers"
@@ -2488,28 +2530,19 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
 /** Bunkering figures per fuel grade + a one-line bunker specs field. */
 function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
   const fuels = recap.bunkers;
-  const setFuel = (i: number, k: keyof BunkerFuel, v: string) =>
-    setRecap((r) => ({ ...r, bunkers: r.bunkers.map((f, idx) => (idx === i ? { ...f, [k]: v } : f)) }));
-  const addFuel = (grade = '') =>
-    setRecap((r) => ({ ...r, bunkers: [...r.bunkers, { fuel: grade, bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' }] }));
-  const removeFuel = (i: number) =>
-    setRecap((r) => ({ ...r, bunkers: r.bunkers.filter((_, idx) => idx !== i) }));
-  // 5% margin on the BOD qty, both down (−5%) and up (+5%), stacked vertically.
+  const setFuel = (i: number, k: keyof BunkerFuel, v: string) => setRecap((r) => ({ ...r, bunkers: r.bunkers.map((f, idx) => (idx === i ? { ...f, [k]: v } : f)) }));
+  const addFuel = (grade = '') => setRecap((r) => ({ ...r, bunkers: [...r.bunkers, { fuel: grade, bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' }] }));
+  const removeFuel = (i: number) => setRecap((r) => ({ ...r, bunkers: r.bunkers.filter((_, idx) => idx !== i) }));
   const margin = (v: string) => {
     const n = parseFloat((v || '').replace(/,/g, ''));
     if (!Number.isFinite(n)) return <span>—</span>;
-    return (
-      <span className="fv-ops__bnk-margin">
-        <span className="fv-ops__bnk-margin-up">+5% {(n * 1.05).toFixed(2)}</span>
-        <span className="fv-ops__bnk-margin-dn">−5% {(n * 0.95).toFixed(2)}</span>
-      </span>
-    );
+    return <span className="fv-ops__bnk-margin"><span className="fv-ops__bnk-margin-up">+5% {(n * 1.05).toFixed(2)}</span><span className="fv-ops__bnk-margin-dn">−5% {(n * 0.95).toFixed(2)}</span></span>;
   };
   const rows: { key: keyof BunkerFuel; label: string }[] = [
-    { key: 'bod', label: 'BOD (MT)' },
+    { key: 'bod', label: 'Bunkers on Delivery (MT)' },
     { key: 'expBor', label: 'Expected BOR (MT)' },
-    { key: 'cpPrice', label: 'CP Price (USD)' },
-    { key: 'bookedPrice', label: 'Booked Price (USD)' },
+    { key: 'cpPrice', label: 'CP Price (USD/MT)' },
+    { key: 'bookedPrice', label: 'Booked Price (USD/MT)' },
     { key: 'masterReq', label: 'Master Requirement (MT)' },
     { key: 'actualSupply', label: 'Actual Supply (MT)' },
     { key: 'actualBor', label: 'Actual BOR (MT)' },
@@ -2527,6 +2560,7 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
       title="Bunkers"
       icon="fa-gas-pump"
       span3
+      className="fv-ops__vd-bunkers"
       right={(
         <select
           className="fv-ops__vd-unit fv-ops__vd-unit--wide"
@@ -3788,9 +3822,13 @@ interface HirePayEntry { status: string; ballast: boolean; name?: string; from?:
 interface HireDuplicate { id: string; name: string; account: string; from: string; to: string; onHire: number; offHire: number; amount: number; due: string; status: string }
 
 /** Hire installment workflow states. */
-const HIRE_FLOW = ['Draft', 'Sent For Approval', 'Approved & Sent for Payment', 'Paid & Locked'] as const;
+const HIRE_FLOW = ['Draft', 'Sent For Approval', 'Approved', 'Sent For Payment', 'Paid & Locked'] as const;
 type HireStatus = (typeof HIRE_FLOW)[number];
-const hireLocked = (s: HireStatus) => s === 'Approved & Sent for Payment' || s === 'Paid & Locked';
+function normalizeHireStatus(value: unknown): HireStatus {
+  if (value === 'Approved & Sent for Payment') return 'Approved';
+  return HIRE_FLOW.includes(value as HireStatus) ? value as HireStatus : 'Draft';
+}
+const hireLocked = (s: HireStatus) => s === 'Sent For Payment' || s === 'Paid & Locked';
 const hireStatusPill = (s: HireStatus) => (s === 'Draft' ? 'blue' : s === 'Paid & Locked' ? 'green' : 'amber');
 const OFFHIRE_CATS = ['A. Working (Port)', 'B. Idle (Sea/Port)', 'C. Sea Off-Hire', 'D. Weather / WRI Time Loss'];
 
@@ -3804,7 +3842,10 @@ function offHireDays(o: OffHireRow): number {
   return Math.max(0, days) * (pct / 100);
 }
 
-export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; voyage: Voyage }) {
+export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; voyage: Voyage; module?: 'Operations' | 'Postfix' }) {
+  const { isInRole } = useFleetView();
+  const canApproveHire = isInRole('Manager, Operations Manager, Administrator');
+  const fixtureNo = useFixtureNumbers()[voyage.id] ?? voyage.id;
   const hd = num(recap.hirePerDay);
   const dedPct = num(recap.adcom) + num(recap.brokerage);
   const cur = recap.hireCurrency || 'USD';
@@ -3839,11 +3880,11 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
 
   const stateOf = (key: string): HirePayEntry => {
     const s = recap.hirePayState[key];
-    return { status: (s?.status as HireStatus) ?? 'Draft', ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
+    return { status: normalizeHireStatus(s?.status), ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
   };
   const setState = (key: string, patch: Partial<HirePayEntry>) =>
     setRecap((r) => ({ ...r, hirePayState: { ...r.hirePayState, [key]: { ...stateOfRaw(r, key), ...patch } } }));
-  const stateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: (r.hirePayState[key]?.status as HireStatus) ?? 'Draft', ballast: r.hirePayState[key]?.ballast ?? false, name: r.hirePayState[key]?.name, from: r.hirePayState[key]?.from, to: r.hirePayState[key]?.to, offHire: r.hirePayState[key]?.offHire ?? [], bunkerPay: r.hirePayState[key]?.bunkerPay ?? false, bunkerRev: r.hirePayState[key]?.bunkerRev ?? false, jointOn: r.hirePayState[key]?.jointOn, jointOff: r.hirePayState[key]?.jointOff, hra: r.hirePayState[key]?.hra, ownersExp: r.hirePayState[key]?.ownersExp, ownersClaim: r.hirePayState[key]?.ownersClaim, ownersClaimIds: r.hirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.hirePayState[key]?.ilohcOn, borV: r.hirePayState[key]?.borV, borM: r.hirePayState[key]?.borM, borFo: r.hirePayState[key]?.borFo, borDo: r.hirePayState[key]?.borDo, bunkerPayOff: r.hirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.hirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.hirePayState[key]?.extraExpenses ?? [], deleted: r.hirePayState[key]?.deleted ?? false });
+  const stateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: normalizeHireStatus(r.hirePayState[key]?.status), ballast: r.hirePayState[key]?.ballast ?? false, name: r.hirePayState[key]?.name, from: r.hirePayState[key]?.from, to: r.hirePayState[key]?.to, offHire: r.hirePayState[key]?.offHire ?? [], bunkerPay: r.hirePayState[key]?.bunkerPay ?? false, bunkerRev: r.hirePayState[key]?.bunkerRev ?? false, jointOn: r.hirePayState[key]?.jointOn, jointOff: r.hirePayState[key]?.jointOff, hra: r.hirePayState[key]?.hra, ownersExp: r.hirePayState[key]?.ownersExp, ownersClaim: r.hirePayState[key]?.ownersClaim, ownersClaimIds: r.hirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.hirePayState[key]?.ilohcOn, borV: r.hirePayState[key]?.borV, borM: r.hirePayState[key]?.borM, borFo: r.hirePayState[key]?.borFo, borDo: r.hirePayState[key]?.borDo, bunkerPayOff: r.hirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.hirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.hirePayState[key]?.extraExpenses ?? [], deleted: r.hirePayState[key]?.deleted ?? false });
   // Bunker reversal anchor is single-select: setting one clears the flag on other installments.
   const setBunkerAnchor = (key: string, field: 'bunkerPay' | 'bunkerRev', on: boolean) =>
     setRecap((r) => {
@@ -3873,9 +3914,9 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
 
   const charterStateOf = (key: string): HirePayEntry => {
     const s = recap.charterHirePayState[key];
-    return { status: (s?.status as HireStatus) ?? 'Draft', ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
+    return { status: normalizeHireStatus(s?.status), ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
   };
-  const charterStateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: (r.charterHirePayState[key]?.status as HireStatus) ?? 'Draft', ballast: r.charterHirePayState[key]?.ballast ?? false, name: r.charterHirePayState[key]?.name, from: r.charterHirePayState[key]?.from, to: r.charterHirePayState[key]?.to, offHire: r.charterHirePayState[key]?.offHire ?? [], bunkerPay: r.charterHirePayState[key]?.bunkerPay ?? false, bunkerRev: r.charterHirePayState[key]?.bunkerRev ?? false, jointOn: r.charterHirePayState[key]?.jointOn, jointOff: r.charterHirePayState[key]?.jointOff, hra: r.charterHirePayState[key]?.hra, ownersExp: r.charterHirePayState[key]?.ownersExp, ownersClaim: r.charterHirePayState[key]?.ownersClaim, ownersClaimIds: r.charterHirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.charterHirePayState[key]?.ilohcOn, borV: r.charterHirePayState[key]?.borV, borM: r.charterHirePayState[key]?.borM, borFo: r.charterHirePayState[key]?.borFo, borDo: r.charterHirePayState[key]?.borDo, bunkerPayOff: r.charterHirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.charterHirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.charterHirePayState[key]?.extraExpenses ?? [], deleted: r.charterHirePayState[key]?.deleted ?? false });
+  const charterStateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: normalizeHireStatus(r.charterHirePayState[key]?.status), ballast: r.charterHirePayState[key]?.ballast ?? false, name: r.charterHirePayState[key]?.name, from: r.charterHirePayState[key]?.from, to: r.charterHirePayState[key]?.to, offHire: r.charterHirePayState[key]?.offHire ?? [], bunkerPay: r.charterHirePayState[key]?.bunkerPay ?? false, bunkerRev: r.charterHirePayState[key]?.bunkerRev ?? false, jointOn: r.charterHirePayState[key]?.jointOn, jointOff: r.charterHirePayState[key]?.jointOff, hra: r.charterHirePayState[key]?.hra, ownersExp: r.charterHirePayState[key]?.ownersExp, ownersClaim: r.charterHirePayState[key]?.ownersClaim, ownersClaimIds: r.charterHirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.charterHirePayState[key]?.ilohcOn, borV: r.charterHirePayState[key]?.borV, borM: r.charterHirePayState[key]?.borM, borFo: r.charterHirePayState[key]?.borFo, borDo: r.charterHirePayState[key]?.borDo, bunkerPayOff: r.charterHirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.charterHirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.charterHirePayState[key]?.extraExpenses ?? [], deleted: r.charterHirePayState[key]?.deleted ?? false });
   const setCharterState = (key: string, patch: Partial<HirePayEntry>) =>
     setRecap((r) => ({ ...r, charterHirePayState: { ...r.charterHirePayState, [key]: { ...charterStateOfRaw(r, key), ...patch } } }));
   const setCharterBunkerAnchor = (key: string, field: 'bunkerPay' | 'bunkerRev', on: boolean) =>
@@ -4208,21 +4249,25 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
   const charterTotalOnHireDays = charterRows.reduce((s, r) => s + r.onHire, 0);
   const charterTotalOffHireDays = charterRows.reduce((s, r) => s + r.offHire, 0);
 
-  // Workflow transitions per installment — push to Accounts when sent for approval.
+  // Workflow transitions: Operations requests approval; only managers approve;
+  // the payable is created when Operations sends an approved hire to Accounts.
   const advance = (key: string, to: HireStatus) => {
     setState(key, { status: to });
+    const row = rows.find((r) => r.key === key);
+    if (!row) return;
     if (to === 'Sent For Approval') {
-      const row = rows.find((r) => r.key === key);
-      if (row) {
-        addPayable({
-          reference: voyage.id, vessel: recap.vesselName, voyage: voyage.id,
-          supplier: recap.owners || 'Owners',
-          invoiceNo: `HIR-${voyage.id}-${key}`,
-          amount: row.amount, currency: recap.hireCurrency || 'USD',
-          module: 'Operations', category: 'Hire',
-        });
-        addNotification(`Hire payment ${row.name} for ${recap.vesselName} sent to Accounts.`, 'Accounts');
-      }
+      addNotification(`Hire payment ${row.name} for ${recap.vesselName} is ready for manager review and approval. Vessel: ${recap.vesselName}; Voyage: ${voyage.id}.`, 'Manager');
+    } else if (to === 'Approved') {
+      addNotification(`Hire payment ${row.name} for ${recap.vesselName} was approved by the manager. The payment is ready to send to Accounts.`, module);
+    } else if (to === 'Sent For Payment') {
+      addPayable({
+        reference: fixtureNo, vessel: recap.vesselName, voyage: voyage.id,
+        supplier: recap.owners || 'Owners',
+        invoiceNo: `HIR-${voyage.id}-${key}`,
+        amount: row.amount, currency: recap.hireCurrency || 'USD',
+        module, category: 'Hire',
+      });
+      addNotification(`Hire payment ${row.name} sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${recap.vesselName}; Voyage: ${voyage.id}; Amount: ${money(row.amount)}.`, 'Accounts');
     }
   };
   const setHireName = (key: string, name: string) => setState(key, { name: name.trim() || undefined });
@@ -4243,13 +4288,13 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
   const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
 
   const addClaim = () => {
-    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Open', attachments: [] };
+    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Requested', paymentStatus: 'Pending', attachments: [] };
     setSettlement({ claims: [...settlement.claims, row] });
     setClaimId(row.id);
   };
   const saveClaim = (id: string, patch: Partial<ClaimRow>) => setSettlement({ claims: settlement.claims.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
   const deleteSelClaims = () => { setSettlement({ claims: settlement.claims.filter((x) => !selClaims.has(x.id)) }); setSelClaims(new Set()); };
-  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Open' }))] }); setSelClaims(new Set()); };
+  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Requested', paymentStatus: 'Pending' }))] }); setSelClaims(new Set()); };
   const updateSelClaimStatus = () => {
     setClaimStatusValue('Under Review');
     setClaimStatusOpen(true);
@@ -4265,6 +4310,37 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
     printSections(`Claims — ${recap.vesselName}`, `<section><h1>Claims</h1><table><thead><tr><th>Type</th><th>Reference</th><th>Charge To</th><th class="r">Amount</th><th class="r">Settlement</th><th class="r">Balance</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></section>`);
   };
   const openClaim = settlement.claims.find((x) => x.id === claimId) ?? null;
+
+  const sendPayable = (id: string, supplier: string, invoiceNo: string, amount: number, dueDate: string, category: 'PDA' | 'FDA' | 'Agency' | 'Claims') => {
+    if (amount <= 0) return;
+    addPayable({ reference: `${voyage.id}-${id}`, vessel: voyage.vessel, voyage: voyage.id, supplier: supplier || 'Settlement counterparty', invoiceNo, amount, currency: 'USD', dueDate: dueDate || '—', module, category });
+  };
+  const sendSelectedClaimsToAccounts = () => {
+    settlement.claims.filter((x) => selClaims.has(x.id)).forEach((x) => sendPayable(x.id, claimChargeTo(x), `CLM-${voyage.id}-${x.id}`, Math.max(0, x.amount - (x.settlement || 0)), x.due || '', 'Claims'));
+    addNotification(`Selected claims for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+  };
+  const advanceClaim = (id: string, to: HireStatus) => {
+    setSettlement({ claims: settlement.claims.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
+    const row = settlement.claims.find((x) => x.id === id);
+    if (!row) return;
+    if (to === 'Sent For Approval') addNotification(`Claim ${row.reference || row.type} for ${voyage.vessel} is ready for manager review and approval.`, 'Manager');
+    else if (to === 'Approved') addNotification(`Claim ${row.reference || row.type} for ${voyage.vessel} was approved by the manager and is ready to send to Accounts.`, module);
+    else if (to === 'Sent For Payment') {
+      sendPayable(row.id, claimChargeTo(row), `CLM-${voyage.id}-${row.id}`, Math.max(0, row.amount - (row.settlement || 0)), row.due || '', 'Claims');
+      addNotification(`Claim ${row.reference || row.type} sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}.`, 'Accounts');
+    }
+  };
+  const claimActions = (id: string, workflowStatus: HireStatus = 'Draft') => (
+    <span className="fv-ops__hire-actions">
+      {workflowStatus === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advanceClaim(id, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval</button>}
+      {workflowStatus === 'Sent For Approval' && canApproveHire && <>
+        <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceClaim(id, 'Approved')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
+        <button type="button" className="fv-ops__btn" onClick={() => advanceClaim(id, 'Draft')}><i className="fas fa-rotate-left" aria-hidden="true" /> Reject</button>
+      </>}
+      {workflowStatus === 'Approved' && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceClaim(id, 'Sent For Payment')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Payment</button>}
+      {workflowStatus === 'Sent For Payment' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => advanceClaim(id, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+    </span>
+  );
 
   const toggleSelect = (key: string) => setSelectedKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const deleteSelected = () => {
@@ -4323,7 +4399,19 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
     w.print();
   };
 
-  const advanceCharter = (key: string, to: HireStatus) => setCharterState(key, { status: to });
+  const advanceCharter = (key: string, to: HireStatus) => {
+    setCharterState(key, { status: to });
+    const row = charterRows.find((r) => r.key === key);
+    if (!row) return;
+    if (to === 'Sent For Approval') {
+      addNotification(`Charterers hire payment ${row.name} for ${recap.vesselName} is ready for manager review and approval. Vessel: ${recap.vesselName}; Voyage: ${voyage.id}.`, 'Manager');
+    } else if (to === 'Approved') {
+      addNotification(`Charterers hire payment ${row.name} for ${recap.vesselName} was approved by the manager. The payment is ready to send to Accounts.`, module);
+    } else if (to === 'Sent For Payment') {
+      addPayable({ reference: fixtureNo, vessel: recap.vesselName, voyage: voyage.id, supplier: recap.charterers || 'Charterers', invoiceNo: `CHR-${voyage.id}-${key}`, amount: row.amount, currency: recap.charterHireCurrency || 'USD', module, category: 'Hire' });
+      addNotification(`Charterers hire payment ${row.name} sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${recap.vesselName}; Voyage: ${voyage.id}; Amount: ${money(row.amount)}.`, 'Accounts');
+    }
+  };
   const setCharterHireName = (key: string, name: string) => setCharterState(key, { name: name.trim() || undefined });
   const toggleSelectCharter = (key: string) => setCharterSelectedKeys((prev) => { const next = new Set(prev); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const deleteSelectedCharter = () => {
@@ -4474,16 +4562,14 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
                   </td>
                   <td>
                     <span className="fv-ops__hire-actions">
-                      {r.status === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval &amp; Payment</button>}
-                      {r.status === 'Sent For Approval' && <>
-                        <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advance(r.key, 'Approved & Sent for Payment')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
+                      {r.status === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval</button>}
+                      {r.status === 'Sent For Approval' && canApproveHire && <>
+                        <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advance(r.key, 'Approved')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
                         <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Draft')}><i className="fas fa-rotate-left" aria-hidden="true" /> Reject</button>
                       </>}
-                      {r.status === 'Approved & Sent for Payment' && <>
-                        <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advance(r.key, 'Paid & Locked')}><i className="fas fa-circle-check" aria-hidden="true" /> Mark Paid</button>
-                        <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Sent For Approval')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>
-                      </>}
-                      {r.status === 'Paid & Locked' && <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Approved & Sent for Payment')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+                      {r.status === 'Approved' && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advance(r.key, 'Sent For Payment')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Payment</button>}
+                      {r.status === 'Sent For Payment' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+                      {r.status === 'Paid & Locked' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => advance(r.key, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
                     </span>
                   </td>
                 </tr>
@@ -4514,7 +4600,7 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
         {cur} · Auto-built from CP terms: 1st hire {firstPeriod} days including {incl}, payable within {recap.firstHireDays} {recap.firstHireBasis}, then every {recap.hireEveryDays} days in advance until redelivery. Each hire = net hire + CVE; bunkers on delivery (BOD, due owners) and on redelivery (BOR, due charterers) are shown in full on every SOA and cancel for the estimate — the actual bunker settlement applies on the final hire once the redelivery-notice ROBs are received. Voyage {fmt(total, 2)} days — schedule &amp; due dates recompute as the redelivery date moves. Commissions {fmt(dedPct)}% deducted. Rename any hire using the pencil icon.
       </p>
       <p className="fv-ops__hint">
-        <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → <b>Send for Approval &amp; Payment</b> → Manager <b>Approve</b> (→ Approved &amp; Sent for Payment, locked) → Accounts <b>Mark Paid</b> (→ Paid &amp; Locked). A locked installment can only be reopened via <b>Unlock</b> (manager). Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
+        <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → Operations <b>Send for Approval</b> → Manager <b>Approve</b> → Operations <b>Send for Payment</b> → Accounts. The Status column reflects each step. A sent payment can only be reopened by a manager. Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
       </p>
     </Card>
 
@@ -4609,16 +4695,14 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
                     </td>
                     <td>
                       <span className="fv-ops__hire-actions">
-                        {r.status === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval &amp; Payment</button>}
-                        {r.status === 'Sent For Approval' && <>
-                          <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceCharter(r.key, 'Approved & Sent for Payment')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
+                        {r.status === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval</button>}
+                        {r.status === 'Sent For Approval' && canApproveHire && <>
+                          <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceCharter(r.key, 'Approved')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
                           <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Draft')}><i className="fas fa-rotate-left" aria-hidden="true" /> Reject</button>
                         </>}
-                        {r.status === 'Approved & Sent for Payment' && <>
-                          <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceCharter(r.key, 'Paid & Locked')}><i className="fas fa-circle-check" aria-hidden="true" /> Mark Paid</button>
-                          <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Sent For Approval')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>
-                        </>}
-                        {r.status === 'Paid & Locked' && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Approved & Sent for Payment')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+                        {r.status === 'Approved' && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceCharter(r.key, 'Sent For Payment')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Payment</button>}
+                        {r.status === 'Sent For Payment' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+                        {r.status === 'Paid & Locked' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => advanceCharter(r.key, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
                       </span>
                     </td>
                   </tr>
@@ -4643,7 +4727,7 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
           {charterCur} · Auto-built from CP terms: 1st hire {charterFirstPeriod} days including {charterIncl}, payable within {recap.charterFirstHireDays} {recap.charterFirstHireBasis}, then every {recap.charterHireEveryDays} days in advance until redelivery. Each hire = net hire + CVE; bunkers on delivery (BOD) and on redelivery (BOR) follow selected charterers clause anchors. Voyage {fmt(total, 2)} days — schedule &amp; due dates recompute as the redelivery date moves. Commissions {fmt(dedPct)}% deducted. Rename any hire using the pencil icon.
         </p>
         <p className="fv-ops__hint">
-          <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → <b>Send for Approval &amp; Payment</b> → Manager <b>Approve</b> (→ Approved &amp; Sent for Payment, locked) → Accounts <b>Mark Paid</b> (→ Paid &amp; Locked). A locked installment can only be reopened via <b>Unlock</b> (manager). Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
+          <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → Operations <b>Send for Approval</b> → Manager <b>Approve</b> → Operations <b>Send for Payment</b> → Accounts. The Status column reflects each step. A sent payment can only be reopened by a manager. Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
         </p>
       </Card>
     )}
@@ -4660,12 +4744,13 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
           <button type="button" className="fv-ops__btn" onClick={deleteSelClaims} disabled={selClaims.size === 0}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
           <button type="button" className="fv-ops__btn" onClick={pdfSelClaims} disabled={selClaims.size === 0}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
           <button type="button" className="fv-ops__btn" onClick={updateSelClaimStatus} disabled={selClaims.size === 0}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+          <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={sendSelectedClaimsToAccounts} disabled={selClaims.size === 0}><i className="fas fa-paper-plane" aria-hidden="true" /> Send to Accounts</button>
         </span>
       )}
     >
       <table className="fv-ops__table">
         <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all claims" checked={settlement.claims.length > 0 && settlement.claims.every((x) => selClaims.has(x.id))} ref={(el) => { if (el) el.indeterminate = selClaims.size > 0 && !settlement.claims.every((x) => selClaims.has(x.id)); }} onChange={(e) => setSelClaims(e.target.checked ? new Set(settlement.claims.map((x) => x.id)) : new Set())} /></th><th>Type</th><th>Reference</th><th>Charge To</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Settlement</th><th className="fv-ops__r">Balance</th><th>Attachment</th><th>Status</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all claims" checked={settlement.claims.length > 0 && settlement.claims.every((x) => selClaims.has(x.id))} ref={(el) => { if (el) el.indeterminate = selClaims.size > 0 && !settlement.claims.every((x) => selClaims.has(x.id)); }} onChange={(e) => setSelClaims(e.target.checked ? new Set(settlement.claims.map((x) => x.id)) : new Set())} /></th><th>Type</th><th>Reference</th><th>Charge To</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Settlement</th><th className="fv-ops__r">Balance</th><th>Attachment</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
         </thead>
         <tbody>
           {settlement.claims.map((c) => {
@@ -4682,7 +4767,9 @@ export function HireTab({ recap, setRecap, pnl, voyage }: { recap: Recap; setRec
                 <td className="fv-ops__r">{fmtAmt(settled)}</td>
                 <td className={`fv-ops__r${balance > 0 ? ' fv-ops__neg' : ' fv-ops__pos'}`}>{fmtAmt(balance)}</td>
                 <td>{attachmentStatusLabel(c.attachments)}</td>
-                <td><span className={`fv-ops__pill fv-ops__pill--${c.status === 'Settled' ? 'green' : 'amber'}`}>{c.status}</span></td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${c.workflowStatus === 'Paid & Locked' || c.status === 'Settled' ? 'green' : 'amber'}`}>{c.workflowStatus || c.status}</span></td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${c.paymentStatus === 'Paid' ? 'green' : 'amber'}`}>{c.paymentStatus || 'Pending'}</span></td>
+                <td>{claimActions(c.id, c.workflowStatus)}</td>
               </tr>
             );
           })}
@@ -4950,7 +5037,7 @@ export function OpsClaimsCard({ recap, setRecap, voyage }: { recap: Recap; setRe
                   <td className="fv-ops__r">{fmtAmt(settled)}</td>
                   <td className={`fv-ops__r${balance > 0 ? ' fv-ops__neg' : ' fv-ops__pos'}`}>{fmtAmt(balance)}</td>
                   <td>{attachmentStatusLabel(c.attachments)}</td>
-                  <td><span className={`fv-ops__pill fv-ops__pill--${c.status === 'Settled' ? 'green' : 'amber'}`}>{c.status}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${c.workflowStatus === 'Paid & Locked' || c.status === 'Settled' ? 'green' : 'amber'}`}>{c.workflowStatus || c.status}</span></td>
                 </tr>
               );
             })}
@@ -5788,24 +5875,24 @@ function seedFreightSettlement(voyage: Voyage): FreightSettlementData {
   const disch = voyage.portTo || 'Qingdao';
   return {
     pda: [
-      { id: uid('pda'), port: load, agent: 'Sturrock Grindrod', due: '', currency: 'USD', estimated: 128500, advance: 120000, fdaFinal: 131240, status: 'FDA Received', approval: 'Approved', attachments: [] },
-      { id: uid('pda'), port: 'Singapore (Bunker)', agent: 'Inchcape', due: '', currency: 'USD', estimated: 18400, advance: 18400, fdaFinal: 17950, status: 'FDA Received', approval: 'Approved', attachments: [] },
-      { id: uid('pda'), port: disch, agent: 'Wilhelmsen', due: '', currency: 'USD', estimated: 96200, advance: 90000, fdaFinal: 0, status: 'PDA Approved', approval: 'Pending', attachments: [] },
+      { id: uid('pda'), port: load, agent: 'Sturrock Grindrod', due: '', currency: 'USD', estimated: 128500, advance: 120000, fdaFinal: 131240, status: 'Received', fdaStatus: 'Received', paymentStatus: 'Partially Paid', approval: 'Approved', attachments: [] },
+      { id: uid('pda'), port: 'Singapore (Bunker)', agent: 'Inchcape', due: '', currency: 'USD', estimated: 18400, advance: 18400, fdaFinal: 17950, status: 'Received', fdaStatus: 'Received', paymentStatus: 'Paid', approval: 'Approved', attachments: [] },
+      { id: uid('pda'), port: disch, agent: 'Wilhelmsen', due: '', currency: 'USD', estimated: 96200, advance: 90000, fdaFinal: 0, status: 'Approved', fdaStatus: 'Requested', paymentStatus: 'Partially Paid', approval: 'Pending', attachments: [] },
     ],
     agentInvoices: [
-      { id: uid('agi'), invoiceNo: 'AGT-24118', vendor: 'Sturrock Grindrod', category: 'FDA - Port', port: load, due: '18 Jul 2026', currency: 'USD', amount: 131240, approved: 131240, paid: 120000, dept: 'Approved', accounts: 'Pending', status: 'Open', attachments: [] },
-      { id: uid('agi'), invoiceNo: 'AGT-24119', vendor: 'Inchcape', category: 'FDA - Bunker Port', port: 'Singapore', due: '19 Jul 2026', currency: 'USD', amount: 17950, approved: 17950, paid: 18400, dept: 'Approved', accounts: 'Paid', status: 'Closed', attachments: [] },
-      { id: uid('agi'), invoiceNo: 'SRV-5521', vendor: 'Ocean Towage', category: 'Towage', port: disch, due: '20 Jul 2026', currency: 'USD', amount: 14800, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Open', attachments: [] },
+      { id: uid('agi'), invoiceNo: 'AGT-24118', vendor: 'Sturrock Grindrod', category: 'FDA - Port', port: load, due: '18 Jul 2026', currency: 'USD', amount: 131240, approved: 131240, paid: 120000, dept: 'Approved', accounts: 'Pending', status: 'Received', paymentStatus: 'Partially Paid', attachments: [] },
+      { id: uid('agi'), invoiceNo: 'AGT-24119', vendor: 'Inchcape', category: 'FDA - Bunker Port', port: 'Singapore', due: '19 Jul 2026', currency: 'USD', amount: 17950, approved: 17950, paid: 18400, dept: 'Approved', accounts: 'Paid', status: 'Settled', paymentStatus: 'Paid', attachments: [] },
+      { id: uid('agi'), invoiceNo: 'SRV-5521', vendor: 'Ocean Towage', category: 'Towage', port: disch, due: '20 Jul 2026', currency: 'USD', amount: 14800, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Requested', paymentStatus: 'Pending', attachments: [] },
     ],
     services: [
-      { id: uid('srv'), service: 'Launch Boat', vendor: 'Harbour Craft', invoice: 'LB-771', currency: 'USD', cost: 2400, tax: 0, reason: 'Crew & stores transfer at anchorage', status: 'Approved', attachments: [] },
-      { id: uid('srv'), service: 'Fresh Water', vendor: 'Aqua Marine', invoice: 'FW-210', currency: 'USD', cost: 1850, tax: 0, reason: '120 MT fresh water supply', status: 'Approved', attachments: [] },
-      { id: uid('srv'), service: 'Crew Change', vendor: 'Wilhelmsen', invoice: 'CC-455', currency: 'USD', cost: 8600, tax: 430, reason: '3 officers sign off / on', status: 'Pending', attachments: [] },
+      { id: uid('srv'), service: 'Launch Boat', vendor: 'Harbour Craft', invoice: 'LB-771', currency: 'USD', cost: 2400, tax: 0, reason: 'Crew & stores transfer at anchorage', status: 'Approved', paymentStatus: 'Paid', attachments: [] },
+      { id: uid('srv'), service: 'Fresh Water', vendor: 'Aqua Marine', invoice: 'FW-210', currency: 'USD', cost: 1850, tax: 0, reason: '120 MT fresh water supply', status: 'Approved', paymentStatus: 'Paid', attachments: [] },
+      { id: uid('srv'), service: 'Crew Change', vendor: 'Wilhelmsen', invoice: 'CC-455', currency: 'USD', cost: 8600, tax: 430, reason: '3 officers sign off / on', status: 'Requested', paymentStatus: 'Pending', attachments: [] },
     ],
     claims: [
-      { id: uid('clm'), type: 'Demurrage Claim', reference: 'DEM-2606-01', chargeTo: 'Charterers', owner: 'Charterer', due: '', currency: 'USD', amount: 96600, settlement: 0, status: 'Under Review', attachments: [] },
-      { id: uid('clm'), type: 'Cargo Claim', reference: 'CGO-2606-04', chargeTo: 'Receiver', owner: 'Receiver', due: '', currency: 'USD', amount: 22000, settlement: 0, status: 'Open', attachments: [] },
-      { id: uid('clm'), type: 'Offhire Claim', reference: 'OFF-2606-02', chargeTo: 'Owners', owner: 'Owner', due: '', currency: 'USD', amount: 14500, settlement: 12000, status: 'Settled', attachments: [] },
+      { id: uid('clm'), type: 'Demurrage Claim', reference: 'DEM-2606-01', chargeTo: 'Charterers', owner: 'Charterer', due: '', currency: 'USD', amount: 96600, settlement: 0, status: 'Under Review', paymentStatus: 'Pending', attachments: [] },
+      { id: uid('clm'), type: 'Cargo Claim', reference: 'CGO-2606-04', chargeTo: 'Receiver', owner: 'Receiver', due: '', currency: 'USD', amount: 22000, settlement: 0, status: 'Requested', paymentStatus: 'Pending', attachments: [] },
+      { id: uid('clm'), type: 'Offhire Claim', reference: 'OFF-2606-02', chargeTo: 'Owners', owner: 'Owner', due: '', currency: 'USD', amount: 14500, settlement: 12000, status: 'Settled', paymentStatus: 'Paid', attachments: [] },
     ],
   };
 }
@@ -5868,9 +5955,9 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[],
 }
 
 function freightStatusPill(s: string): string {
-  if (s === 'Paid') return 'green';
-  if (s === 'Sent') return 'blue';
-  return 'amber';
+  if (s === 'Paid & Locked') return 'green';
+  if (s === 'Sent For Approval') return 'blue';
+  return s === 'Draft' ? 'amber' : 'blue';
 }
 
 /** HTML body for one invoice (used by the modal and bulk PDF export). */
@@ -6187,7 +6274,11 @@ export function EuaCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<
 
 /* ------------------------------------------------------------ Freight & Laytime */
 
-export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; section?: 'all' | 'freight' | 'pda-services' }) {
+export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 'Operations' }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; section?: 'all' | 'freight' | 'pda-services'; module?: 'Operations' | 'Postfix' }) {
+  const { isInRole } = useFleetView();
+  const canApproveHire = isInRole('Manager, Operations Manager, Administrator');
+  const fixtureNo = useFixtureNumbers()[voyage.id] ?? voyage.id;
+  const accountTxns = useAccountTxns();
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
   const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
@@ -6248,6 +6339,32 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
   const delInvoice = (id: string) => setFL({ invoices: fl.invoices.filter((x) => x.id !== id) });
   const saveInvoice = (id: string, patch: Partial<FreightInvoice>) =>
     setFL({ invoices: fl.invoices.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const invoicePaymentStatus = (invoice: FreightInvoice) => {
+    if (invoice.paymentStatusManual && invoice.paymentStatus) return invoice.paymentStatus;
+    const txn = accountTxns.find((x) => x.invoiceNo === `INV-${voyage.id}-${invoice.id}` || x.invoiceNo === invoice.invoiceNo);
+    if (!txn) return invoice.paymentStatus || 'Pending';
+    if (txn.status === 'Paid' || txn.status === 'Received') return 'Paid';
+    if (txn.status === 'Partially Paid') return 'Partially Paid';
+    return 'Pending';
+  };
+  const advanceInvoice = (id: string, to: string) => {
+    saveInvoice(id, { workflowStatus: to as HireStatus });
+    if (to === 'Sent For Approval') {
+      const invoice = fl.invoices.find((x) => x.id === id);
+      if (invoice) {
+        addNotification(`Freight invoice ${invoice.invoiceNo || invoice.title} for ${voyage.vessel} is ready for manager review and approval.`, 'Manager');
+      }
+    } else if (to === 'Approved') {
+      addNotification(`Freight invoice for ${voyage.vessel} was approved by the manager and is ready to send to Accounts.`, module);
+    } else if (to === 'Sent For Payment') {
+      const invoice = fl.invoices.find((x) => x.id === id);
+      if (invoice) {
+        const { total } = calcInvoice(invoice, recap, fl.laytimes, settlement.claims);
+        sendPayable(invoice.id, invoice.invoiceTo || recap.charterers, `INV-${voyage.id}-${invoice.id}`, Math.max(0, total), invoice.dueDate, invoice.kind === 'Freight' ? 'Freight' : 'Demurrage');
+        addNotification(`Freight invoice sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}; Amount: ${money(total)}.`, 'Accounts');
+      }
+    }
+  };
   const deleteSelInvoices = () => { setFL({ invoices: fl.invoices.filter((x) => !selInvoices.has(x.id)) }); setSelInvoices(new Set()); };
   const duplicateSelInvoices = () => {
     const copies = fl.invoices.filter((x) => selInvoices.has(x.id)).map((x) => ({ ...x, id: uid('inv'), title: `${x.title} (copy)`, status: 'Draft' }));
@@ -6277,6 +6394,20 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
   const delLaytime = (id: string) => setFL({ laytimes: fl.laytimes.filter((x) => x.id !== id) });
   const saveLaytime = (id: string, patch: Partial<LaytimePort>) =>
     setFL({ laytimes: fl.laytimes.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
+  const advanceLaytime = (id: string, to: HireStatus | 'Approved & Sent for Payment') => {
+    saveLaytime(id, { status: to as HireStatus });
+    const port = fl.laytimes.find((x) => x.id === id);
+    if (!port) return;
+    if (to === 'Sent For Approval') {
+      addNotification(`Laytime calculation for ${port.name || port.op} on ${voyage.vessel} is ready for manager review and approval.`, 'Manager');
+    } else if (to === 'Approved') {
+      addNotification(`Laytime calculation for ${port.name || port.op} on ${voyage.vessel} was approved by the manager.`, module);
+    } else if (to === 'Sent For Payment') {
+      const result = calcLaytime(port);
+      sendPayable(port.id, port.accountName || recap.charterers, `LAY-${voyage.id}-${port.id}`, Math.max(0, result.demurrageAmt - result.despatchAmt), port.completed, 'Demurrage');
+      addNotification(`Laytime calculation for ${port.name || port.op} sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}.`, 'Accounts');
+    }
+  };
   const deleteSelLaytimes = () => { setFL({ laytimes: fl.laytimes.filter((x) => !selLaytimes.has(x.id)) }); setSelLaytimes(new Set()); };
   const duplicateSelLaytimes = () => {
     const copies = fl.laytimes.filter((x) => selLaytimes.has(x.id)).map((x) => ({ ...x, id: uid('lay'), name: `${x.name} (copy)`, events: x.events.map((e) => ({ ...e })) }));
@@ -6308,9 +6439,9 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
   const [agentInvId, setAgentInvId] = useState<string | null>(null);
   const [serviceId, setServiceId] = useState<string | null>(null);
   const [pdaStatusOpen, setPdaStatusOpen] = useState(false);
-  const [pdaStatusValue, setPdaStatusValue] = useState('PDA Approved');
+  const [pdaStatusValue, setPdaStatusValue] = useState('Approved');
   const [agentServiceStatusOpen, setAgentServiceStatusOpen] = useState(false);
-  const [agentServiceStatusValue, setAgentServiceStatusValue] = useState('Open');
+  const [agentServiceStatusValue, setAgentServiceStatusValue] = useState('Requested');
 
   const fmtAmt = (n: number) => n.toLocaleString('en-US');
   const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -6322,15 +6453,15 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
   const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
 
   const addPda = () => {
-    const row: PdaRow = { id: uid('pda'), port: '', agent: '', due: '', currency: 'USD', estimated: 0, advance: 0, fdaFinal: 0, status: 'PDA Draft', approval: 'Pending', attachments: [] };
+    const row: PdaRow = { id: uid('pda'), port: '', agent: '', due: '', currency: 'USD', estimated: 0, advance: 0, fdaFinal: 0, status: 'Requested', fdaStatus: 'Requested', paymentStatus: 'Pending', approval: 'Pending', attachments: [] };
     setSettlement({ pda: [...settlement.pda, row] });
     setPdaId(row.id);
   };
   const savePda = (id: string, patch: Partial<PdaRow>) => setSettlement({ pda: settlement.pda.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
   const deleteSelPda = () => { setSettlement({ pda: settlement.pda.filter((x) => !selPda.has(x.id)) }); setSelPda(new Set()); };
-  const copySelPda = () => { setSettlement({ pda: [...settlement.pda, ...settlement.pda.filter((x) => selPda.has(x.id)).map((x) => ({ ...x, id: uid('pda'), status: 'PDA Draft', approval: 'Pending' }))] }); setSelPda(new Set()); };
+  const copySelPda = () => { setSettlement({ pda: [...settlement.pda, ...settlement.pda.filter((x) => selPda.has(x.id)).map((x) => ({ ...x, id: uid('pda'), status: 'Requested', fdaStatus: 'Requested', paymentStatus: 'Pending', approval: 'Pending' }))] }); setSelPda(new Set()); };
   const updateSelPdaStatus = () => {
-    setPdaStatusValue('PDA Approved');
+    setPdaStatusValue('Approved');
     setPdaStatusOpen(true);
   };
   const applySelPdaStatus = () => {
@@ -6340,25 +6471,25 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
   const pdfSelPda = () => {
     const rows = settlement.pda.filter((x) => selPda.has(x.id));
     if (rows.length === 0) return;
-    const body = rows.map((r) => `<tr><td>${esc(r.port)}</td><td>${esc(r.agent)}</td><td>${esc(r.currency)}</td><td class="r">${fmtAmt(r.estimated)}</td><td class="r">${fmtAmt(r.advance)}</td><td class="r">${fmtAmt(r.fdaFinal)}</td><td>${esc(r.status)}</td><td>${esc(r.approval)}</td></tr>`).join('');
-    printSections(`PDA-FDA — ${recap.vesselName}`, `<section><h1>PDA / FDA</h1><table><thead><tr><th>Port</th><th>Agent</th><th>Cur</th><th class="r">PDA</th><th class="r">Advance</th><th class="r">FDA</th><th>Status</th><th>Approval</th></tr></thead><tbody>${body}</tbody></table></section>`);
+    const body = rows.map((r) => `<tr><td>${esc(r.port)}</td><td>${esc(r.agent)}</td><td>${esc(r.currency)}</td><td class="r">${fmtAmt(r.estimated)}</td><td class="r">${fmtAmt(r.advance)}</td><td class="r">${fmtAmt(r.fdaFinal)}</td><td>${esc(r.fdaStatus || (r.fdaFinal ? 'Received' : 'Pending'))}</td><td>${esc(r.paymentStatus || (r.advance >= (r.fdaFinal || r.estimated) ? 'Paid' : r.advance > 0 ? 'Partially Paid' : 'Not Paid'))}</td><td>${esc(r.approval)}</td></tr>`).join('');
+    printSections(`PDA-FDA — ${recap.vesselName}`, `<section><h1>PDA / FDA</h1><table><thead><tr><th>Port</th><th>Agent</th><th>Cur</th><th class="r">PDA</th><th class="r">Advance</th><th class="r">FDA</th><th>Status</th><th>Payment Status</th><th>Approval</th></tr></thead><tbody>${body}</tbody></table></section>`);
   };
 
   const addAgentInv = () => {
-    const row: AgentInvoiceRow = { id: uid('agi'), invoiceNo: '', vendor: '', category: '', port: '', due: '', currency: 'USD', amount: 0, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Open', attachments: [] };
+    const row: AgentInvoiceRow = { id: uid('agi'), invoiceNo: '', vendor: '', category: '', port: '', due: '', currency: 'USD', amount: 0, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Requested', paymentStatus: 'Pending', attachments: [] };
     setSettlement({ agentInvoices: [...settlement.agentInvoices, row] });
     setAgentInvId(row.id);
   };
   const saveAgentInv = (id: string, patch: Partial<AgentInvoiceRow>) => setSettlement({ agentInvoices: settlement.agentInvoices.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
-  const copySelAgentInv = () => { setSettlement({ agentInvoices: [...settlement.agentInvoices, ...settlement.agentInvoices.filter((x) => selAgentInv.has(x.id)).map((x) => ({ ...x, id: uid('agi'), status: 'Open' }))] }); setSelAgentInv(new Set()); };
+  const copySelAgentInv = () => { setSettlement({ agentInvoices: [...settlement.agentInvoices, ...settlement.agentInvoices.filter((x) => selAgentInv.has(x.id)).map((x) => ({ ...x, id: uid('agi'), status: 'Requested', paymentStatus: 'Pending' }))] }); setSelAgentInv(new Set()); };
 
   const addService = () => {
-    const row: ServiceRow = { id: uid('srv'), service: '', vendor: '', invoice: '', currency: 'USD', cost: 0, tax: 0, reason: '', status: 'Pending', attachments: [] };
+    const row: ServiceRow = { id: uid('srv'), service: '', vendor: '', invoice: '', currency: 'USD', cost: 0, tax: 0, reason: '', status: 'Requested', paymentStatus: 'Pending', attachments: [] };
     setSettlement({ services: [...settlement.services, row] });
     setServiceId(row.id);
   };
   const saveService = (id: string, patch: Partial<ServiceRow>) => setSettlement({ services: settlement.services.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
-  const copySelServices = () => { setSettlement({ services: [...settlement.services, ...settlement.services.filter((x) => selServices.has(x.id)).map((x) => ({ ...x, id: uid('srv'), status: 'Pending' }))] }); setSelServices(new Set()); };
+  const copySelServices = () => { setSettlement({ services: [...settlement.services, ...settlement.services.filter((x) => selServices.has(x.id)).map((x) => ({ ...x, id: uid('srv'), status: 'Requested', paymentStatus: 'Pending' }))] }); setSelServices(new Set()); };
 
   const hasAgentServiceSelection = selAgentInv.size > 0 || selServices.size > 0;
   const addAgentService = () => {
@@ -6386,7 +6517,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
     }
   };
   const updateAgentServiceStatus = () => {
-    setAgentServiceStatusValue('Open');
+    setAgentServiceStatusValue('Requested');
     setAgentServiceStatusOpen(true);
   };
   const applyAgentServiceStatus = () => {
@@ -6408,10 +6539,66 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
     printSections(`Agent Invoices & Services — ${recap.vesselName}`, sections);
   };
 
+  const sendSelectedPdaToAccounts = () => {
+    settlement.pda.filter((x) => selPda.has(x.id)).forEach((x) => sendPayable(x.id, x.agent, `${x.fdaFinal ? 'FDA' : 'PDA'}-${voyage.id}-${x.id}`, Math.max(0, (x.fdaFinal || x.estimated) - x.advance), x.due || '', x.fdaFinal ? 'FDA' : 'PDA'));
+    addNotification(`Selected PDA/FDA payments for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+  };
+  const sendSelectedAgentInvoicesToAccounts = () => {
+    settlement.agentInvoices.filter((x) => selAgentInv.has(x.id)).forEach((x) => sendPayable(x.id, x.vendor, x.invoiceNo || `AGT-${x.id}`, Math.max(0, (x.approved || x.amount) - x.paid), x.due, /fda/i.test(x.category) ? 'FDA' : 'Agency'));
+    addNotification(`Selected agent invoices for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+  };
+  const sendSelectedServicesToAccounts = () => {
+    settlement.services.filter((x) => selServices.has(x.id)).forEach((x) => sendPayable(x.id, x.vendor, x.invoice || `SRV-${x.id}`, x.cost + x.tax, '', 'Agency'));
+    addNotification(`Selected services for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+  };
   const openPda = settlement.pda.find((x) => x.id === pdaId) ?? null;
   const openAgentInv = settlement.agentInvoices.find((x) => x.id === agentInvId) ?? null;
   const openService = settlement.services.find((x) => x.id === serviceId) ?? null;
 
+  const sendPayable = (id: string, supplier: string, invoiceNo: string, amount: number, dueDate: string, category: 'PDA' | 'FDA' | 'Agency' | 'Claims' | 'Freight' | 'Demurrage') => {
+    if (amount <= 0) return;
+    addPayable({ reference: `${voyage.id}-${id}`, vessel: voyage.vessel, voyage: voyage.id, supplier: supplier || 'Settlement counterparty', invoiceNo, amount, currency: 'USD', dueDate: dueDate || '—', module, category });
+  };
+  const advanceSettlement = (kind: 'pda' | 'invoice' | 'service' | 'claim', id: string, to: HireStatus) => {
+    if (kind === 'pda') setSettlement({ pda: settlement.pda.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
+    if (kind === 'invoice') setFL({ invoices: fl.invoices.map((x) => x.id === id ? { ...x, status: x.status, workflowStatus: to } : x) });
+    if (kind === 'service') setSettlement({ services: settlement.services.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
+    if (kind === 'claim') setSettlement({ claims: settlement.claims.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
+    if (to === 'Sent For Approval') {
+      addNotification(`${kind} payment for ${voyage.vessel} is ready for manager review and approval. Voyage: ${voyage.id}.`, 'Manager');
+      return;
+    }
+    if (to === 'Approved') {
+      addNotification(`${kind} payment for ${voyage.vessel} was approved by the manager and is ready to send to Accounts.`, module);
+      return;
+    }
+    if (to !== 'Sent For Payment') return;
+    if (kind === 'pda') {
+      const row = settlement.pda.find((x) => x.id === id);
+      if (row) sendPayable(row.id, row.agent, `${row.fdaFinal ? 'FDA' : 'PDA'}-${voyage.id}-${row.id}`, Math.max(0, (row.fdaFinal || row.estimated) - row.advance), row.due || '', row.fdaFinal ? 'FDA' : 'PDA');
+    } else if (kind === 'invoice') {
+      const row = fl.invoices.find((x) => x.id === id);
+      if (row) { const { total } = calcInvoice(row, recap, fl.laytimes, settlement.claims); sendPayable(row.id, row.invoiceTo, `INV-${voyage.id}-${row.id}`, Math.max(0, total), row.dueDate, 'Agency'); }
+    } else if (kind === 'service') {
+      const row = settlement.services.find((x) => x.id === id);
+      if (row) sendPayable(row.id, row.vendor, row.invoice || `SRV-${row.id}`, row.cost + row.tax, '', 'Agency');
+    } else {
+      const row = settlement.claims.find((x) => x.id === id);
+      if (row) sendPayable(row.id, claimChargeTo(row), `CLM-${voyage.id}-${row.id}`, Math.max(0, row.amount - (row.settlement || 0)), row.due || '', 'Claims');
+    }
+    addNotification(`${kind} payment sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}.`, 'Accounts');
+  };
+  const settlementActions = (kind: 'pda' | 'invoice' | 'service' | 'claim', id: string, workflowStatus: HireStatus = 'Draft') => (
+    <span className="fv-ops__hire-actions">
+      {workflowStatus === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => kind === 'invoice' ? advanceInvoice(id, 'Sent For Approval') : advanceSettlement(kind, id, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval</button>}
+      {workflowStatus === 'Sent For Approval' && canApproveHire && <>
+        <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => kind === 'invoice' ? advanceInvoice(id, 'Approved') : advanceSettlement(kind, id, 'Approved')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
+        <button type="button" className="fv-ops__btn" onClick={() => kind === 'invoice' ? advanceInvoice(id, 'Draft') : advanceSettlement(kind, id, 'Draft')}><i className="fas fa-rotate-left" aria-hidden="true" /> Reject</button>
+      </>}
+      {workflowStatus === 'Approved' && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => kind === 'invoice' ? advanceInvoice(id, 'Sent For Payment') : advanceSettlement(kind, id, 'Sent For Payment')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Payment</button>}
+      {workflowStatus === 'Sent For Payment' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => kind === 'invoice' ? advanceInvoice(id, 'Approved') : advanceSettlement(kind, id, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
+    </span>
+  );
   useEffect(() => {
     if (hasVoyageLeg) return;
     setInvoiceId(null);
@@ -6424,7 +6611,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
     <>
     <div className="fv-ops__frl">
       {/* ---------------------------------------------------------- Invoices list */}
-      {(section === 'all' || section === 'freight') && hasVoyageLeg && <Card title="Invoices" icon="fa-file-invoice-dollar" wide
+      {(section === 'all' || section === 'freight') && hasVoyageLeg && <Card title="Freight Invoice" icon="fa-file-invoice-dollar" wide
         right={
           <span className="fv-ops__frl-secbtns">
             <button type="button" className="fv-ops__btn" onClick={() => addInvoice('Freight')}><i className="fas fa-plus" aria-hidden="true" /> Freight Invoice</button>
@@ -6444,26 +6631,26 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
                   ref={(el) => { if (el) el.indeterminate = selInvoices.size > 0 && !fl.invoices.every((x) => selInvoices.has(x.id)); }}
                   onChange={(e) => setSelInvoices(e.target.checked ? new Set(fl.invoices.map((x) => x.id)) : new Set())} />
               </th>
-              <th>Invoice</th><th>No.</th><th>Invoice To</th><th>Date</th><th className="fv-ops__r">Amount (US$)</th><th>Status</th><th aria-label="Actions" />
+              <th>Invoice</th><th>No.</th><th>Invoice To</th><th>Date</th><th className="fv-ops__r">Amount (US$)</th><th>Status</th><th>Payment Status</th><th>Action</th>
             </tr>
           </thead>
           <tbody>
-            {fl.invoices.length === 0 && <tr><td colSpan={8} className="fv-ops__vd-empty">No invoices yet. Use “Freight Invoice” or “Demurrage Invoice” to add one.</td></tr>}
+            {fl.invoices.length === 0 && <tr><td colSpan={9} className="fv-ops__vd-empty">No invoices yet. Use “Freight Invoice” or “Demurrage Invoice” to add one.</td></tr>}
             {fl.invoices.map((inv) => {
               const { total } = calcInvoice(inv, recap, fl.laytimes, settlement.claims);
               return (
                 <tr key={inv.id}>
                   <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${inv.title}`} checked={selInvoices.has(inv.id)} onChange={() => toggleInv(inv.id)} /></td>
-                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setInvoiceId(inv.id)}>{inv.kind === 'Freight' ? `${inv.freightType} Freight Invoice` : inv.title}</button></td>
+                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setInvoiceId(inv.id)}>{inv.title || `${inv.freightType} Freight Invoice`}</button></td>
                   <td>{inv.invoiceNo}</td>
                   <td>{inv.invoiceTo || '—'}</td>
                   <td>{inv.invoiceDate || '—'}</td>
                   <td className="fv-ops__r">{money(total)}</td>
-                  <td><span className={`fv-ops__pill fv-ops__pill--${freightStatusPill(inv.status)}`}>{inv.status}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${freightStatusPill(inv.workflowStatus || inv.status)}`}>{inv.workflowStatus || inv.status}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${invoicePaymentStatus(inv) === 'Paid' ? 'green' : 'amber'}`}>{invoicePaymentStatus(inv)}</span></td>
                   <td className="fv-ops__r">
                     <span className="fv-ops__hire-actions">
-                      <button type="button" className="fv-ops__btn" onClick={() => setInvoiceId(inv.id)}><i className="fas fa-pen" aria-hidden="true" /> Open</button>
-                      <button type="button" className="fv-ops__bnk-rm" aria-label="Delete invoice" onClick={() => delInvoice(inv.id)}><i className="fas fa-trash" aria-hidden="true" /></button>
+                      {settlementActions('invoice', inv.id, inv.workflowStatus)}
                     </span>
                   </td>
                 </tr>
@@ -6494,26 +6681,34 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
                   ref={(el) => { if (el) el.indeterminate = selLaytimes.size > 0 && !fl.laytimes.every((x) => selLaytimes.has(x.id)); }}
                   onChange={(e) => setSelLaytimes(e.target.checked ? new Set(fl.laytimes.map((x) => x.id)) : new Set())} />
               </th>
-              <th>Port</th><th>Operation</th><th className="fv-ops__r">Allowed (d)</th><th className="fv-ops__r">Used (d)</th><th>Result</th><th className="fv-ops__r">Amount (US$)</th><th aria-label="Actions" />
+              <th>Port</th><th>Account</th><th>Operation</th><th className="fv-ops__r">Allowed (d)</th><th className="fv-ops__r">Used (d)</th><th>Result</th><th className="fv-ops__r">Amount (US$)</th><th>Status</th><th>Action</th>
             </tr>
           </thead>
           <tbody>
-            {fl.laytimes.length === 0 && <tr><td colSpan={8} className="fv-ops__vd-empty">No laytime calculations yet. Use “Load Port” or “Discharge Port” to add one.</td></tr>}
+            {fl.laytimes.length === 0 && <tr><td colSpan={10} className="fv-ops__vd-empty">No laytime calculations yet. Use “Load Port” or “Discharge Port” to add one.</td></tr>}
             {fl.laytimes.map((p) => {
               const r = calcLaytime(p);
+              const status = p.status ?? 'Draft';
               return (
                 <tr key={p.id}>
                   <td className="fv-ops__hire-selcol"><input type="checkbox" aria-label={`Select ${p.name || 'port'}`} checked={selLaytimes.has(p.id)} onChange={() => toggleLay(p.id)} /></td>
                   <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setLaytimeId(p.id)}>{p.name || 'New Port'}</button></td>
+                  <td>{p.accountName || '—'}</td>
                   <td>{p.op}</td>
                   <td className="fv-ops__r">{fmt(r.allowed, 3)}</td>
                   <td className="fv-ops__r">{fmt(r.used, 3)}</td>
                   <td className={r.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{r.onDemurrage ? 'Demurrage' : 'Despatch'}</td>
                   <td className={`fv-ops__r ${r.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}`}>{r.onDemurrage ? money(r.demurrageAmt) : `-${money(r.despatchAmt)}`}</td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${freightStatusPill(status)}`}>{status}</span></td>
                   <td className="fv-ops__r">
                     <span className="fv-ops__hire-actions">
-                      <button type="button" className="fv-ops__btn" onClick={() => setLaytimeId(p.id)}><i className="fas fa-pen" aria-hidden="true" /> Open</button>
-                      <button type="button" className="fv-ops__bnk-rm" aria-label="Delete laytime" onClick={() => delLaytime(p.id)}><i className="fas fa-trash" aria-hidden="true" /></button>
+                      {status === 'Draft' && <button type="button" className="fv-ops__btn" onClick={() => advanceLaytime(p.id, 'Sent For Approval')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Approval &amp; Payment</button>}
+                      {status === 'Sent For Approval' && canApproveHire && <>
+                        <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceLaytime(p.id, 'Approved')}><i className="fas fa-user-check" aria-hidden="true" /> Approve</button>
+                        <button type="button" className="fv-ops__btn" onClick={() => advanceLaytime(p.id, 'Draft')}><i className="fas fa-rotate-left" aria-hidden="true" /> Reject</button>
+                      </>}
+                      {status === 'Approved' && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => advanceLaytime(p.id, 'Sent For Payment')}><i className="fas fa-paper-plane" aria-hidden="true" /> Send for Payment</button>}
+                      {status === 'Sent For Payment' && canApproveHire && <button type="button" className="fv-ops__btn" onClick={() => advanceLaytime(p.id, 'Approved')} title="Manager unlock"><i className="fas fa-lock-open" aria-hidden="true" /> Unlock</button>}
                     </span>
                   </td>
                 </tr>
@@ -6541,6 +6736,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
             <button type="button" className="fv-ops__btn" onClick={deleteSelPda} disabled={selPda.size === 0}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
             <button type="button" className="fv-ops__btn" onClick={pdfSelPda} disabled={selPda.size === 0}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
             <button type="button" className="fv-ops__btn" onClick={updateSelPdaStatus} disabled={selPda.size === 0}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+            <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={sendSelectedPdaToAccounts} disabled={selPda.size === 0}><i className="fas fa-paper-plane" aria-hidden="true" /> Send to Accounts</button>
           </span>
         )}
       >
@@ -6548,7 +6744,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
           <div className="fv-ops__frl-box-title">PDA Summary</div>
           <table className="fv-ops__table">
           <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all PDA rows" checked={settlement.pda.length > 0 && settlement.pda.every((x) => selPda.has(x.id))} ref={(el) => { if (el) el.indeterminate = selPda.size > 0 && !settlement.pda.every((x) => selPda.has(x.id)); }} onChange={(e) => setSelPda(e.target.checked ? new Set(settlement.pda.map((x) => x.id)) : new Set())} /></th><th>Port</th><th>Agent</th><th>Due</th><th>Cur.</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">Advance</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Status</th><th>Approval</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all PDA rows" checked={settlement.pda.length > 0 && settlement.pda.every((x) => selPda.has(x.id))} ref={(el) => { if (el) el.indeterminate = selPda.size > 0 && !settlement.pda.every((x) => selPda.has(x.id)); }} onChange={(e) => setSelPda(e.target.checked ? new Set(settlement.pda.map((x) => x.id)) : new Set())} /></th><th>Port</th><th>Agent</th><th>Due</th><th>Cur.</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">Advance</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Status</th><th>Payment Status</th><th>Approval</th><th>Action</th></tr>
           </thead>
           <tbody>
             {settlement.pda.map((p) => (
@@ -6562,13 +6758,15 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
                 <td className="fv-ops__r">{fmtAmt(p.advance)}</td>
                 <td className="fv-ops__r">{fmtAmt(p.estimated - p.advance)}</td>
                 <td>{attachmentStatusLabel(p.attachments)}</td>
-                <td><span className="fv-ops__pill fv-ops__pill--blue">{p.status}</span></td>
+                <td><span className="fv-ops__pill fv-ops__pill--blue">{p.workflowStatus || p.status}</span></td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${p.paymentStatus === 'Paid' ? 'green' : 'amber'}`}>{p.paymentStatus || 'Pending'}</span></td>
                 <td><span className={`fv-ops__pill fv-ops__pill--${p.approval === 'Approved' ? 'green' : 'amber'}`}>{p.approval}</span></td>
+                <td>{settlementActions('pda', p.id, p.workflowStatus)}</td>
               </tr>
             ))}
           </tbody>
           <tfoot>
-            <tr className="fv-ops__row-sub"><td colSpan={5}>Total PDA</td><td className="fv-ops__r">{fmtAmt(pdaTotal)}</td><td className="fv-ops__r">{fmtAmt(settlement.pda.reduce((s, p) => s + p.advance, 0))}</td><td colSpan={4} /></tr>
+            <tr className="fv-ops__row-sub"><td colSpan={5}>Total PDA</td><td className="fv-ops__r">{fmtAmt(pdaTotal)}</td><td className="fv-ops__r">{fmtAmt(settlement.pda.reduce((s, p) => s + p.advance, 0))}</td><td colSpan={6} /></tr>
           </tfoot>
           </table>
         </div>
@@ -6576,7 +6774,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
           <div className="fv-ops__frl-box-title">FDA Variance</div>
           <table className="fv-ops__table">
           <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all FDA rows" checked={settlement.pda.length > 0 && settlement.pda.every((x) => selPda.has(x.id))} ref={(el) => { if (el) el.indeterminate = selPda.size > 0 && !settlement.pda.every((x) => selPda.has(x.id)); }} onChange={(e) => setSelPda(e.target.checked ? new Set(settlement.pda.map((x) => x.id)) : new Set())} /></th><th>Port</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">FDA</th><th className="fv-ops__r">Variance</th><th className="fv-ops__r">Balance</th><th>Attachment</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all FDA rows" checked={settlement.pda.length > 0 && settlement.pda.every((x) => selPda.has(x.id))} ref={(el) => { if (el) el.indeterminate = selPda.size > 0 && !settlement.pda.every((x) => selPda.has(x.id)); }} onChange={(e) => setSelPda(e.target.checked ? new Set(settlement.pda.map((x) => x.id)) : new Set())} /></th><th>Port</th><th className="fv-ops__r">PDA</th><th className="fv-ops__r">FDA</th><th className="fv-ops__r">Variance</th><th className="fv-ops__r">Balance</th><th>Attachment</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
           </thead>
           <tbody>
             {settlement.pda.map((p) => {
@@ -6592,12 +6790,15 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
                   <td className={`fv-ops__r${variance > 0 ? ' fv-ops__neg' : variance < 0 ? ' fv-ops__pos' : ''}`}>{fda ? `${variance >= 0 ? '+' : ''}${fmtAmt(variance)}` : '-'}</td>
                   <td className={`fv-ops__r${balance < 0 ? ' fv-ops__neg' : ''}`}>{fda ? fmtAmt(balance) : '-'}</td>
                   <td>{attachmentStatusLabel(p.attachments)}</td>
+                  <td><span className="fv-ops__pill fv-ops__pill--blue">{p.workflowStatus || p.fdaStatus || (fda ? 'Received' : 'Pending')}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${(p.paymentStatus || (p.advance >= (fda || p.estimated) ? 'Paid' : p.advance > 0 ? 'Partially Paid' : 'Not Paid')) === 'Paid' ? 'green' : 'amber'}`}>{p.paymentStatus || (p.advance >= (fda || p.estimated) ? 'Paid' : p.advance > 0 ? 'Partially Paid' : 'Not Paid')}</span></td>
+                  <td>{settlementActions('pda', p.id, p.workflowStatus)}</td>
                 </tr>
               );
             })}
           </tbody>
           <tfoot>
-            <tr className="fv-ops__row-sub"><td colSpan={2}>FDA Total</td><td className="fv-ops__r">{fmtAmt(pdaTotal)}</td><td className="fv-ops__r">{fmtAmt(fdaTotal)}</td><td colSpan={3} /></tr>
+            <tr className="fv-ops__row-sub"><td colSpan={2}>FDA Total</td><td className="fv-ops__r">{fmtAmt(pdaTotal)}</td><td className="fv-ops__r">{fmtAmt(fdaTotal)}</td><td colSpan={6} /></tr>
           </tfoot>
           </table>
         </div>
@@ -6615,6 +6816,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
             <button type="button" className="fv-ops__btn" onClick={deleteAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
             <button type="button" className="fv-ops__btn" onClick={pdfAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-file-pdf" aria-hidden="true" /> Pdf</button>
             <button type="button" className="fv-ops__btn" onClick={updateAgentServiceStatus} disabled={!hasAgentServiceSelection}><i className="fas fa-rotate" aria-hidden="true" /> Status</button>
+            <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={() => { sendSelectedAgentInvoicesToAccounts(); sendSelectedServicesToAccounts(); }} disabled={!hasAgentServiceSelection}><i className="fas fa-paper-plane" aria-hidden="true" /> Send to Accounts</button>
           </span>
         )}
       >
@@ -6622,7 +6824,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
           <div className="fv-ops__frl-box-title">Agent Invoices</div>
           <table className="fv-ops__table">
           <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all agent invoices" checked={settlement.agentInvoices.length > 0 && settlement.agentInvoices.every((x) => selAgentInv.has(x.id))} ref={(el) => { if (el) el.indeterminate = selAgentInv.size > 0 && !settlement.agentInvoices.every((x) => selAgentInv.has(x.id)); }} onChange={(e) => setSelAgentInv(e.target.checked ? new Set(settlement.agentInvoices.map((x) => x.id)) : new Set())} /></th><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Approved</th><th className="fv-ops__r">Paid</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Dept</th><th>Accounts</th><th>Status</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all agent invoices" checked={settlement.agentInvoices.length > 0 && settlement.agentInvoices.every((x) => selAgentInv.has(x.id))} ref={(el) => { if (el) el.indeterminate = selAgentInv.size > 0 && !settlement.agentInvoices.every((x) => selAgentInv.has(x.id)); }} onChange={(e) => setSelAgentInv(e.target.checked ? new Set(settlement.agentInvoices.map((x) => x.id)) : new Set())} /></th><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Approved</th><th className="fv-ops__r">Paid</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Dept</th><th>Accounts</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
           </thead>
           <tbody>
             {settlement.agentInvoices.map((i) => {
@@ -6642,7 +6844,9 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
                   <td>{attachmentStatusLabel(i.attachments)}</td>
                   <td><span className={`fv-ops__pill fv-ops__pill--${i.dept === 'Approved' ? 'green' : 'amber'}`}>{i.dept}</span></td>
                   <td><span className={`fv-ops__pill fv-ops__pill--${i.accounts === 'Paid' ? 'green' : i.accounts === 'Pending' ? 'amber' : 'blue'}`}>{i.accounts}</span></td>
-                  <td><span className={`fv-ops__pill fv-ops__pill--${i.status === 'Closed' ? 'green' : 'amber'}`}>{i.status}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${i.workflowStatus === 'Paid & Locked' || i.status === 'Closed' ? 'green' : 'amber'}`}>{i.workflowStatus || i.status}</span></td>
+                  <td><span className={`fv-ops__pill fv-ops__pill--${i.paymentStatus === 'Paid' ? 'green' : 'amber'}`}>{i.paymentStatus || 'Pending'}</span></td>
+                  <td>{settlementActions('invoice', i.id, i.workflowStatus)}</td>
                 </tr>
               );
             })}
@@ -6653,7 +6857,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
           <div className="fv-ops__frl-box-title">Services</div>
           <table className="fv-ops__table">
           <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all services" checked={settlement.services.length > 0 && settlement.services.every((x) => selServices.has(x.id))} ref={(el) => { if (el) el.indeterminate = selServices.size > 0 && !settlement.services.every((x) => selServices.has(x.id)); }} onChange={(e) => setSelServices(e.target.checked ? new Set(settlement.services.map((x) => x.id)) : new Set())} /></th><th>Service</th><th>Vendor</th><th>Invoice</th><th>Reason</th><th className="fv-ops__r">Cost</th><th className="fv-ops__r">Tax</th><th className="fv-ops__r">Total</th><th>Attachment</th><th>Status</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all services" checked={settlement.services.length > 0 && settlement.services.every((x) => selServices.has(x.id))} ref={(el) => { if (el) el.indeterminate = selServices.size > 0 && !settlement.services.every((x) => selServices.has(x.id)); }} onChange={(e) => setSelServices(e.target.checked ? new Set(settlement.services.map((x) => x.id)) : new Set())} /></th><th>Service</th><th>Vendor</th><th>Invoice</th><th>Reason</th><th className="fv-ops__r">Cost</th><th className="fv-ops__r">Tax</th><th className="fv-ops__r">Total</th><th>Attachment</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
           </thead>
           <tbody>
             {settlement.services.map((s) => (
@@ -6667,12 +6871,14 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all' }: { recap
                 <td className="fv-ops__r">{fmtAmt(s.tax)}</td>
                 <td className="fv-ops__r">{fmtAmt(s.cost + s.tax)}</td>
                 <td>{attachmentStatusLabel(s.attachments)}</td>
-                <td><span className={`fv-ops__pill fv-ops__pill--${s.status === 'Approved' ? 'green' : 'amber'}`}>{s.status}</span></td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${s.workflowStatus === 'Paid & Locked' || s.status === 'Approved' ? 'green' : 'amber'}`}>{s.workflowStatus || s.status}</span></td>
+                <td><span className={`fv-ops__pill fv-ops__pill--${s.paymentStatus === 'Paid' ? 'green' : 'amber'}`}>{s.paymentStatus || 'Pending'}</span></td>
+                <td>{settlementActions('service', s.id, s.workflowStatus)}</td>
               </tr>
             ))}
           </tbody>
           <tfoot>
-            <tr className="fv-ops__row-sub"><td colSpan={8}>Additional Services Total</td><td className="fv-ops__r">{fmtAmt(servicesTotal)}</td><td /></tr>
+            <tr className="fv-ops__row-sub"><td colSpan={8}>Additional Services Total</td><td className="fv-ops__r">{fmtAmt(servicesTotal)}</td><td colSpan={3} /></tr>
           </tfoot>
           </table>
         </div>
@@ -6905,7 +7111,9 @@ function PdaModal({ row, onSave, onDelete, onClose }: {
             <VdField label="Estimated PDA" value={String(draft.estimated)} onChange={(v) => setD({ estimated: num(v) })} num />
             <VdField label="Advance Paid" value={String(draft.advance)} onChange={(v) => setD({ advance: num(v) })} num />
             <VdField label="FDA Final" value={String(draft.fdaFinal)} onChange={(v) => setD({ fdaFinal: num(v) })} num />
-            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+            <VdSelect label="Status" value={settlementStatusValue(draft.status)} onChange={(v) => setD({ status: v })} options={STATUS_OPTIONS_PDA} />
+            <VdSelect label="FDA Status" value={settlementStatusValue(draft.fdaStatus, draft.fdaFinal ? 'Received' : 'Requested')} onChange={(v) => setD({ fdaStatus: v })} options={STATUS_OPTIONS_PDA} />
+            <VdSelect label="Payment Status" value={settlementPaymentValue(draft.paymentStatus)} onChange={(v) => setD({ paymentStatus: v })} options={PAYMENT_STATUS_OPTIONS} />
             <VdField label="Approval" value={draft.approval} onChange={(v) => setD({ approval: v })} />
           </div>
           <div className="fv-ops__vd-sub">
@@ -6959,7 +7167,8 @@ function AgentInvoiceModal({ row, onSave, onDelete, onClose }: {
             <VdField label="Paid" value={String(draft.paid)} onChange={(v) => setD({ paid: num(v) })} num />
             <VdField label="Dept" value={draft.dept} onChange={(v) => setD({ dept: v })} />
             <VdField label="Accounts" value={draft.accounts} onChange={(v) => setD({ accounts: v })} />
-            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+            <VdSelect label="Status" value={settlementStatusValue(draft.status)} onChange={(v) => setD({ status: v })} options={STATUS_OPTIONS_AGENT_SERVICE} />
+            <VdSelect label="Payment Status" value={settlementPaymentValue(draft.paymentStatus)} onChange={(v) => setD({ paymentStatus: v })} options={PAYMENT_STATUS_OPTIONS} />
           </div>
           <div className="fv-ops__vd-sub">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
@@ -7006,7 +7215,8 @@ function ServiceModal({ row, onSave, onDelete, onClose }: {
             <VdField label="Cost" value={String(draft.cost)} onChange={(v) => setD({ cost: num(v) })} num />
             <VdField label="Tax" value={String(draft.tax)} onChange={(v) => setD({ tax: num(v) })} num />
             <VdField label="Reason" value={draft.reason} onChange={(v) => setD({ reason: v })} />
-            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+            <VdSelect label="Status" value={settlementStatusValue(draft.status)} onChange={(v) => setD({ status: v })} options={STATUS_OPTIONS_AGENT_SERVICE} />
+            <VdSelect label="Payment Status" value={settlementPaymentValue(draft.paymentStatus)} onChange={(v) => setD({ paymentStatus: v })} options={PAYMENT_STATUS_OPTIONS} />
           </div>
           <div className="fv-ops__vd-sub">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
@@ -7054,7 +7264,8 @@ function ClaimModal({ row, onSave, onDelete, onClose }: {
             <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
             <VdField label="Amount" value={String(draft.amount)} onChange={(v) => setD({ amount: num(v) })} num />
             <VdField label="Settlement" value={String(draft.settlement)} onChange={(v) => setD({ settlement: num(v) })} num />
-            <VdField label="Status" value={draft.status} onChange={(v) => setD({ status: v })} />
+            <VdSelect label="Status" value={settlementStatusValue(draft.status)} onChange={(v) => setD({ status: v })} options={STATUS_OPTIONS_CLAIMS} />
+            <VdSelect label="Payment Status" value={settlementPaymentValue(draft.paymentStatus)} onChange={(v) => setD({ paymentStatus: v })} options={PAYMENT_STATUS_OPTIONS} />
           </div>
           <div className="fv-ops__vd-sub">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
@@ -7074,10 +7285,19 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
   inv: FreightInvoice; recap: Recap; voyage: Voyage; laytimes: LaytimePort[]; claims: ClaimRow[];
   onSave: (patch: Partial<FreightInvoice>) => void; onDelete: () => void; onClose: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(true);
   const [draft, setDraft] = useState<FreightInvoice>(inv);
+  const accountTxns = useAccountTxns();
   const setD = (patch: Partial<FreightInvoice>) => setDraft((d) => ({ ...d, ...patch }));
   const view = editing ? draft : inv;
+  const accountPaymentStatus = (() => {
+    if (view.paymentStatusManual && view.paymentStatus) return view.paymentStatus;
+    const txn = accountTxns.find((x) => x.invoiceNo === `INV-${voyage.id}-${view.id}` || x.invoiceNo === view.invoiceNo);
+    if (!txn) return view.paymentStatus || 'Pending';
+    if (txn.status === 'Paid' || txn.status === 'Received') return 'Paid';
+    if (txn.status === 'Partially Paid') return 'Partially Paid';
+    return 'Pending';
+  })();
   const { lines, total } = calcInvoice(view, recap, laytimes, claims);
   const effBlQty = view.blQtyOverride?.trim() ? num(view.blQtyOverride) : num(recap.finalQtyLoaded);
   const effFreight = view.freightRateOverride?.trim() ? num(view.freightRateOverride) : num(recap.freightPerMt);
@@ -7088,19 +7308,6 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
   const save = () => {
     onSave(draft);
     setEditing(false);
-    // Push finalised freight invoices to Accounts as Receivables.
-    if (draft.status === 'Final' || draft.status === 'Sent') {
-      const { total: amt } = calcInvoice(draft, recap, laytimes, claims);
-      addReceivable({
-        reference: voyage.id, vessel: recap.vesselName, voyage: voyage.id,
-        counterparty: draft.invoiceTo || recap.charterers || 'Charterers',
-        invoiceNo: draft.invoiceNo || `FRE-${voyage.id}`,
-        amount: amt, currency: recap.freightCurrency || 'USD',
-        invoiceDate: draft.invoiceDate, dueDate: draft.dueDate, dueIso: '',
-        module: 'Operations', category: 'Freight',
-      });
-      addNotification(`Freight invoice ${draft.invoiceNo} for ${recap.vesselName} sent to Accounts.`, 'Accounts');
-    }
   };
   const discard = () => { setDraft(inv); setEditing(false); };
 
@@ -7130,7 +7337,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
       th.r,td.r{text-align:right}tfoot td{font-weight:700;background:#f2f2f2}.tot{font-size:13px}
       .meta{margin:0 0 12px;font-size:11px}.meta span{display:inline-block;min-width:130px;color:#555}
     </style></head><body>${pdfCompanyHeader()}
-      <h1>${view.kind === 'Freight' ? `${view.freightType} Freight Invoice` : view.title}</h1>
+      <h1>${view.title || `${view.freightType} Freight Invoice`}</h1>
       <p class="sub">${recap.vesselName} · IMO ${voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
       <div class="meta">
         <div><span>Invoice To:</span> ${view.invoiceTo || '—'}</div>
@@ -7156,7 +7363,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
       <div className="fv-ops__soa" onClick={(e) => e.stopPropagation()}>
         <div className="fv-ops__soa-head">
           <div>
-            <h2>{view.kind === 'Freight' ? `${view.freightType} Freight Invoice` : view.title}</h2>
+            <h2>{view.title || `${view.freightType} Freight Invoice`}</h2>
             <span className="fv-ops__soa-sub">{recap.vesselName} · IMO {voyage.imo || '—'} · {view.invoiceTo || '—'} · No. {view.invoiceNo} · <span className={`fv-ops__pill fv-ops__pill--${freightStatusPill(view.status)}`}>{view.status}</span>{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
@@ -7191,6 +7398,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
                   </select>
                 </label>
               )}
+              <label>Invoice Name{inp(view.title, (v) => setD({ title: v }), 170, 'Invoice name')}</label>
               <label>Invoice No.{inp(view.invoiceNo, (v) => setD({ invoiceNo: v }), 90)}</label>
               <label>Invoice Date{inp(view.invoiceDate, (v) => setD({ invoiceDate: v }), 110, 'dd-mm-yyyy')}</label>
               <label>Payment Terms{inp(view.paymentTerms, (v) => setD({ paymentTerms: v }), 150)}</label>
@@ -7200,6 +7408,11 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
                   <option value="Draft">Draft</option>
                   <option value="Sent">Sent</option>
                   <option value="Paid">Paid</option>
+                </select>
+              </label>
+              <label>Payment Status
+                <select className="fv-ops__eta-sel" value={accountPaymentStatus} disabled={!editing} onChange={(e) => setD({ paymentStatus: e.target.value, paymentStatusManual: true })}>
+                  {PAYMENT_STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
                 </select>
               </label>
             </div>
@@ -7303,6 +7516,30 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
   // Result / demurrage figures use the combined pool when reversible, else this port alone.
   const outcome = pool ?? res;
 
+  const autoCalculate = () => {
+    const next: LaytimePort = {
+      ...draft,
+      accountName: draft.accountName || recap.charterers || recap.owners,
+      cargo: draft.cargo || recap.cargoName,
+      quantity: draft.quantity && num(draft.quantity) > 0 ? draft.quantity : String(Math.round(num(recap.finalQtyLoaded) || num(recap.cpQuantity))),
+      rate: draft.rate && num(draft.rate) > 0 ? draft.rate : String(num(draft.op === 'Load' ? recap.loadRate : recap.dischRate)),
+      terms: draft.terms || LAYTIME_TERMS_OPTIONS[0],
+      norTendered: draft.norTendered || (draft.op === 'Load' ? recap.norAtLoadPort : recap.norAtDPort),
+      demurrageRate: draft.demurrageRate || String(num(recap.demDespatch)),
+      despatchRate: draft.despatchRate || String(/half/i.test(recap.despatchTerm) ? num(recap.demDespatch) / 2 : num(recap.demDespatch)),
+    };
+    if (!next.commenced && next.norAccepted) next.commenced = next.norAccepted;
+    if (next.events.length === 0 && next.commenced && next.completed) {
+      const date = next.commenced.split(' ')[0] || '';
+      const from = next.commenced.split(' ')[1] || '';
+      const to = next.completed.split(' ')[1] || '';
+      next.events = [{ date, from, to, pct: '100', remark: 'Auto-populated from SOF / port log' }];
+    }
+    setDraft(next);
+    onSave(next);
+    addNotification(`Laytime for ${next.name || next.op} auto-calculated from recap, charter-party terms and SOF / port log.`, 'Operations');
+  };
+
   const save = () => { onSave(draft); setEditing(false); };
   const discard = () => { setDraft(port); setEditing(false); };
 
@@ -7362,6 +7599,7 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
             <span className="fv-ops__soa-sub">{recap.vesselName} · {view.op} · {view.cargo || '—'}{view.accountName ? ` · In favour of ${view.accountName}` : ''}{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
+            <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={autoCalculate}><i className="fas fa-calculator" aria-hidden="true" /> Auto Calculate</button>
             {!editing && <button type="button" className="fv-ops__btn" onClick={() => setEditing(true)}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>}
             {editing && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={save}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>}
             {editing && <button type="button" className="fv-ops__btn" onClick={discard}><i className="fas fa-rotate-left" aria-hidden="true" /> Discard</button>}
@@ -7487,6 +7725,19 @@ function CostsTab() {
   );
 }
 
+function NotesTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
+  return (
+    <Card title="Operations Notes" icon="fa-note-sticky" right={<span className="fv-ops__note-meta">Auto-saved per voyage</span>}>
+      <RichTextEditor
+        value={recap.notes ?? ''}
+        onChange={(notes) => setRecap((current) => ({ ...current, notes }))}
+        minHeight={240}
+        placeholder="Write operational notes here…"
+      />
+    </Card>
+  );
+}
+
 /* ------------------------------------------------------------ Vessel Reports */
 
 /** Seed a representative set of vessel reports from the voyage figures. */
@@ -7496,7 +7747,7 @@ function seedVesselReports(recap: Recap, voyage: Voyage): VesselReport[] {
   const blank = (): VesselReport => ({
     id: uid('vr'), type: 'NOON - SEA', shiftSub: '', dtUtc: '', dtLt: '', duration: '', position: '',
     avgSpdGps: '', avgSpdLog: '', distSinceLast: '', distTotal: '', robFo: '', robDo: '',
-    consFo: '', consDo: '', rpm: '', mcr: '', weather: '', remarks: '',
+    consFo: '', consDo: '', rpm: '', mcr: '', slip: '', weather: '', remarks: '',
   });
   return [
     { ...blank(), type: 'COSP (Departure)', dtUtc: '14-07-2025 22:00', dtLt: '15-07-2025 03:30', position: recap.loadPort || 'Salalah', distSinceLast: '0', distTotal: '0', robFo: String(num(recap.etaPlan.startRobVlsfo)), robDo: String(num(recap.etaPlan.startRobMgo)), consFo: '0', consDo: '0', weather: 'NE 3 / 1.0m / nil', remarks: 'Full away on passage' },
@@ -7531,7 +7782,7 @@ function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
     return [...list, {
       id: uid('vr'), type: 'NOON - SEA', shiftSub: '', dtUtc: '', dtLt: '', duration: '', position: '',
       avgSpdGps: '', avgSpdLog: '', distSinceLast: '', distTotal: last?.distTotal ?? '', robFo: last?.robFo ?? '', robDo: last?.robDo ?? '',
-      consFo: '', consDo: '', rpm: '', mcr: '', weather: '', remarks: '',
+      consFo: '', consDo: '', rpm: '', mcr: '', slip: '', weather: '', remarks: '',
     }];
   });
   const delRep = (id: string) => setDraft((list) => list.filter((x) => x.id !== id));
@@ -7550,8 +7801,8 @@ function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
   const typeLabel = (r: VesselReport) => (isShifting(r.type) && r.shiftSub ? `${r.type} — ${r.shiftSub}` : r.type);
 
   const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const cols = ['Report Type', 'Date/Time UTC', 'Date/Time LT', 'Duration (hrs)', 'Position', 'Avg Spd GPS', 'Avg Spd LOG', 'Dist Since Last (nm)', 'Total Dist (nm)', 'ROB FO', 'ROB DO', 'Cons FO', 'Cons DO', 'RPM', '% MCR', 'Weather', 'Remarks'];
-  const rowCells = (r: VesselReport) => [typeLabel(r), r.dtUtc, r.dtLt, r.duration, r.position, r.avgSpdGps, r.avgSpdLog, r.distSinceLast, r.distTotal, r.robFo, r.robDo, r.consFo, r.consDo, r.rpm, r.mcr, r.weather, r.remarks];
+  const cols = ['Report Type', 'Date/Time UTC', 'Date/Time LT', 'Duration (hrs)', 'Position', 'Avg Spd GPS', 'Avg Spd LOG', 'Dist Since Last (nm)', 'Total Dist (nm)', 'ROB FO', 'ROB DO', 'Cons FO', 'Cons DO', 'RPM', '% MCR', 'Slip (%)', 'Weather', 'Remarks'];
+  const rowCells = (r: VesselReport) => [typeLabel(r), r.dtUtc, r.dtLt, r.duration, r.position, r.avgSpdGps, r.avgSpdLog, r.distSinceLast, r.distTotal, r.robFo, r.robDo, r.consFo, r.consDo, r.rpm, r.mcr, r.slip, r.weather, r.remarks];
   const tableHtml = () => {
     const head = `<tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>`;
     const body = view.map((r) => `<tr>${rowCells(r).map((c, i) => `<td class="${i >= 3 && i <= 14 ? 'r' : ''}">${esc(String(c))}</td>`).join('')}</tr>`).join('');
@@ -7620,6 +7871,7 @@ function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
               <th colSpan={2}>Cons Last (MT)</th>
               <th rowSpan={2}>RPM</th>
               <th rowSpan={2}>%MCR</th>
+              <th rowSpan={2}>Slip<br />(%)</th>
               <th rowSpan={2}>Weather<br />(Wind / Wave / Curr.)</th>
               <th rowSpan={2}>Remarks</th>
               {editing && <th rowSpan={2} aria-label="Remove" />}
@@ -7638,7 +7890,7 @@ function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
             </tr>
           </thead>
           <tbody>
-            {view.length === 0 && <tr><td colSpan={editing ? 19 : 18} className="fv-ops__vd-empty">No reports received yet.{editing ? ' Use “Add Report” to log one.' : ''}</td></tr>}
+            {view.length === 0 && <tr><td colSpan={editing ? 20 : 19} className="fv-ops__vd-empty">No reports received yet.{editing ? ' Use “Add Report” to log one.' : ''}</td></tr>}
             {view.map((r) => (
               <tr key={r.id}>
                 <td className="fv-ops__vr-type">
@@ -7673,6 +7925,7 @@ function ReportsTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispa
                 <td className="fv-ops__r">{nIn(r.consDo, (v) => setRep(r.id, { consDo: v }))}</td>
                 <td className="fv-ops__r">{nIn(r.rpm, (v) => setRep(r.id, { rpm: v }))}</td>
                 <td className="fv-ops__r">{nIn(r.mcr, (v) => setRep(r.id, { mcr: v }))}</td>
+                <td className="fv-ops__r">{nIn(r.slip, (v) => setRep(r.id, { slip: v }))}</td>
                 <td>{txt(r.weather, (v) => setRep(r.id, { weather: v }), 'e.g. SW 4 / 1.5m / +0.3kt', true)}</td>
                 <td>{txt(r.remarks, (v) => setRep(r.id, { remarks: v }), 'Remarks', true)}</td>
                 {editing && <td className="fv-ops__r"><button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove report" onClick={() => delRep(r.id)}><i className="fas fa-trash" aria-hidden="true" /></button></td>}
