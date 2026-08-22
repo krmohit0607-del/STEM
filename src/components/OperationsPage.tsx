@@ -87,6 +87,10 @@ export interface Recap {
   cve: string;
   adcom: string;
   brokerage: string;
+  pniClub: string;
+  arbitrationPlace: string;
+  governingLaw: string;
+  sanctionsClause: string;
   ballastBonus: string;
   redeliveryNotices: string;
   hullCleaningClause: string;
@@ -119,10 +123,7 @@ export interface Recap {
   // --- CP performance warranty (speed & consumption) ----------------------
   cpSpeed: string;
   cpCons: string;
-  // --- observed voyage performance (Live P&L → Update Actuals) -------------
-  actualSpeed?: string;      // observed avg speed (kn) — recomputes voyage days
-  actualFoPerDay?: string;   // observed FO cons (MT/day)
-  actualDoPerDay?: string;   // observed DO cons (MT/day)
+  cpConsByFuel?: Record<string, string>;
   // --- units (redesigned Voyage Details) ---------------------------------
   hireCurrency: string;
   freightCurrency: string;
@@ -488,7 +489,7 @@ interface VesselReport {
 }
 
 /** Recap keys whose value is a plain string (everything except arrays). */
-type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'cashflow' | 'vesselReports' | 'notes' | 'eua' | 'additionalVoyageLegs' | 'dischargePortDetails'>;
+type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'cashflow' | 'vesselReports' | 'notes' | 'eua' | 'additionalVoyageLegs' | 'dischargePortDetails' | 'cpConsByFuel'>;
 
 interface DocItem {
   id: string;
@@ -856,6 +857,10 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
     cve: '1,500.00',
     adcom: '3.75%',
     brokerage: '1.25% BY OWNERS',
+    pniClub: '',
+    arbitrationPlace: 'London',
+    governingLaw: 'English Law',
+    sanctionsClause: '',
     ballastBonus: '0',
     redeliveryNotices: '30-15-10-7-5-3-2-1',
     hullCleaningClause: '20 DAYS',
@@ -886,6 +891,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
     miscIncome: '0',
     cpSpeed: voyage?.cpSpeed ? String(voyage.cpSpeed) : '14',
     cpCons: voyage?.cpCons ? String(voyage.cpCons) : '33',
+    cpConsByFuel: {},
     hireCurrency: 'USD',
     freightCurrency: 'USD',
     cargoQtyUnit: 'MT',
@@ -1099,9 +1105,34 @@ function itineraryTotals(plan: EtaPlan): { distance: number; portDays: number } 
   return { distance, portDays };
 }
 
+function actualReportTotals(reports: VesselReport[] | undefined): { speed: number; foCons: number; doCons: number } | null {
+  const rows = (reports ?? []).filter((report) => report.type.toLowerCase().includes('noon') || report.type.toLowerCase().includes('eosp'));
+  if (rows.length === 0) return null;
+  let speedHours = 0;
+  let speedTotal = 0;
+  let foCons = 0;
+  let doCons = 0;
+  rows.forEach((report) => {
+    const hours = num(report.duration);
+    const gps = num(report.avgSpdGps);
+    const log = num(report.avgSpdLog);
+    const speed = gps > 0 ? gps : log;
+    if (speed > 0) {
+      speedTotal += speed * (hours > 0 ? hours : 1);
+      speedHours += hours > 0 ? hours : 1;
+    }
+    foCons += num(report.consFo);
+    doCons += num(report.consDo);
+  });
+  return speedHours > 0 || foCons > 0 || doCons > 0
+    ? { speed: speedHours > 0 ? speedTotal / speedHours : 0, foCons, doCons }
+    : null;
+}
+
 export function computePnl(r: Recap): Pnl {
-  // Observed speed (when entered) drives voyage days from the itinerary distance; else delivery→redelivery.
-  const spd = num(r.actualSpeed ?? '');
+  // Actual vessel reports drive actual duration and bunker consumption.
+  const actuals = actualReportTotals(r.vesselReports);
+  const spd = actuals?.speed ?? num(r.cpSpeed);
   let days: number;
   if (spd > 0) {
     const { distance, portDays } = itineraryTotals(r.etaPlan);
@@ -1115,13 +1146,11 @@ export function computePnl(r: Recap): Pnl {
   const miscIncome = num(r.miscIncome);
   const revenue = freight + demDespatch + miscIncome;
 
-  // Observed daily cons (when entered) drives total burn over the voyage days; else manual totals.
-  const foPerDay = num(r.actualFoPerDay ?? '');
-  const doPerDay = num(r.actualDoPerDay ?? '');
-  const foCons = foPerDay > 0 ? foPerDay * days : num(r.foCons);
+  // Reported consumption is the actual; Voyage Details totals are the fallback.
+  const foCons = actuals?.foCons || num(r.foCons);
   const foPrice = num(r.foPrice);
   const foExp = foCons * foPrice;
-  const doCons = doPerDay > 0 ? doPerDay * days : num(r.doCons);
+  const doCons = actuals?.doCons || num(r.doCons);
   const doPrice = num(r.doPrice);
   const doExp = doCons * doPrice;
   const bunkerCost = foExp + doExp;
@@ -1336,6 +1365,10 @@ function extractRecapFields(text: string): Partial<Recap> {
     ['cve', [/\bc\.?v\.?e\.?\s*[:\-|]\s*\$?\s*([\d.,]+)/i]],
     ['adcom', [/ad\.?com\s*[:\-|]\s*([\d.]+\s*%?)/i, /address\s*comm[^:\-|]*[:\-|]\s*([\d.]+\s*%?)/i]],
     ['brokerage', [/brokerage\s*[:\-|]\s*(.+)/i]],
+    ['pniClub', [/p\s*&\s*i\s*club\s*[:\-|]\s*(.+)/i, /pni\s*club\s*[:\-|]\s*(.+)/i]],
+    ['arbitrationPlace', [/arbitration\s*(?:place|venue)\s*[:\-|]\s*(.+)/i]],
+    ['governingLaw', [/governing\s*law\s*[:\-|]\s*(.+)/i]],
+    ['sanctionsClause', [/sanctions?\s*clause\s*[:\-|]\s*(.+)/i]],
     ['redeliveryNotices', [/redelivery\s*notices\s*[:\-|]\s*(.+)/i]],
     ['hullCleaningClause', [/hull\s*cleaning[^:\-|]*[:\-|]\s*(.+)/i]],
     ['cargoName', [/cargo\s*name\s*[:\-|]\s*(.+)/i, /^cargo\s*[:\-|]\s*(.+)/im]],
@@ -1658,7 +1691,6 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
 
   if (!voyage) return <NoVesselSelected />;
 
-  const set = (k: keyof Recap, v: string) => setRecap((r) => ({ ...r, [k]: v }));
   const canSaveCreate = createMode && recap.vesselName.trim().length > 0;
 
   const discardCreateDraft = () => {
@@ -1857,7 +1889,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
         {/* ===================== TAB CONTENT ===================== */}
         <div className="fv-ops__content">
           {tab === 'details' && <VoyageDetailsTab recap={recap} setRecap={setRecap} voyage={voyage} status={opsStatus} />}
-          {tab === 'pnl' && <PnlTab recap={recap} set={set} setRecap={setRecap} pnl={pnl} estPnl={estPnl} />}
+          {tab === 'pnl' && <PnlTab recap={recap} setRecap={setRecap} pnl={pnl} estPnl={estPnl} />}
           {tab === 'etarob' && <EtaRobTab recap={recap} setRecap={setRecap} voyage={voyage} />}
           {tab === 'stowage' && <StowageTab recap={recap} setRecap={setRecap} />}
           {tab === 'hire' && <HireTab recap={recap} setRecap={setRecap} pnl={pnl} voyage={voyage} />}
@@ -2204,6 +2236,15 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
   const showChartererLaycan = outIsTime;
   const showHireFields = hasTcIn || outIsTime;
   const showLaytimeTerms = hasVin || outIsVoyage;
+  const cpFuelTypes = Array.from(new Set((recap.bunkers ?? []).map((fuel) => fuel.fuel.trim()).filter(Boolean))).length > 0
+    ? Array.from(new Set((recap.bunkers ?? []).map((fuel) => fuel.fuel.trim()).filter(Boolean)))
+    : ['FO', 'DO'];
+  const cpConsumptionFor = (fuel: string, index: number) => recap.cpConsByFuel?.[fuel] ?? (index === 0 ? recap.cpCons : '');
+  const setCpConsumption = (fuel: string, value: string, index: number) => setRecap((current) => ({
+    ...current,
+    cpCons: index === 0 ? value : current.cpCons,
+    cpConsByFuel: { ...(current.cpConsByFuel ?? {}), [fuel]: value },
+  }));
 
   // Counterparty / service-provider options sourced from Settings → Account Details.
   const clients = useMemo(() => loadClients(), []);
@@ -2314,8 +2355,8 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
 
       {/* Editable detail cards */}
       <div className="fv-ops__vd-grid">
-        <Card title="Fixture & Vessel" icon="fa-ship">
-          <div className="fv-ops__vd-fields">
+        <Card title="Fixture & Vessel" icon="fa-ship" className="fv-ops__fixture-card">
+          <div className="fv-ops__vd-fields fv-ops__fixture-fields">
             <label className="fv-ops__vd-field">
               <span>Vessel Name</span>
               <VdAutocomplete value={recap.vesselName} onChange={pickVessel} options={vesselNames.map((n) => ({ value: n }))} inputClass="fv-ops__vd-in fv-ops__vd-in--accent" />
@@ -2335,7 +2376,9 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
               </label>
             )}
             <VdField label="CP Speed (kn)" value={recap.cpSpeed} onChange={(v) => set('cpSpeed', v)} num />
-            <VdField label="CP Consumption (MT/day)" value={recap.cpCons} onChange={(v) => set('cpCons', v)} num />
+            {cpFuelTypes.map((fuel, index) => (
+              <VdField key={fuel} label={`CP Consumption - ${fuel} (MT/day)`} value={cpConsumptionFor(fuel, index)} onChange={(v) => setCpConsumption(fuel, v, index)} num />
+            ))}
           </div>
         </Card>
 
@@ -2365,28 +2408,30 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
         </Card>
 
         <Card title="Owners" icon="fa-building">
+          <div className="fv-ops__owners-layout">
+          <div className="fv-ops__owners-main">
           <div className="fv-ops__vd-fields">
             <VdCombo label="Owners" value={recap.owners} onChange={(v) => set('owners', v)} options={ownerNames} accent />
             <VdCombo label="Owners Broker" value={recap.ownersBroker} onChange={(v) => set('ownersBroker', v)} options={brokerNames} />
             <VdField label="CP Date" value={recap.cpDate} onChange={(v) => set('cpDate', v)} placeholder="dd-mm-yyyy" />
-            {recap.bunkers.map((fuel, index) => (
-              <Fragment key={`${fuel.fuel}-${index}`}>
-                <VdField label={`${fuel.fuel || 'Fuel'} BOD (MT)`} value={fuel.bod} onChange={(v) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, bod: v } : line) }))} num />
-                <VdField label={`${fuel.fuel || 'Fuel'} BOR (MT)`} value={fuel.actualBor} onChange={(v) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: v } : line) }))} num />
-              </Fragment>
-            ))}
             {showHireFields && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
           {showHireFields && (
-            <div className="fv-ops__vd-dr">
-              <div className="fv-ops__vd-dr-col">
-                <VdDateTime label="Laycan Start" value={recap.laycanStart} onChange={(v) => set('laycanStart', v)} />
-              </div>
-              <div className="fv-ops__vd-dr-col">
-                <VdDateTime label="Laycan End" value={recap.laycanEnd} onChange={(v) => set('laycanEnd', v)} />
-              </div>
+            <div className="fv-ops__owners-laycan">
+              <VdDateTime label="Laycan Start" value={recap.laycanStart} onChange={(v) => set('laycanStart', v)} />
+              <VdDateTime label="Laycan End" value={recap.laycanEnd} onChange={(v) => set('laycanEnd', v)} />
             </div>
           )}
+          </div>
+          <div className="fv-ops__owners-bunker">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunker Settlement</div>
+            <table className="fv-ops__owners-bunker-table"><thead><tr><th>Fuel</th><th>BOD (MT)</th><th>BOR (MT)</th></tr></thead><tbody>
+            {recap.bunkers.map((fuel, index) => (
+              <tr key={`${fuel.fuel}-${index}`}><td>{fuel.fuel || 'Fuel'}</td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.bod} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, bod: e.target.value } : line) }))} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.actualBor} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: e.target.value } : line) }))} /></td></tr>
+            ))}
+            </tbody></table>
+          </div>
+          </div>
           {showHireFields && (
             <div className="fv-ops__vd-sub">
               <div className="fv-ops__vd-sub-head"><i className="fas fa-money-check-dollar" aria-hidden="true" /> Hire Payment</div>
@@ -2454,7 +2499,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           )}
         </Card>
 
-        {(showDelivery || showLoadDischarge) && <Card title="Delivery / Redelivery / Load Port / Discharge Port" icon="fa-route" className="fv-ops__vd-voyage-legs" right={<button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={addVoyageLeg}><i className="fas fa-plus" aria-hidden="true" /> Add Leg</button>}>
+        {(showDelivery || showLoadDischarge) && <Card title="Ports - Del / Redel / Load / Disch" icon="fa-route" className="fv-ops__vd-voyage-legs" right={<button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={addVoyageLeg}><i className="fas fa-plus" aria-hidden="true" /> Add Leg</button>}>
           <div className="fv-ops__legs-table">
             <div className="fv-ops__legs-head"><span>Type</span><span>Port</span><span>Delivery / NOR Terms</span><span>Date &amp; Time UTC / Rate / PDA</span><span>Notice / LOI-OBL / Status</span></div>
             {showDelivery && <>
@@ -2475,6 +2520,10 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
             {showHireFields && <VdField label="CVE (per month)" value={recap.cve} onChange={(v) => set('cve', v)} num />}
             <VdField label="ADCOM" value={recap.adcom} onChange={(v) => set('adcom', v)} placeholder="e.g. 3.75%" />
             <VdField label="Brokerage" value={recap.brokerage} onChange={(v) => set('brokerage', v)} />
+            <VdField label="P&amp;I Club" value={recap.pniClub} onChange={(v) => set('pniClub', v)} placeholder="e.g. Britannia P&amp;I" />
+            <VdField label="Arbitration Place" value={recap.arbitrationPlace} onChange={(v) => set('arbitrationPlace', v)} placeholder="e.g. London" />
+            <VdField label="Governing Law" value={recap.governingLaw} onChange={(v) => set('governingLaw', v)} placeholder="e.g. English Law" />
+            <VdField label="Sanctions Clause" value={recap.sanctionsClause} onChange={(v) => set('sanctionsClause', v)} placeholder="Applicable sanctions wording" />
             {showHireFields && <VdField label="Ballast Bonus" value={recap.ballastBonus} onChange={(v) => set('ballastBonus', v)} num />}
             {showLaytimeTerms && <VdField label="Demurrage / Day" value={recap.demDespatch} onChange={(v) => set('demDespatch', v)} num />}
             {showLaytimeTerms && <VdSelect label="Despatch" value={recap.despatchTerm} onChange={(v) => set('despatchTerm', v)} options={OPS_DESPATCH_TERMS} />}
@@ -2655,11 +2704,19 @@ function pnlTone(kind: PnlKind, delta: number): 'good' | 'bad' | 'flat' {
   return good ? 'good' : 'bad';
 }
 
-function PnlTab({ recap, set, setRecap, pnl, estPnl }: { recap: Recap; set: (k: keyof Recap, v: string) => void; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; estPnl: Pnl }) {
+function PnlTab({ recap, setRecap, pnl, estPnl }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; estPnl: Pnl }) {
   const pctOf = (delta: number, est: number) => (est !== 0 ? (delta / Math.abs(est)) * 100 : delta !== 0 ? 100 : 0);
   const signed = (n: number) => `${n >= 0 ? '+' : '−'}${money(Math.abs(n))}`;
   const signedPct = (n: number) => `${n >= 0 ? '+' : '−'}${fmt(Math.abs(n), 1)}%`;
   const setNote = (label: string, v: string) => setRecap((r) => ({ ...r, pnlNotes: { ...r.pnlNotes, [label]: v } }));
+  const actualReportCount = (recap.vesselReports ?? []).filter((report) => report.type.toLowerCase().includes('noon') || report.type.toLowerCase().includes('eosp')).length;
+  const actualReportData = actualReportTotals(recap.vesselReports);
+  const reportRows = (recap.vesselReports ?? []).filter((report) => report.type.toLowerCase().includes('noon') || report.type.toLowerCase().includes('eosp'));
+  const reportProblems = reportRows.length === 0 ? ['No noon/EOSP Vessel Reports are available.'] : [
+    reportRows.some((report) => num(report.avgSpdGps) <= 0 && num(report.avgSpdLog) <= 0) ? 'One or more reports are missing average speed.' : '',
+    reportRows.some((report) => num(report.consFo) < 0 || num(report.consDo) < 0 || num(report.consFo) === 0) ? 'One or more reports contain missing or invalid FO consumption values.' : '',
+  ].filter(Boolean);
+  const performanceSource = actualReportData ? `Vessel Reports (${actualReportCount} noon/EOSP report${actualReportCount === 1 ? '' : 's'})` : 'Voyage Details fallback fields';
 
   const revenueItems: PnlItem[] = [
     { label: 'Freight', est: estPnl.freight, act: pnl.freight, kind: 'income' },
@@ -2837,50 +2894,23 @@ function PnlTab({ recap, set, setRecap, pnl, estPnl }: { recap: Recap; set: (k: 
             )}
           </Card>
 
-          {/* Editable actuals — shared recap keys, so edits sync to Voyage Details too */}
-          <Card title="Update Actuals" icon="fa-pen-to-square">
-        <div className="fv-ops__pnl-actuals">
-        <p className="fv-ops__hint fv-ops__pnl-actuals-note">
-          <i className="fas fa-link" aria-hidden="true" /> Values entered here update the same fields everywhere in the voyage (Voyage Details, recap &amp; reports). The Actual column and variances refresh live.
-        </p>
-
-        <div className="fv-ops__vd-sub">
-          <div className="fv-ops__vd-sub-head"><i className="fas fa-sack-dollar" aria-hidden="true" /> Revenue</div>
-          <div className="fv-ops__vd-fields">
-            <VdValueUnit label="Freight / MT" value={recap.freightPerMt} onValue={(v) => set('freightPerMt', v)} unit={recap.freightCurrency} onUnit={(v) => set('freightCurrency', v)} units={OPS_CURRENCIES} accent num />
-            <VdValueUnit label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} num />
-            <VdField label="Demurrage / Despatch" value={recap.demDespatch} onChange={(v) => set('demDespatch', v)} num />
-            <VdField label="Misc Income" value={recap.miscIncome} onChange={(v) => set('miscIncome', v)} num />
-          </div>
-        </div>
-
-        <div className="fv-ops__vd-sub">
-          <div className="fv-ops__vd-sub-head"><i className="fas fa-file-invoice-dollar" aria-hidden="true" /> Costs</div>
-          <div className="fv-ops__vd-fields">
-            <VdValueUnit label="Hire / Day" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} num />
-            <VdField label="Port DA — Load" value={recap.portDaLoad} onChange={(v) => set('portDaLoad', v)} num />
-            <VdField label="Port DA — Disch" value={recap.portDaDisch} onChange={(v) => set('portDaDisch', v)} num />
-            <VdField label="C.V.E." value={recap.cve} onChange={(v) => set('cve', v)} num />
-            <VdField label="ILOHC" value={recap.ilohc} onChange={(v) => set('ilohc', v)} num />
-            <VdField label="Other Cost" value={recap.otherCost} onChange={(v) => set('otherCost', v)} num />
-          </div>
-        </div>
-
-        <div className="fv-ops__vd-sub">
-          <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunkers &amp; Performance</div>
-          <div className="fv-ops__vd-fields">
-            <VdField label="Actual Speed (kn)" value={recap.actualSpeed ?? ''} onChange={(v) => set('actualSpeed', v)} placeholder={`CP ${recap.cpSpeed || '—'}`} num />
-            <VdField label="FO Cons (MT/day)" value={recap.actualFoPerDay ?? ''} onChange={(v) => set('actualFoPerDay', v)} num />
-            <VdField label="DO Cons (MT/day)" value={recap.actualDoPerDay ?? ''} onChange={(v) => set('actualDoPerDay', v)} num />
-            <VdField label="FO Cons (MT)" value={recap.foCons} onChange={(v) => set('foCons', v)} num />
-            <VdField label="FO Price / MT" value={recap.foPrice} onChange={(v) => set('foPrice', v)} num />
-            <VdField label="DO Cons (MT)" value={recap.doCons} onChange={(v) => set('doCons', v)} num />
-            <VdField label="DO Price / MT" value={recap.doPrice} onChange={(v) => set('doPrice', v)} num />
-          </div>
-          <p className="fv-ops__hint"><i className="fas fa-link" aria-hidden="true" /> Observed speed recomputes voyage days from the itinerary (Σ sea legs ÷ speed) + port days — hire &amp; TCE update live. Daily cons (MT/day) recomputes total FO/DO burnt; leave blank to use the delivery → redelivery dates and the total MT figures.</p>
-        </div>
-        </div>
+          <Card title="P&L Data Sources & Alerts" icon="fa-circle-info">
+            <div className="fv-ops__pnl-source-alerts">
+              <div className={`fv-ops__pnl-source-alert fv-ops__pnl-source-alert--${reportProblems.length > 0 ? 'warn' : 'good'}`}>
+                <i className={`fas ${reportProblems.length > 0 ? 'fa-triangle-exclamation' : 'fa-circle-check'}`} aria-hidden="true" />
+                <div><b>{reportProblems.length > 0 ? 'Speed and consumption alert' : 'Speed and consumption source'}</b><span>{reportProblems.length > 0 ? reportProblems.join(' ') : `${performanceSource} — Live P&L uses these reported values.`}</span>{actualReportData && <small>Average speed: {fmt(actualReportData.speed, 2)} kn · FO: {fmt(actualReportData.foCons, 2)} MT · DO: {fmt(actualReportData.doCons, 2)} MT</small>}{!actualReportData && <small>Open Vessel Reports and save vessel-reported speed/consumption to make the P&amp;L actual.</small>}</div>
+              </div>
+              <div className="fv-ops__pnl-source-list">
+                <div><span>Revenue</span><b>Voyage Details: Freight / MT × Final Qty Loaded / BL</b></div>
+                <div><span>Demurrage / Despatch</span><b>Voyage Details / Freight &amp; Laytime</b></div>
+                <div><span>Hire</span><b>Voyage Details: Owners hire per day and commercial terms</b></div>
+                <div><span>Port DA</span><b>Voyage Details: Load and Discharge PDA fields</b></div>
+                <div><span>Bunker prices</span><b>Voyage Details: FO and DO price per MT</b></div>
+                <div><span>CVE / ILOHC / Other</span><b>Voyage Details: Commercial Terms</b></div>
+              </div>
+            </div>
           </Card>
+
         </div>
       </div>
     </div>
@@ -4312,21 +4342,46 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const openClaim = settlement.claims.find((x) => x.id === claimId) ?? null;
 
   const sendPayable = (id: string, supplier: string, invoiceNo: string, amount: number, dueDate: string, category: 'PDA' | 'FDA' | 'Agency' | 'Claims') => {
-    if (amount <= 0) return;
-    addPayable({ reference: `${voyage.id}-${id}`, vessel: voyage.vessel, voyage: voyage.id, supplier: supplier || 'Settlement counterparty', invoiceNo, amount, currency: 'USD', dueDate: dueDate || '—', module, category });
+    if (amount <= 0) return false;
+    const payee = supplier || 'Settlement counterparty';
+    const bank = findClientBankByName(payee);
+    if (!bank?.verified) {
+      window.alert(`Cannot send ${invoiceNo} to Accounts. Bank account details for "${payee}" are missing or not verified.`);
+      return false;
+    }
+    addPayable({
+      reference: `${voyage.id}-${id}`,
+      vessel: voyage.vessel,
+      voyage: voyage.id,
+      supplier: payee,
+      invoiceNo,
+      amount,
+      currency: 'USD',
+      dueDate: dueDate || '—',
+      module,
+      category,
+      bank: 'Verified account details on file',
+      remarks: `Verified payment account: ${(bank.details || bank.accountHolder || payee).trim()}`,
+    });
+    return true;
   };
   const sendSelectedClaimsToAccounts = () => {
-    settlement.claims.filter((x) => selClaims.has(x.id)).forEach((x) => sendPayable(x.id, claimChargeTo(x), `CLM-${voyage.id}-${x.id}`, Math.max(0, x.amount - (x.settlement || 0)), x.due || '', 'Claims'));
-    addNotification(`Selected claims for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+    const sent = settlement.claims
+      .filter((x) => selClaims.has(x.id))
+      .filter((x) => sendPayable(x.id, claimChargeTo(x), `CLM-${voyage.id}-${x.id}`, Math.max(0, x.amount - (x.settlement || 0)), x.due || '', 'Claims')).length;
+    if (sent > 0) addNotification(`Selected claims for ${voyage.vessel} sent to Accounts.`, 'Accounts');
   };
   const advanceClaim = (id: string, to: HireStatus) => {
-    setSettlement({ claims: settlement.claims.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
     const row = settlement.claims.find((x) => x.id === id);
     if (!row) return;
+    if (to === 'Sent For Payment') {
+      const sent = sendPayable(row.id, claimChargeTo(row), `CLM-${voyage.id}-${row.id}`, Math.max(0, row.amount - (row.settlement || 0)), row.due || '', 'Claims');
+      if (!sent) return;
+    }
+    setSettlement({ claims: settlement.claims.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
     if (to === 'Sent For Approval') addNotification(`Claim ${row.reference || row.type} for ${voyage.vessel} is ready for manager review and approval.`, 'Manager');
     else if (to === 'Approved') addNotification(`Claim ${row.reference || row.type} for ${voyage.vessel} was approved by the manager and is ready to send to Accounts.`, module);
     else if (to === 'Sent For Payment') {
-      sendPayable(row.id, claimChargeTo(row), `CLM-${voyage.id}-${row.id}`, Math.max(0, row.amount - (row.settlement || 0)), row.due || '', 'Claims');
       addNotification(`Claim ${row.reference || row.type} sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}.`, 'Accounts');
     }
   };
@@ -5960,10 +6015,49 @@ function freightStatusPill(s: string): string {
   return s === 'Draft' ? 'amber' : 'blue';
 }
 
+function pdfEsc(value: unknown): string {
+  return String(value ?? '').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character] ?? character));
+}
+
+function findClientBankByName(name?: string): { verified: boolean; details: string; bankName: string; accountHolder: string; accountNumber: string; swift: string; iban: string } | null {
+  const key = (name ?? '').trim().toLowerCase();
+  if (!key) return null;
+  const hit = loadClients().find((client) => client.name.trim().toLowerCase() === key);
+  return hit?.bankAccount ?? null;
+}
+
+function accountBoxHtml(title: string, partyName: string, bank?: { verified?: boolean; details?: string; bankName?: string; accountHolder?: string; accountNumber?: string; swift?: string; iban?: string } | null): string {
+  const account = bank ?? {};
+  if (!account.verified) return '';
+  const detailsText = (account.details ?? '').trim();
+  const hasAny = Boolean(detailsText || account.bankName || account.accountHolder || account.accountNumber || account.swift || account.iban);
+  return `<div style="margin:14px 0 6px;border:1px solid #cdd5e1;background:#f8fafc;padding:10px 12px;border-radius:6px">
+    <div style="font-size:11px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">${pdfEsc(title)}</div>
+    <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:6px">${pdfEsc(partyName || '—')}</div>
+    ${hasAny
+      ? detailsText
+        ? `<pre style="margin:0;white-space:pre-wrap;font:12px Arial;color:#0f172a">${pdfEsc(detailsText)}</pre>`
+        : `<table style="width:100%;border-collapse:collapse;margin:0"><tbody>
+          <tr><td style="border:none;padding:2px 6px 2px 0;color:#64748b;width:150px">Bank Name</td><td style="border:none;padding:2px 0">${pdfEsc(account.bankName || '—')}</td></tr>
+          <tr><td style="border:none;padding:2px 6px 2px 0;color:#64748b">Account Holder</td><td style="border:none;padding:2px 0">${pdfEsc(account.accountHolder || '—')}</td></tr>
+          <tr><td style="border:none;padding:2px 6px 2px 0;color:#64748b">Account Number</td><td style="border:none;padding:2px 0">${pdfEsc(account.accountNumber || '—')}</td></tr>
+          <tr><td style="border:none;padding:2px 6px 2px 0;color:#64748b">SWIFT</td><td style="border:none;padding:2px 0">${pdfEsc(account.swift || '—')}</td></tr>
+          <tr><td style="border:none;padding:2px 6px 2px 0;color:#64748b">IBAN</td><td style="border:none;padding:2px 0">${pdfEsc(account.iban || '—')}</td></tr>
+        </tbody></table>`
+      : '<div style="font-size:11px;color:#64748b">No bank account details saved.</div>'}
+  </div>`;
+}
+
+function companyAccountBoxHtml(label = 'Our Company Account Details'): string {
+  const cfg = getWorkflowConfig();
+  return accountBoxHtml(label, cfg.companyName || 'Our Company', cfg.companyBankAccount);
+}
+
 /** HTML body for one invoice (used by the modal and bulk PDF export). */
 function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, laytimes: LaytimePort[], claims?: ClaimRow[]): string {
   const { lines, total } = calcInvoice(inv, recap, laytimes, claims);
   const rows = lines.map((l) => `<tr><td>${l.desc}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
+  const payerBank = findClientBankByName(inv.invoiceTo);
   return `<section>
     <h1>${inv.kind === 'Freight' ? `${inv.freightType} Freight Invoice` : inv.title}</h1>
     <p class="sub">${recap.vesselName} · IMO ${voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
@@ -5979,6 +6073,8 @@ function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, la
     <table><thead><tr><th>Description</th><th class="r">Amount (US$)</th></tr></thead>
     <tbody>${rows}</tbody>
     <tfoot><tr class="tot"><td>Total Payable Due to Owners</td><td class="r">${money(total)}</td></tr></tfoot></table>
+    ${companyAccountBoxHtml('Beneficiary Account Details (Our Company)')}
+    ${accountBoxHtml('Payer Details (Reference)', inv.invoiceTo || recap.charterers || 'Counterparty', payerBank)}
   </section>`;
 }
 
@@ -5986,6 +6082,8 @@ function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, la
 function laytimePdfSection(port: LaytimePort, recap: Recap): string {
   const res = calcLaytime(port);
   const factRows = res.rows.map(({ ev, elapsed, counted, cumulative }) => `<tr><td>${ev.date || ''}</td><td>${ev.from || ''}</td><td>${ev.to || ''}</td><td class="r">${fmt(elapsed, 3)}</td><td class="r">${ev.pct}</td><td class="r">${fmt(counted, 3)}</td><td class="r">${fmt(cumulative, 3)}</td><td>${ev.remark || ''}</td></tr>`).join('');
+  const payeeName = res.onDemurrage ? (getWorkflowConfig().companyName || 'Our Company') : (port.accountName || recap.charterers || 'Counterparty');
+  const payeeBank = res.onDemurrage ? getWorkflowConfig().companyBankAccount : findClientBankByName(payeeName);
   return `<section>
     <h1>Laytime Calculation — ${port.name || 'Port'} (${port.op})</h1>
     <p class="sub">${recap.vesselName} · Cargo ${port.cargo} · CP ${recap.cpDate || '—'}</p>
@@ -6001,6 +6099,7 @@ function laytimePdfSection(port: LaytimePort, recap: Recap): string {
     <table><thead><tr><th>Date</th><th>From</th><th>To</th><th class="r">Time</th><th class="r">% Count</th><th class="r">Time Used / Deducted</th><th class="r">Cumulative</th><th>Remarks</th></tr></thead>
     <tbody>${factRows}</tbody>
     <tfoot><tr><td colspan="6">Total Time Used</td><td class="r">${fmt(res.used, 3)}</td><td>days</td></tr></tfoot></table>
+    ${accountBoxHtml(res.onDemurrage ? 'Beneficiary Account Details' : 'Payee Account Details', payeeName, payeeBank)}
   </section>`;
 }
 
@@ -6348,6 +6447,13 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
     return 'Pending';
   };
   const advanceInvoice = (id: string, to: string) => {
+    if (to === 'Sent For Payment') {
+      const invoice = fl.invoices.find((x) => x.id === id);
+      if (!invoice) return;
+      const { total } = calcInvoice(invoice, recap, fl.laytimes, settlement.claims);
+      const sent = sendPayable(invoice.id, invoice.invoiceTo || recap.charterers, `INV-${voyage.id}-${invoice.id}`, Math.max(0, total), invoice.dueDate, invoice.kind === 'Freight' ? 'Freight' : 'Demurrage');
+      if (!sent) return;
+    }
     saveInvoice(id, { workflowStatus: to as HireStatus });
     if (to === 'Sent For Approval') {
       const invoice = fl.invoices.find((x) => x.id === id);
@@ -6360,7 +6466,6 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
       const invoice = fl.invoices.find((x) => x.id === id);
       if (invoice) {
         const { total } = calcInvoice(invoice, recap, fl.laytimes, settlement.claims);
-        sendPayable(invoice.id, invoice.invoiceTo || recap.charterers, `INV-${voyage.id}-${invoice.id}`, Math.max(0, total), invoice.dueDate, invoice.kind === 'Freight' ? 'Freight' : 'Demurrage');
         addNotification(`Freight invoice sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}; Amount: ${money(total)}.`, 'Accounts');
       }
     }
@@ -6472,7 +6577,8 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
     const rows = settlement.pda.filter((x) => selPda.has(x.id));
     if (rows.length === 0) return;
     const body = rows.map((r) => `<tr><td>${esc(r.port)}</td><td>${esc(r.agent)}</td><td>${esc(r.currency)}</td><td class="r">${fmtAmt(r.estimated)}</td><td class="r">${fmtAmt(r.advance)}</td><td class="r">${fmtAmt(r.fdaFinal)}</td><td>${esc(r.fdaStatus || (r.fdaFinal ? 'Received' : 'Pending'))}</td><td>${esc(r.paymentStatus || (r.advance >= (r.fdaFinal || r.estimated) ? 'Paid' : r.advance > 0 ? 'Partially Paid' : 'Not Paid'))}</td><td>${esc(r.approval)}</td></tr>`).join('');
-    printSections(`PDA-FDA — ${recap.vesselName}`, `<section><h1>PDA / FDA</h1><table><thead><tr><th>Port</th><th>Agent</th><th>Cur</th><th class="r">PDA</th><th class="r">Advance</th><th class="r">FDA</th><th>Status</th><th>Payment Status</th><th>Approval</th></tr></thead><tbody>${body}</tbody></table></section>`);
+    const banks = rows.map((r) => accountBoxHtml('Payee Account Details', r.agent || 'Agent', findClientBankByName(r.agent))).join('');
+    printSections(`PDA-FDA — ${recap.vesselName}`, `<section><h1>PDA / FDA</h1><table><thead><tr><th>Port</th><th>Agent</th><th>Cur</th><th class="r">PDA</th><th class="r">Advance</th><th class="r">FDA</th><th>Status</th><th>Payment Status</th><th>Approval</th></tr></thead><tbody>${body}</tbody></table>${banks}</section>`);
   };
 
   const addAgentInv = () => {
@@ -6535,31 +6641,76 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
     if (invRows.length === 0 && srvRows.length === 0) return;
     const invBody = invRows.map((r) => `<tr><td>${esc(r.invoiceNo)}</td><td>${esc(r.vendor)}</td><td>${esc(r.category)}</td><td>${esc(r.port)}</td><td class="r">${fmtAmt(r.amount)}</td><td class="r">${fmtAmt(r.approved)}</td><td class="r">${fmtAmt(r.paid)}</td><td>${esc(r.status)}</td></tr>`).join('');
     const srvBody = srvRows.map((r) => `<tr><td>${esc(r.service)}</td><td>${esc(r.vendor)}</td><td>${esc(r.invoice)}</td><td class="r">${fmtAmt(r.cost)}</td><td class="r">${fmtAmt(r.tax)}</td><td class="r">${fmtAmt(r.cost + r.tax)}</td><td>${esc(r.status)}</td></tr>`).join('');
-    const sections = `${invRows.length > 0 ? `<section><h1>Agent Invoices</h1><table><thead><tr><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th class="r">Amount</th><th class="r">Approved</th><th class="r">Paid</th><th>Status</th></tr></thead><tbody>${invBody}</tbody></table></section>` : ''}${srvRows.length > 0 ? `<section><h1>Additional Services</h1><table><thead><tr><th>Service</th><th>Vendor</th><th>Invoice</th><th class="r">Cost</th><th class="r">Tax</th><th class="r">Total</th><th>Status</th></tr></thead><tbody>${srvBody}</tbody></table></section>` : ''}`;
+    const invBanks = invRows.map((r) => accountBoxHtml('Payee Account Details', r.vendor || 'Vendor', findClientBankByName(r.vendor))).join('');
+    const srvBanks = srvRows.map((r) => accountBoxHtml('Payee Account Details', r.vendor || 'Vendor', findClientBankByName(r.vendor))).join('');
+    const sections = `${invRows.length > 0 ? `<section><h1>Agent Invoices</h1><table><thead><tr><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th class="r">Amount</th><th class="r">Approved</th><th class="r">Paid</th><th>Status</th></tr></thead><tbody>${invBody}</tbody></table>${invBanks}</section>` : ''}${srvRows.length > 0 ? `<section><h1>Additional Services</h1><table><thead><tr><th>Service</th><th>Vendor</th><th>Invoice</th><th class="r">Cost</th><th class="r">Tax</th><th class="r">Total</th><th>Status</th></tr></thead><tbody>${srvBody}</tbody></table>${srvBanks}</section>` : ''}`;
     printSections(`Agent Invoices & Services — ${recap.vesselName}`, sections);
   };
 
   const sendSelectedPdaToAccounts = () => {
-    settlement.pda.filter((x) => selPda.has(x.id)).forEach((x) => sendPayable(x.id, x.agent, `${x.fdaFinal ? 'FDA' : 'PDA'}-${voyage.id}-${x.id}`, Math.max(0, (x.fdaFinal || x.estimated) - x.advance), x.due || '', x.fdaFinal ? 'FDA' : 'PDA'));
-    addNotification(`Selected PDA/FDA payments for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+    const sent = settlement.pda
+      .filter((x) => selPda.has(x.id))
+      .filter((x) => sendPayable(x.id, x.agent, `${x.fdaFinal ? 'FDA' : 'PDA'}-${voyage.id}-${x.id}`, Math.max(0, (x.fdaFinal || x.estimated) - x.advance), x.due || '', x.fdaFinal ? 'FDA' : 'PDA')).length;
+    if (sent > 0) addNotification(`Selected PDA/FDA payments for ${voyage.vessel} sent to Accounts.`, 'Accounts');
   };
   const sendSelectedAgentInvoicesToAccounts = () => {
-    settlement.agentInvoices.filter((x) => selAgentInv.has(x.id)).forEach((x) => sendPayable(x.id, x.vendor, x.invoiceNo || `AGT-${x.id}`, Math.max(0, (x.approved || x.amount) - x.paid), x.due, /fda/i.test(x.category) ? 'FDA' : 'Agency'));
-    addNotification(`Selected agent invoices for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+    const sent = settlement.agentInvoices
+      .filter((x) => selAgentInv.has(x.id))
+      .filter((x) => sendPayable(x.id, x.vendor, x.invoiceNo || `AGT-${x.id}`, Math.max(0, (x.approved || x.amount) - x.paid), x.due, /fda/i.test(x.category) ? 'FDA' : 'Agency')).length;
+    if (sent > 0) addNotification(`Selected agent invoices for ${voyage.vessel} sent to Accounts.`, 'Accounts');
   };
   const sendSelectedServicesToAccounts = () => {
-    settlement.services.filter((x) => selServices.has(x.id)).forEach((x) => sendPayable(x.id, x.vendor, x.invoice || `SRV-${x.id}`, x.cost + x.tax, '', 'Agency'));
-    addNotification(`Selected services for ${voyage.vessel} sent to Accounts.`, 'Accounts');
+    const sent = settlement.services
+      .filter((x) => selServices.has(x.id))
+      .filter((x) => sendPayable(x.id, x.vendor, x.invoice || `SRV-${x.id}`, x.cost + x.tax, '', 'Agency')).length;
+    if (sent > 0) addNotification(`Selected services for ${voyage.vessel} sent to Accounts.`, 'Accounts');
   };
   const openPda = settlement.pda.find((x) => x.id === pdaId) ?? null;
   const openAgentInv = settlement.agentInvoices.find((x) => x.id === agentInvId) ?? null;
   const openService = settlement.services.find((x) => x.id === serviceId) ?? null;
 
   const sendPayable = (id: string, supplier: string, invoiceNo: string, amount: number, dueDate: string, category: 'PDA' | 'FDA' | 'Agency' | 'Claims' | 'Freight' | 'Demurrage') => {
-    if (amount <= 0) return;
-    addPayable({ reference: `${voyage.id}-${id}`, vessel: voyage.vessel, voyage: voyage.id, supplier: supplier || 'Settlement counterparty', invoiceNo, amount, currency: 'USD', dueDate: dueDate || '—', module, category });
+    if (amount <= 0) return false;
+    const payee = supplier || 'Settlement counterparty';
+    const bank = findClientBankByName(payee);
+    if (!bank?.verified) {
+      window.alert(`Cannot send ${invoiceNo} to Accounts. Bank account details for "${payee}" are missing or not verified.`);
+      return false;
+    }
+    addPayable({
+      reference: `${voyage.id}-${id}`,
+      vessel: voyage.vessel,
+      voyage: voyage.id,
+      supplier: payee,
+      invoiceNo,
+      amount,
+      currency: 'USD',
+      dueDate: dueDate || '—',
+      module,
+      category,
+      bank: 'Verified account details on file',
+      remarks: `Verified payment account: ${(bank.details || bank.accountHolder || payee).trim()}`,
+    });
+    return true;
   };
   const advanceSettlement = (kind: 'pda' | 'invoice' | 'service' | 'claim', id: string, to: HireStatus) => {
+    if (to === 'Sent For Payment') {
+      let sent = false;
+      if (kind === 'pda') {
+        const row = settlement.pda.find((x) => x.id === id);
+        if (row) sent = sendPayable(row.id, row.agent, `${row.fdaFinal ? 'FDA' : 'PDA'}-${voyage.id}-${row.id}`, Math.max(0, (row.fdaFinal || row.estimated) - row.advance), row.due || '', row.fdaFinal ? 'FDA' : 'PDA');
+      } else if (kind === 'invoice') {
+        const row = fl.invoices.find((x) => x.id === id);
+        if (row) { const { total } = calcInvoice(row, recap, fl.laytimes, settlement.claims); sent = sendPayable(row.id, row.invoiceTo, `INV-${voyage.id}-${row.id}`, Math.max(0, total), row.dueDate, 'Agency'); }
+      } else if (kind === 'service') {
+        const row = settlement.services.find((x) => x.id === id);
+        if (row) sent = sendPayable(row.id, row.vendor, row.invoice || `SRV-${row.id}`, row.cost + row.tax, '', 'Agency');
+      } else {
+        const row = settlement.claims.find((x) => x.id === id);
+        if (row) sent = sendPayable(row.id, claimChargeTo(row), `CLM-${voyage.id}-${row.id}`, Math.max(0, row.amount - (row.settlement || 0)), row.due || '', 'Claims');
+      }
+      if (!sent) return;
+    }
     if (kind === 'pda') setSettlement({ pda: settlement.pda.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
     if (kind === 'invoice') setFL({ invoices: fl.invoices.map((x) => x.id === id ? { ...x, status: x.status, workflowStatus: to } : x) });
     if (kind === 'service') setSettlement({ services: settlement.services.map((x) => x.id === id ? { ...x, workflowStatus: to } : x) });
@@ -6573,19 +6724,6 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
       return;
     }
     if (to !== 'Sent For Payment') return;
-    if (kind === 'pda') {
-      const row = settlement.pda.find((x) => x.id === id);
-      if (row) sendPayable(row.id, row.agent, `${row.fdaFinal ? 'FDA' : 'PDA'}-${voyage.id}-${row.id}`, Math.max(0, (row.fdaFinal || row.estimated) - row.advance), row.due || '', row.fdaFinal ? 'FDA' : 'PDA');
-    } else if (kind === 'invoice') {
-      const row = fl.invoices.find((x) => x.id === id);
-      if (row) { const { total } = calcInvoice(row, recap, fl.laytimes, settlement.claims); sendPayable(row.id, row.invoiceTo, `INV-${voyage.id}-${row.id}`, Math.max(0, total), row.dueDate, 'Agency'); }
-    } else if (kind === 'service') {
-      const row = settlement.services.find((x) => x.id === id);
-      if (row) sendPayable(row.id, row.vendor, row.invoice || `SRV-${row.id}`, row.cost + row.tax, '', 'Agency');
-    } else {
-      const row = settlement.claims.find((x) => x.id === id);
-      if (row) sendPayable(row.id, claimChargeTo(row), `CLM-${voyage.id}-${row.id}`, Math.max(0, row.amount - (row.settlement || 0)), row.due || '', 'Claims');
-    }
     addNotification(`${kind} payment sent to Accounts. Fixture: ${fixtureNo}; Vessel: ${voyage.vessel}; Voyage: ${voyage.id}.`, 'Accounts');
   };
   const settlementActions = (kind: 'pda' | 'invoice' | 'service' | 'claim', id: string, workflowStatus: HireStatus = 'Draft') => (
@@ -7329,6 +7467,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
     const w = window.open('', '_blank', 'width=900,height=1100');
     if (!w) return;
     const rows = lines.map((l) => `<tr><td>${l.desc}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
+    const payerBank = findClientBankByName(view.invoiceTo || recap.charterers);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${view.title} — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
       h1{font-size:16px;margin:0 0 2px}.sub{color:#555;margin:0 0 14px;font-size:11px}
@@ -7351,6 +7490,8 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
       <table><thead><tr><th>Description</th><th class="r">Amount (US$)</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr class="tot"><td>Total Payable Due to Owners</td><td class="r">${money(total)}</td></tr></tfoot></table>
+      ${companyAccountBoxHtml('Beneficiary Account Details (Our Company)')}
+      ${accountBoxHtml('Payer Details (Reference)', view.invoiceTo || recap.charterers || 'Counterparty', payerBank)}
       <p class="sub">SOA ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()} · *E&amp;OE.</p>
     </body></html>`);
     w.document.close();
@@ -7555,6 +7696,8 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
     const w = window.open('', '_blank', 'width=1000,height=1100');
     if (!w) return;
     const factRows = res.rows.map(({ ev, elapsed, counted, cumulative }) => `<tr><td>${ev.date || ''}</td><td>${ev.from || ''}</td><td>${ev.to || ''}</td><td class="r">${fmt(elapsed, 3)}</td><td class="r">${ev.pct}</td><td class="r">${fmt(counted, 3)}</td><td class="r">${fmt(cumulative, 3)}</td><td>${ev.remark || ''}</td></tr>`).join('');
+    const payeeName = outcome.onDemurrage ? (getWorkflowConfig().companyName || 'Our Company') : (view.accountName || recap.charterers || 'Counterparty');
+    const payeeBank = outcome.onDemurrage ? getWorkflowConfig().companyBankAccount : findClientBankByName(payeeName);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Laytime — ${view.name} — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
       h1{font-size:16px;margin:0 0 2px}.sub{color:#555;margin:0 0 14px;font-size:11px}
@@ -7583,6 +7726,7 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
       <table><thead><tr><th>Date</th><th>From</th><th>To</th><th class="r">Time</th><th class="r">% Count</th><th class="r">Time Used / Deducted</th><th class="r">Cumulative</th><th>Remarks</th></tr></thead>
       <tbody>${factRows}</tbody>
       <tfoot><tr><td colspan="6">Total Time Used</td><td class="r">${fmt(res.used, 3)}</td><td>days</td></tr></tfoot></table>
+      ${accountBoxHtml(outcome.onDemurrage ? 'Beneficiary Account Details' : 'Payee Account Details', payeeName, payeeBank)}
       <p class="sub">Prepared ${p2(today.getDate())}-${p2(today.getMonth() + 1)}-${today.getFullYear()} · *E&amp;OE.</p>
     </body></html>`);
     w.document.close();

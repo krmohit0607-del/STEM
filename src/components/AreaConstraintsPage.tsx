@@ -10,7 +10,6 @@ import { MapCursorPosition } from './MapCursorPosition';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
 import {
-  AreaConstraintsLayer,
   ZONE_STYLES,
   getZoneStyle,
   speedKnots,
@@ -19,6 +18,7 @@ import {
 } from './AreaConstraintsLayer';
 import { AreaConstraintEditLayer } from './AreaConstraintEditLayer';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
+import { AreaConstraintsControl } from './AreaConstraintsControl';
 import {
   AREA_CONSTRAINTS,
   constraintScope,
@@ -166,7 +166,7 @@ function boundsOf(c: AreaConstraint): LatLngBoundsLiteral {
   let maxLat = -90;
   let maxLon = -180;
   for (const ring of c.rings) {
-    for (const [lat, lon] of ring) {
+    for (const [lat, lon] of normalizeRingLonLat(ring)) {
       if (lat < minLat) minLat = lat;
       if (lat > maxLat) maxLat = lat;
       if (lon < minLon) minLon = lon;
@@ -394,6 +394,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
   }, [listSource, search, zoneFilter]);
 
   const selected = data.find((c) => c.id === selectedId) ?? null;
+  const canEdit = (c: AreaConstraint) => mode === 'admin' || constraintScope(c) === 'voyage';
 
   const flyTo = (c: AreaConstraint) => {
     const map = mapRef.current;
@@ -406,6 +407,10 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
   };
 
   const select = (c: AreaConstraint) => {
+    if (!canEdit(c)) {
+      setSelectedId(null);
+      return;
+    }
     setSelectedId(c.id);
     flyTo(c);
   };
@@ -781,24 +786,17 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
           {baseLayer === 'nautical' && (
             <TileLayer url="https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png" attribution="&copy; OpenSeaMap" />
           )}
-          <WeatherFieldControl position="topright" />
-          <WeatherPointControl position="topright" />
           <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+          <WeatherFieldControl position="topright" />
+          <AreaConstraintsControl position="topright" constraints={mapConstraints} selectedId={selectedId ?? undefined} onConstraintClick={(id) => { const constraint = data.find((c) => c.id === id); if (constraint) select(constraint); }} />
+          <WeatherPointControl position="topright" />
           <PortsControl position="topright" />
           <RulerControl position="topright" />
           <MapCursorPosition position="topleft" />
-          <AreaConstraintsLayer
-            constraints={mapConstraints}
-            selectedId={selectedId ?? undefined}
-            onConstraintClick={(id) => {
-              const constraint = data.find((c) => c.id === id);
-              if (constraint) select(constraint);
-            }}
-          />
           {overlayLayers.includes('loadLineZones') && (
             <LoadLineZonesLayer />
           )}
-          {selected && (
+          {selected && canEdit(selected) && (
             <AreaConstraintEditLayer
               constraint={selected}
               color={getZoneStyle(selected.zoneType).color}

@@ -34,6 +34,26 @@ function fmtReportDate(d: Date): string {
   return `${d.getFullYear()} ${mon} ${day}`;
 }
 
+function getSystemRouteAttachments(v: Voyage): string[] {
+  try {
+    const activeRouteId = window.localStorage.getItem('fv.activeRouteId');
+    const raw = window.localStorage.getItem('fv.savedRoutes');
+    if (!activeRouteId || !raw) return [];
+
+    const routes = JSON.parse(raw) as Array<{ id?: string; waypoints?: unknown[] }>;
+    const savedRouteId = activeRouteId.startsWith('saved-')
+      ? activeRouteId.slice('saved-'.length)
+      : activeRouteId;
+    const activeRoute = routes.find((route) => route.id === savedRouteId);
+    if (!activeRoute?.waypoints?.length) return [];
+
+    const fileStem = `${v.vessel.replace(/[^a-z0-9]+/gi, '_')}_Route`;
+    return [`${fileStem}.rtz`, `${fileStem}.csv`];
+  } catch {
+    return [];
+  }
+}
+
 /** e.g. "07 Jul 2026". */
 function fmtLongDate(d: Date): string {
   const day = String(d.getDate()).padStart(2, '0');
@@ -78,11 +98,6 @@ export function getOrderConfirmation(v: Voyage): OrderConfirmation {
   };
 }
 
-/**
- * Order Confirmation email sent to the client acknowledging the order
- * for the subject vessel (matches the operations "Order Confirmation"
- * template).
- */
 export function buildOrderConfirmationEmail(v: Voyage): ReportEmail {
   const o = getOrderConfirmation(v);
   const body = `ORDER CONFIRMATION
@@ -92,116 +107,107 @@ To: ${o.to}
 
 Vessel: ${o.vessel}
 Type of Service ordered: ${o.serviceType}
-Our Reference: ${o.reference}
+Our Voyage Reference: ${o.reference}
 
-Thank you for the order form for subject vessel.
-We are attending.
+Thank you for the order form for subject vessel. We are attending.
 
-Itinerary: ${o.itinerary}${'    '}${o.amount}
+Itinerary: ${o.itinerary}    ${o.amount}
 
-If you have any questions or require assistance during voyage, please contact ops@accelleron-industries.com.
+If you have any questions or require assistance during voyage, please contact ops@odasgroup.net
 
 Best Regards
-Accelleron Voyage Operations
-We can be reached via our email ops1@accelleron-industries.com. In case of urgent need of assistance, Please contact +91-172-4628226 between 0300-1200 UTC and +1-514-903-5343 for other times.`;
+ODAS Group
+
+We can be reached via our email ops@odasgroup.net. In case of urgent need of assistance, Please contact +91-7015080678`;
   return {
     to: v.clientEmail,
-    subject: `Order Confirmation \u2014 ${v.vessel} \u2014 ${o.itinerary}`,
+    subject: `${o.vessel} - ${v.id} - ${o.serviceType} Order Confirmation - ${o.itinerary}`,
     attachments: [],
     body,
   };
 }
 
-/**
- * Pre-voyage Reporting Instructions email sent to the Master when a
- * vessel is appointed for Weather Routing + Performance Monitoring.
- * Mirrors the operations "Route Recommendation / Reporting" template.
- */
 export function buildReportingInstructions(v: Voyage): ReportEmail {
   const itinerary = `${v.portFrom} - ${v.portTo}`;
   const dt = fmtCompactDate(today());
-
+  const routeAttachments = getSystemRouteAttachments(v);
+  const reportingPortalUrl = typeof window === 'undefined'
+    ? '/vessel-reports/offline'
+    : `${window.location.origin}/vessel-reports/offline`;
   const body = `To: Master ${v.vessel}
-Fm: Accelleron Voyage Operations
+Fm: ODAS Voyage Operations
 Dt: ${dt}
-Rf: /0001/ou
+Rf: ${v.routeRef}
 
 Itinerary
 ${itinerary}
 
-Good Day Captain
+Good Day Captain,
 
-We have been appointed by Messrs ${v.client} to provide Weather Routing + Performance Monitoring (RPM) to your vessel for the above itinerary.
+We have been appointed by Messrs ${v.client} to provide Weather Routing + Performance Monitoring (RPM) for ${v.vessel} on the above itinerary.
 
-PRE-VOYAGE REPORTING
-Prior Voyage, please confirm the following which in compliance with IMO DCS requirements.
-- Ship's particulars (in Word/PDF/Excel format)
-- Specific Fuel Oil Consumption Curve (in Word/PDF/Excel format)
-- IMO
-- Flag of Registry
-- Cargo type and name:
-- Cargo Quantity in mts:
-- Any Deck Cargo:
-- Scrubber: Yes/ No
-- Type: Open loop /Closed loop/Hybrid
-- Operational: Yes/ No
-- Method Used to measure Fuel Oil Consumption:
-  (choose one: 1.Using BDN, 2.Using Flow Meters, 3.Using Bunker Fuel Oil Tank monitoring)
-- M/E Power Output (rated power in kW) at 100%, MCR, NCR, Lowest %MCR
-- A/E Power Output (rated power in kW)
-- ETD
-- Expected Fore / Aft sailing draft / DWT
-- Voyage Performance Criteria (Speed+Consumption)
-- Any special considerations A// should take into account
-- Route Plan with key waypoints and distances
+Please review the voyage in ODAS and provide or confirm the following information before departure.
 
-Kindly note the below.
+VESSEL REPORTING PORTAL
+Online submission and offline email preparation: ${reportingPortalUrl}
+Open this link in a browser, select the required report type, complete the fields, and either submit online or generate an email when internet connectivity is unavailable.
 
-Route Recommendation: As attached. Kindly refer to attachment: Voyage Plan
+VESSEL PROFILE
+- Vessel name, IMO number, vessel type and flag of registry
+- Deadweight, year built, LOA, beam and draft limits
+- Main engine rated power, MCR/NCR and minimum operating MCR
+- Auxiliary engine power and fuel consumption particulars
+- Main engine specific fuel oil consumption curve
+- Cargo type, cargo quantity in metric tonnes and any deck cargo
+- Current and maximum permitted fore and aft sailing drafts
 
-Above route recommendation is basis safe navigation on your part. Waypoints (if any) mentioned above are for guidance only. All route recommendations are basis vessel compliance with loadline regulation and INL limits.
+MACHINERY, SCRUBBER AND ECDIS DETAILS
+- Fuel measurement method: BDN, flow meters or bunker tank monitoring
+- Fuel types carried and fuel change-over procedure
+- Scrubber fitted: Yes/No; type: open loop, closed loop or hybrid
+- Scrubber operational status, washwater restrictions and operating limitations
+- ECDIS make, model, software version and latest chart update
+- Route import format supported by the vessel ECDIS
 
-**Kindly revert with your intentions / route plan with key waypoints and distances for review.
+VOYAGE SETTINGS AND SAFETY LIMITS
+- Confirm ETD, expected sailing draft and intended route
+- Voyage performance criteria: ordered speed and consumption
+- Weather safety limits for wind, wave height, swell, current and visibility
+- Vessel-specific limits for speed, draft, under-keel clearance and sea state
+- Loadline, emission control area and no-go area constraints
+- Any routing restrictions, pilotage requirements or special considerations
+- Route plan with key waypoints, distances and intended manoeuvring areas
 
-Please note in the event of changes to above itinerary master must inform us and advise reason for same.
+Please confirm that the route displayed in ODAS reflects the vessel's intentions. Waypoints and recommendations are for guidance only. The Master remains responsible for safe navigation and compliance with loadline regulations, ECA requirements and all vessel operating limits. Advise ODAS immediately if the itinerary, route, draft, speed or safety limits change.
 
-Weather: To follow.
+REPORTS TO BE SENT FROM THE VESSEL
+1. NOON REPORT - UTC position, course, speed, distance, weather, wind, waves, swell, current, drafts, ROB and engine performance.
+2. ARRIVAL REPORT (EOSP) - EOSP time and position, ETA, speed, drafts, ROB, weather and any route or operational remarks.
+3. DEPARTURE REPORT (COSP) - COSP time and position, departure drafts, cargo condition, ROB, engine settings and intended speed.
+4. PORT / BERTH REPORT - arrival, all fast, berth, port operations, ROB, consumption, drafts and next movement.
+5. NOR REPORT - notice of readiness time, position, tendered time, acceptance status and any exceptions.
+6. CARGO OPERATION REPORT - operation type, start time, quantity handled, rate, holds or tanks, stoppages and weather impact.
+7. COMPLETION OF CARGO REPORT - completion time, final quantity, drafts, ROB, documents and readiness to sail.
+8. ANCHOR REPORT - anchor drop or aweigh time, position, depth, reason, weather and ROB.
+9. DRIFTING REPORT - drifting start or stop time, position, reason, weather, course, speed and ROB.
+10. BUNKERING REPORT - supplier, port or position, start and completion, grades, quantities, ROB, BDN and samples.
+11. STOP / RESUME REPORT - stop or resume time, position, reason, weather, engine status, ROB and operational impact.
+12. BUNKER SURVEY REPORT - surveyor, time, location, tank soundings, quantities, density, temperature, ROB and survey documents.
+13. INCIDENT / ACCIDENT REPORT - time, position, persons or equipment involved, facts, damage, immediate actions and supporting evidence.
+14. SHIFTING REPORT - shifting start and completion, berth or anchorage, reason, drafts, ROB, weather and manoeuvring details.
+15. FUEL CHANGE-OVER REPORT - start and completion time, position, fuel grades, tanks, ROB, sulphur compliance and operational remarks.
+16. SPEED CHANGE-OVER REPORT - time, position, old and new speed, engine settings, reason, weather, ETA and consumption impact.
 
-VOYAGE DATA REPORTING
-*Important: Please make sure to enable Javascript on your browser prior to opening the VDRS file.
-Open Browser settings > Cookies & Permission > Check if status of Javascript is set to "Allowed"
-
-Attached is an HTML file to be downloaded.
-Must download new file (refer Date Sent on file name) to ensure most recent file is used. Please discard any or all old HTML saved on ship's computer before starting.
-
-File name format: Ship Name_DateSent_VDRS
-
-**Note
-For in-port activities, please send details for following events only:
-ANCHOR REPORT - (A)Anchor Drop // (B)Anchor Aweigh
-DRIFTING REPORT - (A)Drifting start // (B)Drifting Stop
-BERTH REPORT - (Date/UTC/BROBs): (A)First Line Ashore (B)Finish with Engine (After All Fast) (C)Stand by Engine prior UNBERTH (D)Last Line
-DAILY IN-PORT REPORT - Fuel Consumption and best ETD
-DELIVERY REPORT - (A)Vessel delivery // (B)Redelivery
-BUNKERING REPORT - Any Bunkering Activity (at Anchor or berth or during drifting. Attach BDN)
-FUEL CHANGE-OVER - (A)Begin Change-over // (B)Complete Change-over
-BUNKER CORRECTION - Any changes in BROB as a result from Bunker Survey or Sounding activities
-
-STEPS: (see separately attached userguide for details)
-Step 1 - Download the HTML file and save on your ship computer where the reports shall be filled.
-Step 2 - Double-click the file icon (Ship Name_DateSent_VDRS) to open the HTML client with your browser. You may also Right Click > Open with > choose a browser.
-(You do not need active internet to open and fill reports, since it is an offline file.)
-
-**If Transiting an Emission Control Area, please provide Date&Time / Position(Lat/Long) and Fuel Remaining on Board at time of starting and completing fuel transfer operations when vessel enters and/or exits ECA zone as well as Total Main Engine and Auxiliary Consumption since last report.
+Send each report through the ODAS reporting workflow at the required event time. Include UTC date and time, latitude and longitude, units, ROB by fuel grade, supporting BDN or survey documents, and an explanation for any missing or abnormal data.
 
 Best Regards
-Accelleron Voyage Operations
-We can be reached via our email ops1@accelleron-industries.com. In case of urgent need of assistance, Please contact +91-172-4628226 between 0300-1200 UTC and +1-514-903-5343 for other times.`;
-
+ODAS Voyage Operations
+ops@odasgroup.net
++91-7015080678`;
   return {
     to: v.clientEmail,
-    subject: `Appointment & Reporting Instructions \u2014 ${v.vessel} \u2014 ${itinerary}`,
-    attachments: ['Voyage Plan.pdf', `${v.vessel}_${dt}_VDRS.html`],
+    subject: `${v.vessel} - ${v.client} - Reporting Instructions - ${itinerary}`,
+    attachments: routeAttachments,
     body,
   };
 }

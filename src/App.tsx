@@ -17,6 +17,7 @@ import { OperationsPage } from './components/OperationsPage';
 import { EmissionsPage } from './components/EmissionsPage';
 import { BunkerManagementPage } from './components/BunkerManagementPage';
 import { AccountsPage } from './components/AccountsPage';
+import { SettingsPage } from './components/SettingsPage';
 import { PostfixPage } from './components/PostfixPage';
 import { WeatherMarginsPage } from './components/WeatherMarginsPage';
 import { VoyageDetailsPage } from './components/VoyageDetailsPage';
@@ -28,6 +29,7 @@ import { EmailDetailsPage } from './components/EmailDetailsPage';
 import { PassageDetailsPage } from './components/PassageDetailsPage';
 import { CreateVoyagePage } from './components/CreateVoyagePage';
 import { RouteExplorerPage } from './components/RouteExplorerPage';
+import { RouteExplorerSearchPage } from './components/RouteExplorerSearchPage';
 import { LimitsConstraintsPage } from './components/LimitsConstraintsPage';
 import { OrderConfirmationPage } from './components/OrderConfirmationPage';
 import { ReportingInstructionsPage } from './components/ReportingInstructionsPage';
@@ -35,6 +37,8 @@ import { RouteRecommendationPage } from './components/RouteRecommendationPage';
 import { VoyagePlanPage } from './components/VoyagePlanPage';
 import { ForecastPage } from './components/ForecastPage';
 import { PerformanceReportPage } from './components/PerformanceReportPage';
+import { VesselReportsPage } from './components/VesselReportsPage';
+import { OfflineVesselReportsPage } from './components/OfflineVesselReportsPage';
 
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
 import { PageShell } from './components/PageShell';
@@ -159,6 +163,14 @@ export function App() {
               }
             />
             <Route
+              path="/settings"
+              element={
+                <Layout showModuleChrome={false}>
+                  <SettingsPage />
+                </Layout>
+              }
+            />
+            <Route
               path="/postfix"
               element={
                 <Layout showModuleChrome={false}>
@@ -250,6 +262,14 @@ export function App() {
               path="/route-explorer"
               element={
                 <Layout>
+                  <RouteExplorerSearchPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/route-simulator"
+              element={
+                <Layout>
                   <RouteExplorerPage />
                 </Layout>
               }
@@ -308,6 +328,20 @@ export function App() {
                 <Layout>
                   <PerformanceReportPage />
                 </Layout>
+              }
+            />
+            <Route
+              path="/vessel-reports"
+              element={
+                <Layout>
+                  <VesselReportsPage />
+                </Layout>
+              }
+            />
+            <Route
+              path="/vessel-reports/offline"
+              element={
+                <OfflineVesselReportsPage />
               }
             />
             {/* Unknown paths fall back to the Fleet List View. */}

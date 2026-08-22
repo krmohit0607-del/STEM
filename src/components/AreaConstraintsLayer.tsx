@@ -38,13 +38,16 @@ export function normalizeRingLonLat(ring: [number, number][]): [number, number][
  * each side of ±180°) when the ring straddles the antimeridian.
  */
 export function splitRingAtAntimeridian(ring: [number, number][]): [number, number][][] {
-  const norm = normalizeRingLonLat(ring);
-  const lons = norm.map(([, lon]) => lon);
-  const minLon = Math.min(...lons);
-  const maxLon = Math.max(...lons);
+  if (ring.length < 3) return [];
+  const wrapped: [number, number][] = ring.map(([lat, lon]) => [lat, ((lon + 180) % 360 + 360) % 360 - 180]);
+  const crossesDateline = wrapped.some((point, index) => {
+    const next = wrapped[(index + 1) % wrapped.length];
+    return Math.abs(next[1] - point[1]) > 180;
+  });
+  if (!crossesDateline) return [wrapped];
 
-  // If the ring fits within any 360° window that doesn't straddle 180°, use as-is.
-  if (maxLon - minLon <= 180) return [norm];
+  const norm = normalizeRingLonLat(wrapped);
+  const lons = norm.map(([, lon]) => lon);
 
   // Find the split meridian: use 180 when any vertex has lon > 180,
   // use -180 when any vertex has lon < -180.

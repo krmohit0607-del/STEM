@@ -23,6 +23,7 @@ import {
 import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute } from '../data/optimizationStore';
 import { computeRouteMetrics, DEFAULT_MARKET_FACTORS, type RouteMetrics } from '../data/routeMetrics';
 import { openScenarioReport } from '../data/optimizationReport';
+import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
 
 /**
  * Route Simulator panel — multi-route comparison + playback, styled after the
@@ -618,7 +619,14 @@ export function RouteSimulatorPanel() {
   const [simFactor, setSimFactor] = useState<WeatherFactorId>('waves');
   const [liveVersion, setLiveVersion] = useState(0);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [savedPassageMsg, setSavedPassageMsg] = useState('');
   const simFactorDef = WEATHER_FACTOR_BY_ID[simFactor];
+
+  const slug = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'route';
 
   // --- Playable routes: active route (from map) + every saved route ----------
   const simRoutes = useMemo<SimRoute[]>(() => {
@@ -716,6 +724,39 @@ export function RouteSimulatorPanel() {
     () => simRoutes.filter((r) => !hiddenIds.includes(r.id)),
     [simRoutes, hiddenIds],
   );
+
+  const checkedRoutes = useMemo(
+    () => simRoutes.filter((r) => !hiddenIds.includes(r.id)),
+    [simRoutes, hiddenIds],
+  );
+
+  const addCheckedToSavedPassages = () => {
+    const current = loadSavedPassages();
+    const geomSet = new Set(
+      current.map((passage) => passage.points.map((p) => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';')),
+    );
+    const converted: SavedPassage[] = checkedRoutes
+      .filter((route) => route.path.length >= 2)
+      .map((route) => ({
+        id: `sim-${slug(route.label)}-${route.path.length}`,
+        name: route.label,
+        source: route.optimized ? 'Route Simulator (optimized)' : 'Route Simulator',
+        points: route.path,
+      }));
+    const accepted = converted.filter((passage) => {
+      const geom = passage.points.map((p) => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';');
+      if (geomSet.has(geom)) return false;
+      geomSet.add(geom);
+      return true;
+    });
+    if (!accepted.length) {
+      setSavedPassageMsg('Checked routes are already in Saved Passages.');
+      return;
+    }
+    const next = [...current, ...accepted];
+    saveSavedPassages(next);
+    setSavedPassageMsg(`${accepted.length} checked route${accepted.length === 1 ? '' : 's'} added to Saved Passages.`);
+  };
 
   /** The single active route (always shown on the map, even if unchecked). */
   const activeSimRoute = useMemo(
@@ -1389,6 +1430,16 @@ export function RouteSimulatorPanel() {
               <span className="fv-sim2__routes-count">
                 {simRoutes.length} {t('routes', 'Routes')}
               </span>
+              <button
+                type="button"
+                className="fv-sim2__routes-btn fv-sim2__routes-btn--primary"
+                onClick={addCheckedToSavedPassages}
+                disabled={checkedRoutes.length === 0}
+                title={t('addCheckedToSavedPassages', 'Add checked routes to Saved Passages')}
+              >
+                <i className="fas fa-bookmark" aria-hidden="true" />
+              </button>
+              {savedPassageMsg && <span className="fv-sim2__routes-note">{savedPassageMsg}</span>}
               {optimizedResults.length > 0 && (
                 <button
                   type="button"

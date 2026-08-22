@@ -87,6 +87,12 @@ interface ClientEmailDraft {
   fullSpeed?: number;
   fullFo?: number;
   fullMgo?: number;
+  // Ballast-condition speed/cons, used to fill the vessel-level Speed & Cons
+  // profile (engineSpeedCons) alongside the laden figures above.
+  ecoSpeedBallast?: number;
+  ecoFoBallast?: number;
+  fullSpeedBallast?: number;
+  fullFoBallast?: number;
 }
 
 function parseClientEmailDraft(text: string): ClientEmailDraft {
@@ -123,6 +129,9 @@ function parseClientEmailDraft(text: string): ClientEmailDraft {
 
   const eco = up.match(/ECO\s+SPEED[\s\S]*?LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT[^\n]*\+\s*ABOUT\s*([\d.]+)\s*MT/i);
   const full = up.match(/SERVICE\s+SPEED[\s\S]*?LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT[^\n]*\+\s*ABOUT\s*([\d.]+)\s*MT/i);
+  // Ballast-condition counterparts of the above (same email layout, "BALLAST" row).
+  const ecoBallast = up.match(/ECO\s+SPEED[\s\S]*?BALLAST\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT/i);
+  const fullBallast = up.match(/SERVICE\s+SPEED[\s\S]*?BALLAST\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT/i);
 
   const ecoSpeed = parseNumberToken(eco?.[1]);
   const ecoFo = parseNumberToken(eco?.[2]);
@@ -130,6 +139,34 @@ function parseClientEmailDraft(text: string): ClientEmailDraft {
   const fullSpeed = parseNumberToken(full?.[1]);
   const fullFo = parseNumberToken(full?.[2]);
   const fullMgo = parseNumberToken(full?.[3]);
+  const ecoSpeedBallast = parseNumberToken(ecoBallast?.[1]);
+  const ecoFoBallast = parseNumberToken(ecoBallast?.[2]);
+  const fullSpeedBallast = parseNumberToken(fullBallast?.[1]);
+  const fullFoBallast = parseNumberToken(fullBallast?.[2]);
+
+  // Engine limits & constraints — "LABEL: MIN - MAX" style rows.
+  const range = (label: string): [string?, string?] => {
+    const m = up.match(new RegExp(`${label}\\s*(?:RANGE)?\\s*:\\s*([\\d.,]+)\\s*(?:-|TO|~)\\s*([\\d.,]+)`, 'i'));
+    return m ? [m[1].replace(/,/g, ''), m[2].replace(/,/g, '')] : [undefined, undefined];
+  };
+  const [minRpm, maxRpm] = range('RPM');
+  if (minRpm) fields.minRpm = minRpm;
+  if (maxRpm) fields.maxRpm = maxRpm;
+  const [minMcr, maxMcr] = range('MCR');
+  if (minMcr) fields.minMcr = minMcr;
+  if (maxMcr) fields.maxMcr = maxMcr;
+  const [minSpeedLim, maxSpeedLim] = range('SPEED\\s*RANGE');
+  if (minSpeedLim) fields.minSpeed = minSpeedLim;
+  if (maxSpeedLim) fields.maxSpeed = maxSpeedLim;
+  const [criticalRpmMin, criticalRpmMax] = range('CRITICAL\\s*RPM');
+  if (criticalRpmMin) fields.criticalRpmMin = criticalRpmMin;
+  if (criticalRpmMax) fields.criticalRpmMax = criticalRpmMax;
+  const [blowerBallastMin, blowerBallastMax] = range('BLOWER[^\\n:]*BALLAST');
+  if (blowerBallastMin) fields.blowerBallastMin = blowerBallastMin;
+  if (blowerBallastMax) fields.blowerBallastMax = blowerBallastMax;
+  const [blowerLadenMin, blowerLadenMax] = range('BLOWER[^\\n:]*LADEN');
+  if (blowerLadenMin) fields.blowerLadenMin = blowerLadenMin;
+  if (blowerLadenMax) fields.blowerLadenMax = blowerLadenMax;
 
   return {
     fields,
@@ -141,6 +178,10 @@ function parseClientEmailDraft(text: string): ClientEmailDraft {
     fullSpeed,
     fullFo,
     fullMgo,
+    ecoSpeedBallast,
+    ecoFoBallast,
+    fullSpeedBallast,
+    fullFoBallast,
   };
 }
 
@@ -293,12 +334,64 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
       }
 
       next.legs = legs;
+
+      // Additionally fill the vessel-level Engine Limits / Speed & Cons profile
+      // (Vessel Profile tab) from the same pasted email, updating only the first
+      // ECO-slot and second FULL-slot row of each load condition so any extra
+      // custom rows already on the profile are left untouched.
+      const upsertEngineRow = (
+        rows: import('./voyage/types').EngineSpeedConsRow[],
+        condition: 'Ballast' | 'Laden',
+        slot: 0 | 1,
+        speed?: number,
+        consME?: number,
+      ) => {
+        if (speed == null && consME == null) return rows;
+        const conditionIdx = rows.reduce<number[]>((acc, row, idx) => {
+          if (row.condition === condition) acc.push(idx);
+          return acc;
+        }, []);
+        const targetIdx = conditionIdx[slot];
+        if (targetIdx != null) {
+          return rows.map((row, idx) =>
+            idx === targetIdx
+              ? {
+                  ...row,
+                  speed: speed != null ? speed.toFixed(1) : row.speed,
+                  consME: consME != null ? consME.toFixed(1) : row.consME,
+                }
+              : row,
+          );
+        }
+        return [
+          ...rows,
+          {
+            condition,
+            speed: speed != null ? speed.toFixed(1) : '',
+            consME: consME != null ? consME.toFixed(1) : '',
+            consAE: '',
+            rpm: '',
+            mcrPercent: '',
+            powerKw: '',
+            eplLimit: '',
+          },
+        ];
+      };
+      let engineSpeedCons = prev.engineSpeedCons.map((row) => ({ ...row }));
+      engineSpeedCons = upsertEngineRow(engineSpeedCons, 'Laden', 0, draft.ecoSpeed, draft.ecoFo);
+      engineSpeedCons = upsertEngineRow(engineSpeedCons, 'Laden', 1, draft.fullSpeed, draft.fullFo);
+      engineSpeedCons = upsertEngineRow(engineSpeedCons, 'Ballast', 0, draft.ecoSpeedBallast, draft.ecoFoBallast);
+      engineSpeedCons = upsertEngineRow(engineSpeedCons, 'Ballast', 1, draft.fullSpeedBallast, draft.fullFoBallast);
+      next.engineSpeedCons = engineSpeedCons;
+
       return next;
     });
 
     const speedApplied = draft.ecoSpeed || draft.fullSpeed || draft.ecoFo || draft.fullFo ? 1 : 0;
+    const enginePerfApplied =
+      draft.ecoSpeedBallast || draft.fullSpeedBallast || draft.ecoFoBallast || draft.fullFoBallast ? 1 : 0;
     const routeApplied = draft.legFrom || draft.legTo ? 1 : 0;
-    const totalApplied = nextFields.length + speedApplied + routeApplied;
+    const totalApplied = nextFields.length + speedApplied + enginePerfApplied + routeApplied;
     setEmailPasteMsg(
       totalApplied > 0
         ? `Applied ${totalApplied} matching field(s) from pasted client email.`

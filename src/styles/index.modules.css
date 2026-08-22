@@ -241,9 +241,50 @@
 .fv-bk__ai b { color: var(--b-purple); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .fv-bk__ai p { margin: 4px 0 0; font-size: 12.5px; color: var(--b-text); line-height: 1.5; }
 .fv-bk__table--compare th, .fv-bk__table--compare td { padding: 9px 10px; }
+.fv-bk__table--center th, .fv-bk__table--center td { text-align: center; }
 .fv-bk__row-rec { background: rgba(111,220,140,.08); }
+.fv-bk__row-bad { background: rgba(255,107,107,.08); }
+.fv-bk__row-editing { background: rgba(88,166,255,.06); }
+.fv-bk__row-editing input, .fv-bk__row-editing select { width: 100%; background: var(--b-panel-2); color: var(--b-text); border: 1px solid var(--b-border); border-radius: 6px; padding: 5px 7px; font-size: 12px; text-align: center; }
+.fv-bk__row-actions { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.fv-bk__table--invoice th, .fv-bk__table--invoice td { padding: 10px 12px; vertical-align: top; text-align: center; }
+.fv-bk__table--invoice th:nth-child(2), .fv-bk__table--invoice td:nth-child(2),
+.fv-bk__table--invoice th:nth-child(3), .fv-bk__table--invoice td:nth-child(3) { text-align: left; }
 .fv-bk__rec-ico { color: var(--b-good); }
 .fv-bk__score { display: inline-block; min-width: 30px; text-align: center; font-weight: 800; background: rgba(88,166,255,.14); color: var(--b-accent); border-radius: 6px; padding: 2px 6px; }
+
+/* additional charges (RFQ add-quote modal) */
+.fv-bk__charges { border-top: 1px dashed var(--b-border-soft); padding-top: 10px; margin-top: 4px; }
+.fv-bk__charges-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 11.5px; font-weight: 700; color: var(--b-muted); }
+.fv-bk__charges-list { display: flex; flex-direction: column; gap: 6px; }
+.fv-bk__charge-row { display: grid; grid-template-columns: 1fr 140px auto; gap: 8px; align-items: center; }
+.fv-bk__charge-row select, .fv-bk__charge-row input { background: var(--b-panel-2); color: var(--b-text); border: 1px solid var(--b-border); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+
+/* additional charges — inline editor inside the quotations table cell */
+.fv-bk__charges-inline { display: flex; flex-direction: column; gap: 5px; min-width: 170px; }
+.fv-bk__charge-row--inline { grid-template-columns: 1fr 70px auto; gap: 4px; }
+.fv-bk__charge-row--inline select, .fv-bk__charge-row--inline input { padding: 4px 6px; font-size: 11px; }
+
+/* claims / deductions (Supply Details & Claims tab) */
+.fv-bk__claim-status { background: var(--b-panel-2); border: 1px solid var(--b-border); color: var(--b-text); border-radius: 6px; padding: 4px 6px; font-size: 11px; }
+.fv-bk__claim-desc { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fv-bk__claim-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--b-border-soft); }
+.fv-bk__claim-form-row { display: flex; gap: 10px; }
+.fv-bk__claim-form-row .fv-bk__ffield { flex: 1 1 200px; }
+.fv-bk__claim-form textarea { width: 100%; resize: vertical; background: var(--b-panel-2); color: var(--b-text); border: 1px solid var(--b-border); border-radius: 7px; padding: 8px 10px; font-size: 12px; font-family: inherit; }
+.fv-bk__ffield--grow { flex: 1 1 auto; }
+.fv-bk__ffield-hint { color: var(--b-faint); font-weight: 500; text-transform: none; letter-spacing: 0; font-style: normal; }
+
+/* invoice & payment — single box, row + expand-on-edit layout */
+.fv-bk__invoice-expand { display: flex; flex-direction: column; gap: 16px; padding: 14px 4px 4px; text-align: left; }
+.fv-bk__invoice-section h5 { margin: 0 0 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--b-accent); }
+.fv-bk__invoice-section + .fv-bk__invoice-section { padding-top: 14px; border-top: 1px solid var(--b-border-soft); }
+.fv-bk__inline-input { width: 70px; background: var(--b-panel-2); color: var(--b-text); border: 1px solid var(--b-border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
+.fv-bk__charge-line { white-space: nowrap; }
+.fv-bk__nowrap { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.fv-bk__attach-btn { display: inline-flex; align-self: flex-start; margin-top: 8px; cursor: pointer; }
+.fv-bk__invoice-outstanding { display: flex; flex-wrap: wrap; gap: 18px; margin: 12px 0; font-size: 12.5px; color: var(--b-muted); }
+.fv-bk__invoice-outstanding strong { color: var(--b-text); }
 
 @media (max-width: 1200px) {
   .fv-bk__panel { width: 340px; }
@@ -332,6 +373,9 @@
 .fv-bk__dropzone small { color: var(--b-faint); font-size: 10px; }
 .fv-bk__upload-cats { display: flex; flex-wrap: wrap; gap: 5px; }
 .fv-bk__chip { font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 20px; background: var(--b-panel-2); border: 1px solid var(--b-border-soft); color: var(--b-muted); }
+.fv-bk__chip--pick { cursor: pointer; }
+.fv-bk__chip--pick:hover { border-color: var(--b-accent); color: var(--b-text); }
+.fv-bk__chip--active { background: rgba(88,166,255,.16); border-color: var(--b-accent); color: var(--b-accent); }
 
 /* Rail is always a vertical strip â€” no responsive override needed (matches Operations). */
 /* ---- Bunker workflow actions, add-quote form, modal footer ---- */
@@ -545,6 +589,9 @@
 .fv-acct__gridwrap { overflow: auto; }
 .fv-acct__table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .fv-acct__table thead th { position: sticky; top: 0; z-index: 1; background: #16203a; color: var(--a-muted); text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; padding: 9px 10px; border-bottom: 1px solid var(--a-border); white-space: nowrap; }
+.fv-acct__sort-btn { display: inline-flex; align-items: center; gap: 5px; padding: 0; color: inherit; background: transparent; border: 0; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+.fv-acct__sort-btn:hover, .fv-acct__sort-btn:focus-visible { color: var(--a-text); outline: none; }
+.fv-acct__sort-btn i { color: var(--a-accent); font-size: 9px; }
 .fv-acct__table tbody td { padding: 8px 10px; border-bottom: 1px solid var(--a-border-soft); vertical-align: middle; }
 .fv-acct__table tbody tr { cursor: pointer; }
 .fv-acct__table tbody tr:hover { background: rgba(88,166,255,.05); }

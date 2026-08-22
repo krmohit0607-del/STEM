@@ -16,10 +16,12 @@ type TabId =
   | 'dashboard'
   | 'interim'
   | 'route'
+  | 'route-explorer'
   | 'limits'
   | 'area'
   | 'history'
-  | 'reports';
+  | 'reports'
+  | 'vessel-reports';
 
 interface PlannedItem {
   label: string;
@@ -56,6 +58,14 @@ const TABS: TabDef[] = [
     ],
   },
   {
+    id: 'route',
+    icon: 'fa-route',
+    labelKey: 'routeSimulator',
+    labelFallback: 'Route Simulator',
+    route: '/route-simulator',
+    planned: [],
+  },
+  {
     id: 'interim',
     icon: 'fa-bolt',
     labelKey: 'dashboardAndTools',
@@ -65,14 +75,6 @@ const TABS: TabDef[] = [
       { label: 'Interim dashboard', route: '/interim' },
       { label: 'Optimization details', route: '/optimization' },
     ],
-  },
-  {
-    id: 'route',
-    icon: 'fa-route',
-    labelKey: 'routeEditing',
-    labelFallback: 'Route Editing',
-    route: '/route-explorer',
-    planned: [],
   },
   {
     id: 'limits',
@@ -114,6 +116,22 @@ const TABS: TabDef[] = [
       { label: 'Forecast', route: '/reports/forecast' },
       { label: 'Performance Report', route: '/reports/performance' },
     ],
+  },
+  {
+    id: 'vessel-reports',
+    icon: 'fa-file-arrow-up',
+    labelKey: 'vesselReports',
+    labelFallback: 'Vessel Reports',
+    route: '/vessel-reports',
+    planned: [],
+  },
+  {
+    id: 'route-explorer',
+    icon: 'fa-compass-drafting',
+    labelKey: 'routeExplorer',
+    labelFallback: 'Route Explorer',
+    route: '/route-explorer',
+    planned: [],
   },
   {
     id: 'history',

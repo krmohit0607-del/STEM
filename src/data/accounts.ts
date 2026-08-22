@@ -312,6 +312,9 @@ export interface PayableInput {
   dueIso?: string;
   module?: string;
   category?: TxnCategory;
+  bank?: string;
+  method?: string;
+  remarks?: string;
 }
 
 /** Called by other modules (e.g. Bunker) to raise a payable into Accounts. */
@@ -340,8 +343,9 @@ export function addPayable(p: PayableInput): void {
     approval: 'Approved',
     priority: 'High',
     pic: 'A. Nair',
-    bank: 'HSBC — USD Operating',
-    method: 'TT',
+    bank: p.bank ?? 'HSBC — USD Operating',
+    method: p.method ?? 'TT',
+    remarks: p.remarks,
     audit: [{ at, user: p.module ?? 'Bunker', action: `Payable received from ${p.module ?? 'Bunker'} module` }],
   };
   txns = [txn, ...txns];

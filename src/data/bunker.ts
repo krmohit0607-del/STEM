@@ -29,9 +29,61 @@ export type ApprovalStatus = 'Not Submitted' | 'Awaiting Approval' | 'Approved' 
 
 export type Priority = 'High' | 'Medium' | 'Low';
 
+/** A named charge on top of the fuel price (barging, port dues, agency fee, etc.). */
+export interface AdditionalCharge {
+  id: string;
+  label: string;
+  amount: number;
+}
+
+/** Common additional-charge presets shown in the "Add Charge" picker. */
+export const ADDITIONAL_CHARGE_PRESETS = [
+  'Barging Charge',
+  'Port Dues',
+  'Agency Fee',
+  'Launch / Boat Charge',
+  'Hose Connection Charge',
+  'Sludge Removal',
+  'Other',
+] as const;
+
+/** Sum of a requirement's/quote's additional charges (0 when none). */
+export function sumAdditionalCharges(charges: AdditionalCharge[] | undefined): number {
+  return (charges ?? []).reduce((sum, c) => sum + (c.amount || 0), 0);
+}
+
+/** A claim/deduction raised against the supplier (short supply, quality off-spec, delay, damage, etc.). */
+export interface BunkerClaim {
+  id: string;
+  type: string;
+  description: string;
+  amount: number;
+  status: 'Open' | 'Accepted' | 'Rejected' | 'Settled';
+  raisedOn: string;
+}
+
+/** Common claim types shown in the "Add Claim" picker. */
+export const BUNKER_CLAIM_TYPES = [
+  'Short Supply (Quantity)',
+  'Off-Spec / Quality',
+  'Delivery Delay',
+  'Barge / Equipment Damage',
+  'Documentation Discrepancy',
+  'Other',
+] as const;
+
+export const BUNKER_CLAIM_STATUSES = ['Open', 'Accepted', 'Rejected', 'Settled'] as const;
+
+/** Sum of claims not rejected (i.e. still deductible from the supplier invoice). */
+export function sumBunkerClaims(claims: BunkerClaim[] | undefined): number {
+  return (claims ?? []).filter((c) => c.status !== 'Rejected').reduce((sum, c) => sum + (c.amount || 0), 0);
+}
+
 export interface Quote {
   supplier: string;
   pricePerMt: number;
+  /** Barging/port/agency charges etc. on top of the fuel price. */
+  additionalCharges?: AdditionalCharge[];
   totalCost: number;
   terms: string;
   deliveryDate: string;
@@ -96,6 +148,8 @@ export interface BunkerRequirement {
   quotes: Quote[];
   supplier?: string;
   pricePerMt?: number;
+  /** Additional charges carried over from the booked quote (barging, port dues, agency fee, etc.). */
+  additionalCharges?: AdditionalCharge[];
   totalCost?: number;
   poNo?: string;
   contractRef?: string;
@@ -116,6 +170,8 @@ export interface BunkerRequirement {
   paymentDate?: string;
   approvalStatus: ApprovalStatus;
   paymentStatus: PaymentStatus;
+  /** Claims/deductions raised against the supplier (short supply, off-spec, delay, damage, etc.). */
+  claims?: BunkerClaim[];
   lastUpdated: string;
   documents: BunkerDoc[];
   audit: AuditEntry[];
@@ -534,6 +590,141 @@ export function addBunkerQuote(id: string, quote: Quote): void {
     };
   });
   emitRequirements();
+}
+
+/** Update an existing quote (identified by its original supplier name) in place. */
+export function updateBunkerQuote(id: string, originalSupplier: string, patch: Quote): void {
+  requirements = requirements.map((r) => {
+    if (r.id !== id) return r;
+    const quotes = scoreQuotes(r.quotes.map((q) => (q.supplier === originalSupplier ? { ...q, ...patch } : q)));
+    const at = nowStamp();
+    return {
+      ...r,
+      quotes,
+      lastUpdated: at,
+      audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: `Quote edited — ${patch.supplier}` }, ...r.audit],
+    };
+  });
+  emitRequirements();
+}
+
+/** Remove a quote (identified by supplier name) from a requirement. */
+export function deleteBunkerQuote(id: string, supplier: string): void {
+  requirements = requirements.map((r) => {
+    if (r.id !== id) return r;
+    const quotes = scoreQuotes(r.quotes.filter((q) => q.supplier !== supplier));
+    const at = nowStamp();
+    return {
+      ...r,
+      quotes,
+      lastUpdated: at,
+      audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: `Quote deleted — ${supplier}` }, ...r.audit],
+    };
+  });
+  emitRequirements();
+}
+
+/** Add a claim/deduction against the supplier. */
+export function addBunkerClaim(id: string, claim: BunkerClaim): void {
+  requirements = requirements.map((r) => {
+    if (r.id !== id) return r;
+    const at = nowStamp();
+    return {
+      ...r,
+      claims: [claim, ...(r.claims ?? [])],
+      lastUpdated: at,
+      audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: `Claim raised — ${claim.type} (USD ${claim.amount.toLocaleString('en-US')})` }, ...r.audit],
+    };
+  });
+  emitRequirements();
+}
+
+export function updateBunkerClaim(id: string, claimId: string, patch: Partial<BunkerClaim>): void {
+  requirements = requirements.map((r) => {
+    if (r.id !== id) return r;
+    const at = nowStamp();
+    return {
+      ...r,
+      claims: (r.claims ?? []).map((c) => (c.id === claimId ? { ...c, ...patch } : c)),
+      lastUpdated: at,
+      audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: 'Claim updated' }, ...r.audit],
+    };
+  });
+  emitRequirements();
+}
+
+export function deleteBunkerClaim(id: string, claimId: string): void {
+  requirements = requirements.map((r) => {
+    if (r.id !== id) return r;
+    const at = nowStamp();
+    return {
+      ...r,
+      claims: (r.claims ?? []).filter((c) => c.id !== claimId),
+      lastUpdated: at,
+      audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: 'Claim removed' }, ...r.audit],
+    };
+  });
+  emitRequirements();
+}
+
+/** Delete the supplier invoice, reverting the requirement to "Supplied" so a new invoice can be registered. */
+export function deleteBunkerInvoice(id: string): void {
+  requirements = requirements.map((r) => {
+    if (r.id !== id) return r;
+    const at = nowStamp();
+    return {
+      ...r,
+      status: 'Supplied',
+      invoiceNo: undefined,
+      invoiceDate: undefined,
+      invoiceAmount: undefined,
+      paymentTerms: undefined,
+      dueDate: undefined,
+      dueIso: undefined,
+      amountPaid: undefined,
+      paymentRef: undefined,
+      paymentDate: undefined,
+      approvalStatus: 'Not Submitted',
+      paymentStatus: 'None',
+      documents: r.documents.filter((d) => d.type !== 'Invoice'),
+      lastUpdated: at,
+      audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: 'Invoice deleted' }, ...r.audit],
+    };
+  });
+  emitRequirements();
+}
+
+/** Duplicate a requirement's invoice as a brand-new requirement (e.g. a reissued/corrected invoice), keeping the RFQ/booking/supply data but starting a fresh invoice & payment cycle. */
+export function duplicateBunkerInvoice(id: string): string | undefined {
+  const source = requirements.find((r) => r.id === id);
+  if (!source) return undefined;
+  const n = reqSeq++;
+  const suffix = String(n).padStart(3, '0');
+  const newId = `BR-2607-${suffix}`;
+  const at = nowStamp();
+  const copy: BunkerRequirement = {
+    ...source,
+    id: newId,
+    status: 'Supplied',
+    invoiceNo: undefined,
+    invoiceDate: undefined,
+    invoiceAmount: undefined,
+    paymentTerms: undefined,
+    dueDate: undefined,
+    dueIso: undefined,
+    amountPaid: undefined,
+    paymentRef: undefined,
+    paymentDate: undefined,
+    approvalStatus: 'Not Submitted',
+    paymentStatus: 'None',
+    claims: [],
+    documents: source.documents.filter((d) => d.type !== 'Invoice' && d.type !== 'Payment Advice'),
+    lastUpdated: at,
+    audit: [{ user: 'Bunker Team', role: 'Bunker Team', at, action: `Duplicated from ${source.id} for a new invoice` }],
+  };
+  requirements = [copy, ...requirements];
+  emitRequirements();
+  return newId;
 }
 
 /** Create a new bunker requirement (raised by Operations). Lands as Pending RFQ. */

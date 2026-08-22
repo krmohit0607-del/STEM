@@ -74,8 +74,14 @@ function ControlPortal({
 
 export function AreaConstraintsControl({
   position = 'topleft',
+  constraints = AREA_CONSTRAINTS,
+  onConstraintClick,
+  selectedId,
 }: {
   position?: ControlPosition;
+  constraints?: import('../data/areaConstraints').AreaConstraint[];
+  onConstraintClick?: (id: string) => void;
+  selectedId?: string;
 } = {}) {
   const [open, setOpen] = useState(false);
   const [visible, setVisible] = useState<boolean>(() => readVisible());
@@ -99,8 +105,8 @@ export function AreaConstraintsControl({
 
   const shown = useMemo(() => {
     if (!visible) return [];
-    return AREA_CONSTRAINTS.filter((c) => types.has(c.zoneType));
-  }, [visible, types]);
+    return constraints.filter((c) => types.has(c.zoneType));
+  }, [constraints, visible, types]);
 
   const toggleType = (zt: string) => {
     setTypes((prev) => {
@@ -113,15 +119,15 @@ export function AreaConstraintsControl({
 
   const zoneCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const c of AREA_CONSTRAINTS) {
+    for (const c of constraints) {
       counts.set(c.zoneType, (counts.get(c.zoneType) ?? 0) + 1);
     }
     return counts;
-  }, []);
+  }, [constraints]);
 
   return (
     <>
-      {visible && <AreaConstraintsLayer constraints={shown} />}
+      {visible && <AreaConstraintsLayer constraints={shown} selectedId={selectedId} onConstraintClick={onConstraintClick} />}
       <ControlPortal position={position}>
         <button
           type="button"

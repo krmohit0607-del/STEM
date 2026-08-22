@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
@@ -7,7 +7,6 @@ import { data as fleetData } from '../api/fleetData';
 import { type Priority, type TaskRow } from '../data/fleetTasks';
 import { useTheme } from '../theme';
 import { FleetMapView, type MapVessel } from './FleetMapView';
-import { SettingsModal } from './SettingsModal';
 
 /**
  * Fleet List View page — `/main`.
@@ -303,7 +302,7 @@ export function FleetListPage() {
   // Switch mode (light theme) is off by default on every load.
   const [theme, toggleTheme] = useTheme();
   const [profileOpen, setProfileOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const navigate = useNavigate();
 
   // Open/close a column filter panel, resetting the search box each time.
   const toggleFilterPanel = (label: string) => {
@@ -578,7 +577,7 @@ export function FleetListPage() {
                   role="menuitem"
                   onClick={() => {
                     setProfileOpen(false);
-                    setSettingsOpen(true);
+                    navigate('/settings');
                   }}
                 >
                   <i className="fas fa-gear" aria-hidden="true" />
@@ -797,7 +796,6 @@ export function FleetListPage() {
           </table>
         </div>
       )}
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

@@ -12,6 +12,8 @@ import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
+import { MapLayersControl } from './MapLayersControl';
+import { PortsControl, RulerControl } from './MapToolsControl';
 
 /**
  * Voyage Overview Map — rendered on `/?voyage=ID`.
@@ -350,9 +352,12 @@ function VoyageOverviewInner({ row }: InnerProps) {
             </Marker>
           )}
 
-          <AreaConstraintsControl position="topright" />
+          <MapLayersControl position="topright" />
           <WeatherFieldControl position="topright" />
+          <AreaConstraintsControl position="topright" />
           <WeatherPointControl position="topright" />
+          <PortsControl position="topright" />
+          <RulerControl position="topright" />
           <MapCursorPosition />
         </MapContainer>
       </div>

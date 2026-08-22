@@ -410,7 +410,7 @@ function projectionFuelCell(deltaFuel: number): InterimSummaryCell {
   };
 }
 
-function PerformanceReportsTable({ rows }: { rows: TrackRow[] }) {
+export function PerformanceReportsTable({ rows }: { rows: TrackRow[] }) {
   const allReports = rows.filter((row) => row.rt === 'N' || row.rt === 'E');
   const reports = allReports.slice(-12).reverse();
   const noonRows = rows.filter((row) => row.rt === 'N');
@@ -806,9 +806,7 @@ export function InterimDashboardPage() {
             </tbody>
           </table>
         </section>
-        <PerformanceReportsTable rows={TRACKSHEET_ROWS.map((row, index) => ({ ...row, id: `interim-${index}`, nextPort: '' }))} />
       </div>
-
     </div>
   );
 }

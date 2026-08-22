@@ -21,8 +21,8 @@ type PanelView = 'tracksheet' | 'simulator';
 
 const HEIGHT_KEY = 'fv.bottomPanel.height';
 
-/** The route editor page — the tracksheet opens by default only here. */
-const ROUTE_EDITOR_PATH = '/route-explorer';
+/** The route simulator page — the bottom drawer belongs here. */
+const ROUTE_SIMULATOR_PATH = '/route-simulator';
 /** The interim dashboard page. */
 const INTERIM_PATH = '/interim';
 
@@ -50,7 +50,7 @@ export function BottomPanel() {
 
   const [view, setView] = useState<PanelView>('tracksheet');
   const location = useLocation();
-  const isRouteEditor = location.pathname.startsWith(ROUTE_EDITOR_PATH);
+  const isRouteSimulator = location.pathname.startsWith(ROUTE_SIMULATOR_PATH);
   // Minimized by default on every page; re-applied on each navigation while
   // the user can still expand/collapse within a page.
   const [collapsed, setCollapsed] = useState(true);
@@ -121,10 +121,10 @@ export function BottomPanel() {
     clearPanelViewRequest();
   }, [requestedView]);
 
-  // The bottom (tracksheet) panel only appears on the route editor and the
+  // The bottom (tracksheet) panel only appears on the route simulator and the
   // interim dashboard; it is hidden on every other page.
   const visible =
-    isRouteEditor || location.pathname.startsWith(INTERIM_PATH);
+    isRouteSimulator || location.pathname.startsWith(INTERIM_PATH);
   if (!visible) return null;
 
   return (

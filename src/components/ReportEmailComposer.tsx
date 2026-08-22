@@ -7,7 +7,7 @@ import type { ReportEmail } from '../data/reports';
  *
  * The email is generated from the current voyage's data (voyage, client,
  * vessel, ports, etc.) via the `build` function. It is generated once on
- * mount and can be regenerated with the "Generate" button — useful after
+ * mount and can be regenerated with the "Refresh" button — useful after
  * the underlying order data changes. Every field (recipient, subject,
  * attachments note and body) can be edited before sending.
  *
@@ -20,15 +20,15 @@ export function ReportEmailComposer({ build }: { build: () => ReportEmail }) {
   const [draft, setDraft] = useState<ReportEmail>(() => build());
   const [sent, setSent] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [generated, setGenerated] = useState(false);
+  const [refreshed, setRefreshed] = useState(false);
 
   const update = (patch: Partial<ReportEmail>) =>
     setDraft((d) => ({ ...d, ...patch }));
 
-  const generate = () => {
+  const refresh = () => {
     setDraft(build());
-    setGenerated(true);
-    window.setTimeout(() => setGenerated(false), 2000);
+    setRefreshed(true);
+    window.setTimeout(() => setRefreshed(false), 2000);
   };
 
   const send = () => {
@@ -58,9 +58,9 @@ export function ReportEmailComposer({ build }: { build: () => ReportEmail }) {
           <i className="fas fa-paper-plane" aria-hidden="true" /> Create &amp; Send Report
         </h2>
         <div className="fv-report__composer-actions">
-          <button type="button" className="fv-report__btn" onClick={generate}>
+          <button type="button" className="fv-report__btn" onClick={refresh}>
             <i className="fas fa-rotate" aria-hidden="true" />{' '}
-            {generated ? 'Generated' : 'Generate'}
+            {refreshed ? 'Refreshed' : 'Refresh'}
           </button>
           <button type="button" className="fv-report__btn" onClick={copy}>
             <i className="fas fa-copy" aria-hidden="true" /> {copied ? 'Copied' : 'Copy'}

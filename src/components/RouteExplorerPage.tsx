@@ -376,12 +376,6 @@ export function RouteExplorerPage() {
   const selectedWaypoint =
     selected.length === 1 ? waypoints.find((w) => w.id === selected[0]) : undefined;
 
-  // Placeholder action for toolbar buttons whose endpoints are not wired yet.
-  const notImplemented = (label: string) => () => {
-    // eslint-disable-next-line no-console
-    console.warn(`[ODAS] '${label}' is not wired yet — see MIGRATION.md.`);
-  };
-
   /**
    * Open the selected vessel's live position on MarineTraffic in a new tab.
    * Deep-links to the vessel details page by IMO (the format MarineTraffic
@@ -1153,7 +1147,7 @@ export function RouteExplorerPage() {
       {/* Route editor map -------------------------------------------- */}
       <section className="fv-route__section">
         <header className="fv-route__section-header">
-          <h2>{t('routeEditor', 'Route Editor')}</h2>
+          <h2>{t('routeSimulator', 'Route Simulator')}</h2>
           <div className="fv-route__bulk">
             <button
               type="button"
@@ -1490,14 +1484,17 @@ export function RouteExplorerPage() {
                 <i className="fas fa-arrow-up-right-from-square" aria-hidden="true" />{' '}
                 {t('viewOnMt', 'View on MT')}
               </button>
-              <button
-                type="button"
-                className="fv-route__btn"
-                onClick={notImplemented('Weather color code')}
-              >
-                <i className="fas fa-palette" aria-hidden="true" />{' '}
-                {t('weatherColorCode', 'Weather color code')}
-              </button>
+              <div className="fv-route__weather-legend" role="img" aria-label={t('weatherColorCode', 'Weather color code')}>
+                <span className="fv-route__weather-legend-unit">m</span>
+                <span className="fv-route__weather-legend-bar">
+                  <span className="fv-route__weather-legend-tick" style={{ left: '7%' }}>0.5</span>
+                  <span className="fv-route__weather-legend-tick" style={{ left: '20%' }}>1</span>
+                  <span className="fv-route__weather-legend-tick" style={{ left: '38%' }}>1.5</span>
+                  <span className="fv-route__weather-legend-tick" style={{ left: '56%' }}>2</span>
+                  <span className="fv-route__weather-legend-tick" style={{ left: '73%' }}>6</span>
+                  <span className="fv-route__weather-legend-tick" style={{ left: '90%' }}>9</span>
+                </span>
+              </div>
             </div>
             <RouteEditorMap
               points={mapPoints}

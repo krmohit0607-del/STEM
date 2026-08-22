@@ -23,6 +23,9 @@ import { useSelectedVoyage } from '../data/selectedVoyage';
 import { useFixtureNumbers } from '../data/workflow';
 import { ModuleVesselSearch } from './ModuleVesselSearch';
 import { getBunkerRequirements, updateBunkerRequirement } from '../data/bunker';
+import { loadClients, newClientId, saveClients, type Client } from '../data/clients';
+import { getWorkflowConfig, setWorkflowConfig } from '../data/workflowConfig';
+import { BankAccountBox, type BankAccount } from './BankAccountBox';
 
 /**
  * Accounts â€” Financial Control Center. Single source of truth: every financial
@@ -68,6 +71,41 @@ function accountPdf(headers: string[], rows: (string | number | undefined)[][]):
   if (!popup) return;
   const esc = (value: string | number | undefined) => String(value ?? '').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character] ?? character));
   popup.document.write(`<html><head><title>Accounts Reports</title><style>body{font:10px Arial;margin:20px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:4px;text-align:left}th{background:#e8edf5}</style></head><body><h2>Accounts Reports</h2><table><thead><tr>${headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${esc(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table><script>window.onload=function(){window.print()}</script></body></html>`);
+  popup.document.close();
+}
+
+function openPaymentPdf(t: FinTxn): void {
+  const popup = window.open('', '_blank', 'width=900,height=760');
+  if (!popup) return;
+  const esc = (value: unknown) => String(value ?? '—').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character] ?? character));
+  const cfg = getWorkflowConfig();
+  const counterparty = loadClients().find((c) => c.name.trim().toLowerCase() === (t.counterparty ?? '').trim().toLowerCase());
+  const bank = t.kind === 'Receivable' ? cfg.companyBankAccount : (counterparty?.bankAccount ?? null);
+  const party = t.kind === 'Receivable' ? (cfg.companyName || 'Our Company') : (t.counterparty || 'Counterparty');
+  const detailsText = bank?.verified ? bank?.details?.trim() : '';
+  const bankHtml = bank?.verified ? `<div style="margin-top:14px;border:1px solid #cdd5e1;background:#f8fafc;padding:10px;border-radius:6px">
+    <div style="font-size:11px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">${esc(t.kind === 'Receivable' ? 'Our Company Account Details' : 'Payee Account Details')}</div>
+    <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:6px">${esc(party)}</div>
+    ${detailsText
+      ? `<pre style="margin:0;white-space:pre-wrap;font:12px Arial;color:#182235">${esc(detailsText)}</pre>`
+      : `<table style="width:100%;border-collapse:collapse;margin:0">
+      <tbody>
+        <tr><td style="border:none;padding:2px 8px 2px 0;color:#64748b;width:140px">Bank Name</td><td style="border:none;padding:2px 0">${esc(bank?.bankName || '—')}</td></tr>
+        <tr><td style="border:none;padding:2px 8px 2px 0;color:#64748b">Account Holder</td><td style="border:none;padding:2px 0">${esc(bank?.accountHolder || '—')}</td></tr>
+        <tr><td style="border:none;padding:2px 8px 2px 0;color:#64748b">Account Number</td><td style="border:none;padding:2px 0">${esc(bank?.accountNumber || '—')}</td></tr>
+        <tr><td style="border:none;padding:2px 8px 2px 0;color:#64748b">SWIFT</td><td style="border:none;padding:2px 0">${esc(bank?.swift || '—')}</td></tr>
+        <tr><td style="border:none;padding:2px 8px 2px 0;color:#64748b">IBAN</td><td style="border:none;padding:2px 0">${esc(bank?.iban || '—')}</td></tr>
+      </tbody>
+    </table>`}
+  </div>` : '';
+  const title = t.category === 'Hire' ? 'Hire SOA / Payment Statement' : `${t.category} Payment Statement`;
+  const rows = [
+    ['Transaction ID', t.id], ['Source Module', t.module], ['Company', t.company], ['Reference', t.reference],
+    ['Vessel', t.vessel], ['Voyage', t.voyage], ['Counterparty', t.counterparty], ['Invoice No.', t.invoiceNo],
+    ['Amount', `${t.currency} ${num(t.amount)}`], ['Invoice Date', t.invoiceDate], ['Due Date', t.dueDate],
+    ['Approval', t.approval], ['Payment Status', t.status], ['Payment Reference', t.paymentRef], ['Payment Date', t.paymentDate],
+  ];
+  popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)} - ${esc(t.invoiceNo)}</title><style>body{font:12px Arial;color:#182235;margin:32px}h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;color:#5b687b;margin:0 0 22px}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{border:1px solid #cdd5e1;padding:9px;text-align:left}th{width:30%;background:#edf2f8;color:#506078}footer{margin-top:32px;color:#69778a;font-size:10px}@media print{button{display:none}}</style></head><body><h1>${esc(title)}</h1><h2>${esc(t.invoiceNo)} · ${esc(t.vessel)} · Generated from ${esc(t.module)}</h2><table>${rows.map(([label, value]) => `<tr><th>${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</table>${bankHtml}<footer>This payment statement was generated from the Accounts transaction record. Use the browser print dialog to save as PDF.</footer><script>window.onload=function(){window.print()}</script></body></html>`);
   popup.document.close();
 }
 
@@ -239,7 +277,51 @@ function CashflowTable({ scope }: { scope: FinTxn[] }) {
 
 function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
   const [live, setLive] = useState(t);
+  const [counterpartyBank, setCounterpartyBank] = useState<BankAccount>({ verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' });
+  const [companyBank, setCompanyBank] = useState<BankAccount>(() => getWorkflowConfig().companyBankAccount);
   const refresh = () => { const u = findTxnByInvoice(live.invoiceNo); if (u) setLive(u); };
+
+  useEffect(() => {
+    const match = loadClients().find((c) => c.name.trim().toLowerCase() === live.counterparty.trim().toLowerCase());
+    setCounterpartyBank(match?.bankAccount ?? { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' });
+    setCompanyBank(getWorkflowConfig().companyBankAccount);
+  }, [live.counterparty]);
+
+  const saveCounterpartyBank = (account: BankAccount) => {
+    setCounterpartyBank(account);
+    const name = live.counterparty.trim();
+    if (!name) return;
+    const all = loadClients();
+    const idx = all.findIndex((c) => c.name.trim().toLowerCase() === name.toLowerCase());
+    if (idx >= 0) {
+      const updated = [...all];
+      updated[idx] = { ...updated[idx], bankAccount: account };
+      saveClients(updated);
+      return;
+    }
+    const created: Client = {
+      id: newClientId(),
+      kind: 'Account',
+      category: 'Operator',
+      name,
+      location: '',
+      email: '',
+      contactName: '',
+      phone: '',
+      username: '',
+      password: '',
+      role: 'Account User',
+      pic: '',
+      active: true,
+      bankAccount: account,
+    };
+    saveClients([created, ...all]);
+  };
+
+  const saveCompanyBank = (account: BankAccount) => {
+    setCompanyBank(account);
+    setWorkflowConfig({ companyBankAccount: account });
+  };
 
   const changeStatus = (next: TxnStatus) => {
     if (!next || next === live.status) return;
@@ -312,11 +394,17 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
           </div>
           {/* Compact SWIFT document section */}
           <div className="fv-acct__swift-compact">
-            <span><i className="fas fa-file-invoice" /> Bank SWIFT / Payment Document</span>
+            <span><i className="fas fa-file-invoice" /> {live.category === 'Hire' ? 'Hire SOA / Payment Document' : 'Payment Document'}</span>
+            <button type="button" className="fv-acct__btn fv-acct__btn--ghost" style={{fontSize:11}} onClick={() => openPaymentPdf(live)}>
+              <i className="fas fa-file-pdf" /> View / Print PDF
+            </button>
             {live.swiftDocUrl ? (
               <div className="fv-acct__swift-compact-file">
                 <i className="fas fa-file-circle-check" style={{color:'var(--a-good)'}} />
                 <span>Document uploaded</span>
+                <a href={live.swiftDocUrl} target="_blank" rel="noreferrer" className="fv-acct__btn fv-acct__btn--ghost" style={{fontSize:11}}>
+                  <i className="fas fa-eye" /> View
+                </a>
                 <a href={live.swiftDocUrl} download={`SWIFT-${live.invoiceNo}`} className="fv-acct__btn fv-acct__btn--ghost" style={{fontSize:11}}>
                   <i className="fas fa-download" /> Download
                 </a>
@@ -332,6 +420,13 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
               </label>
             )}
           </div>
+          <BankAccountBox
+            label={live.kind === 'Receivable' ? 'Our Company Account Details' : 'Payee Account Details'}
+            partyName={live.kind === 'Receivable' ? (getWorkflowConfig().companyName || 'Our Company') : (live.counterparty || 'Counterparty')}
+            account={live.kind === 'Receivable' ? companyBank : counterpartyBank}
+            editable
+            onUpdate={live.kind === 'Receivable' ? saveCompanyBank : saveCounterpartyBank}
+          />
         </div>
       </div>
     </div>
@@ -342,6 +437,7 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
 
 function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void }) {
   const [auditId, setAuditId] = useState<string | null>(null);
+  const [dueSort, setDueSort] = useState<'asc' | 'desc'>('asc');
 
   const changeStatus = (t: FinTxn, next: TxnStatus) => {
     if (!next || next === t.status) return;
@@ -360,6 +456,10 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
   };
 
   if (rows.length === 0) return <div className="fv-acct__empty"><i className="fas fa-inbox" aria-hidden="true" /> No transactions match the current view.</div>;
+  const sortedRows = [...rows].sort((a, b) => {
+    const result = a.dueIso.localeCompare(b.dueIso);
+    return dueSort === 'asc' ? result : -result;
+  });
   return (
     <div className="fv-acct__gridwrap">
       <table className="fv-acct__table">
@@ -373,7 +473,7 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
             <th>Invoice</th>
             <th className="fv-acct__r">Amount</th>
             <th>Cur.</th>
-            <th>Due</th>
+            <th aria-sort={dueSort === 'asc' ? 'ascending' : 'descending'}><button type="button" className="fv-acct__sort-btn" onClick={() => setDueSort((direction) => direction === 'asc' ? 'desc' : 'asc')} aria-label={`Sort by due date ${dueSort === 'asc' ? 'descending' : 'ascending'}`} title={`Due date: ${dueSort === 'asc' ? 'earliest first' : 'latest first'}`}>Due <i className={`fas fa-sort-${dueSort === 'asc' ? 'up' : 'down'}`} aria-hidden="true" /></button></th>
             <th>Approval</th>
             <th>Status</th>
             <th>Priority</th>
@@ -381,7 +481,7 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
           </tr>
         </thead>
         <tbody>
-          {rows.map((t) => {
+          {sortedRows.map((t) => {
             const overdue = isOverdue(t);
             const tone = STATUS_TONE[t.status] ?? 'grey';
             const auditOpen = auditId === t.id;

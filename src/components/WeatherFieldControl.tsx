@@ -186,7 +186,7 @@ export function WeatherFieldControl({
           aria-expanded={open}
           onClick={() => setOpen((o) => !o)}
         >
-          <i className="fas fa-layer-group" aria-hidden="true" />
+          <i className="fas fa-cloud-sun" aria-hidden="true" />
         </button>
 
         {open && (

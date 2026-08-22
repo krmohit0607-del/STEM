@@ -71,7 +71,7 @@ export function VoyageTagsStrip() {
   const remove = (id: string) => persist(tags.filter((tag) => tag.id !== id));
   return (
     <div className="fv-voyage-tags" ref={ref} aria-label="Voyage tags">
-      <span className="fv-voyage-tags__vessel"><i className="fas fa-tags" aria-hidden="true" /> Voyage Tags</span>
+      <span className="fv-voyage-tags__vessel" title="Voyage Tags"><i className="fas fa-tags" aria-hidden="true" /></span>
       <div className="fv-voyage-tags__items">
         {tags.map((tag, index) => <span key={tag.id} className={`fv-voyage-tags__tag fv-voyage-tags__tag--${colors[index % colors.length]}`}><i className="fas fa-tag" aria-hidden="true" /> {tag.text}<button type="button" onClick={() => remove(tag.id)} aria-label={`Remove ${tag.text}`}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}
       </div>

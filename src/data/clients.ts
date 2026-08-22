@@ -33,6 +33,16 @@ export interface Client {
   pic: string;
   /** Whether the login is enabled. */
   active: boolean;
+    /** Bank account details for payments. */
+    bankAccount: {
+      verified: boolean;
+      details: string;
+      bankName: string;
+      accountHolder: string;
+      accountNumber: string;
+      swift: string;
+      iban: string;
+    };
 }
 
 /** Account types (Settings → Account Details). */
@@ -89,6 +99,7 @@ export const CLIENTS: Client[] = [
     role: 'Operations Manager',
     pic: 'Amit Sharma',
     active: true,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
   },
   {
     id: 'cl-northstar',
@@ -104,6 +115,7 @@ export const CLIENTS: Client[] = [
     role: 'Chartering',
     pic: 'Priya Nair',
     active: true,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
   },
   {
     id: 'cl-pacifica',
@@ -119,6 +131,7 @@ export const CLIENTS: Client[] = [
     role: 'Accounts',
     pic: 'Tom Becker',
     active: false,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
   },
   {
     id: 'sp-veritas',
@@ -134,6 +147,7 @@ export const CLIENTS: Client[] = [
     role: 'Viewer',
     pic: 'Tom Becker',
     active: true,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
   },
   {
     id: 'sp-oceanbunkers',
@@ -149,6 +163,7 @@ export const CLIENTS: Client[] = [
     role: 'Account User',
     pic: 'Liang Wei',
     active: true,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
   },
   {
     id: 'sp-stormgeo',
@@ -164,6 +179,7 @@ export const CLIENTS: Client[] = [
     role: 'Viewer',
     pic: 'Sofia Marin',
     active: true,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
   },
 ];
 
@@ -178,7 +194,21 @@ export function loadClients(): Client[] {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every(isClient)) {
       // Normalise older records saved before newer fields existed.
-      return (parsed as Client[]).map((c) => ({ ...c, pic: c.pic ?? '', kind: c.kind ?? 'Account', category: c.category ?? '' }));
+        return (parsed as Client[]).map((c) => ({
+          ...c,
+          pic: c.pic ?? '',
+          kind: c.kind ?? 'Account',
+          category: c.category ?? '',
+          bankAccount: {
+            verified: c.bankAccount?.verified ?? false,
+            details: c.bankAccount?.details ?? '',
+            bankName: c.bankAccount?.bankName ?? '',
+            accountHolder: c.bankAccount?.accountHolder ?? '',
+            accountNumber: c.bankAccount?.accountNumber ?? '',
+            swift: c.bankAccount?.swift ?? '',
+            iban: c.bankAccount?.iban ?? '',
+          },
+        }));
     }
   } catch {
     /* fall back to defaults */

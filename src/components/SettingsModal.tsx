@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import * as XLSX from 'xlsx';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { RichTextEditor } from './RichTextEditor';
@@ -52,6 +53,8 @@ import {
   type SavedPort,
 } from '../data/savedPorts';
 import { AreaConstraintsPage } from './AreaConstraintsPage';
+import { loadSavedPassages, loadBundledSavedPassages, mergeSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
+import { CargoMasterPanel } from './CargoMasterPanel';
 
 /**
  * Settings popup opened from the profile menu (Profile Settings → Settings).
@@ -76,6 +79,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'client-details', labelKey: 'accountDetails', labelFallback: 'Account Details', icon: 'fa-user-tie' },
   { id: 'service-providers', labelKey: 'serviceProviderDetails', labelFallback: 'Service Provider Details', icon: 'fa-user-gear' },
   { id: 'port-details', labelKey: 'portDetails', labelFallback: 'Port Details', icon: 'fa-anchor' },
+  { id: 'cargo-master', labelKey: 'cargoMaster', labelFallback: 'Cargo Master', icon: 'fa-boxes-stacked' },
   { id: 'area-constraints', labelKey: 'areaConstraints', labelFallback: 'Area Constraints', icon: 'fa-draw-polygon' },
   { id: 'saved-passages', labelKey: 'savedPassages', labelFallback: 'Saved Passages', icon: 'fa-route' },
   { id: 'workflow-config', labelKey: 'workflowConfig', labelFallback: 'Company & Workflow', icon: 'fa-building' },
@@ -84,9 +88,12 @@ const SECTIONS: SettingsSection[] = [
 export function SettingsModal({
   open,
   onClose,
+  asPage,
 }: {
   open: boolean;
   onClose: () => void;
+  /** Render as a full standalone page (Settings route) instead of a modal overlay. */
+  asPage?: boolean;
 }) {
   const l = useL();
   const t = (key: string, fallback: string) => {
@@ -97,17 +104,79 @@ export function SettingsModal({
   const [activeId, setActiveId] = useState<string>(SECTIONS[0].id);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || asPage) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, asPage]);
 
   if (!open) return null;
 
   const active = SECTIONS.find((s) => s.id === activeId) ?? SECTIONS[0];
+
+  const nav = (
+    <nav className="fv-settings-modal__nav" aria-label={t('settings', 'Settings')}>
+      {SECTIONS.map((s) => (
+        <button
+          key={s.id}
+          type="button"
+          className={`fv-settings-modal__nav-item${
+            s.id === activeId ? ' fv-settings-modal__nav-item--active' : ''
+          }`}
+          aria-current={s.id === activeId ? 'page' : undefined}
+          onClick={() => setActiveId(s.id)}
+        >
+          <i className={`fas ${s.icon}`} aria-hidden="true" />
+          <span>{t(s.labelKey, s.labelFallback)}</span>
+        </button>
+      ))}
+    </nav>
+  );
+
+  const content = (
+    <section className="fv-settings-modal__content">
+      <h4 className="fv-settings-modal__content-title">
+        <i className={`fas ${active.icon}`} aria-hidden="true" />{' '}
+        {t(active.labelKey, active.labelFallback)}
+      </h4>
+      {active.id === 'email-templates' && <EmailTemplatesPanel />}
+      {active.id === 'email-distribution' && <EmailDistributionPanel />}
+      {active.id === 'vessel-details' && <VesselsPanel />}
+      {active.id === 'estimation-options' && <EstimationOptionsPanel />}
+      {active.id === 'client-details' && <ClientsPanel kind="Account" />}
+      {active.id === 'service-providers' && <ClientsPanel kind="Service Provider" />}
+      {active.id === 'port-details' && <PortsPanel />}
+      {active.id === 'cargo-master' && <CargoMasterPanel />}
+      {active.id === 'area-constraints' && (
+        <div className="fv-settings-area">
+          <AreaConstraintsPage mode="admin" />
+        </div>
+      )}
+      {active.id === 'saved-passages' && <SavedPassagesPanel />}
+      {active.id === 'workflow-config' && <WorkflowConfigPanel />}
+    </section>
+  );
+
+  if (asPage) {
+    return (
+      <div className="fv-settings-page">
+        <header className="fv-settings-page__head">
+          <h1>
+            <i className="fas fa-gear" aria-hidden="true" /> {t('settings', 'Settings')}
+          </h1>
+          <p className="fv-settings-page__sub">
+            {t('settingsPageSub', 'Admin settings panel — configure templates, master data and workflow for the application.')}
+          </p>
+        </header>
+        <div className="fv-settings-page__body">
+          {nav}
+          {content}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -136,41 +205,8 @@ export function SettingsModal({
           </button>
         </header>
         <div className="fv-settings-modal__body">
-          <nav className="fv-settings-modal__nav" aria-label={t('settings', 'Settings')}>
-            {SECTIONS.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                className={`fv-settings-modal__nav-item${
-                  s.id === activeId ? ' fv-settings-modal__nav-item--active' : ''
-                }`}
-                aria-current={s.id === activeId ? 'page' : undefined}
-                onClick={() => setActiveId(s.id)}
-              >
-                <i className={`fas ${s.icon}`} aria-hidden="true" />
-                <span>{t(s.labelKey, s.labelFallback)}</span>
-              </button>
-            ))}
-          </nav>
-          <section className="fv-settings-modal__content">
-            <h4 className="fv-settings-modal__content-title">
-              <i className={`fas ${active.icon}`} aria-hidden="true" />{' '}
-              {t(active.labelKey, active.labelFallback)}
-            </h4>
-            {active.id === 'email-templates' && <EmailTemplatesPanel />}
-            {active.id === 'email-distribution' && <EmailDistributionPanel />}
-            {active.id === 'vessel-details' && <VesselsPanel />}
-            {active.id === 'estimation-options' && <EstimationOptionsPanel />}
-            {active.id === 'client-details' && <ClientsPanel kind="Account" />}
-            {active.id === 'service-providers' && <ClientsPanel kind="Service Provider" />}
-            {active.id === 'port-details' && <PortsPanel />}
-            {active.id === 'area-constraints' && (
-              <div className="fv-settings-area">
-                <AreaConstraintsPage mode="admin" />
-              </div>
-            )}
-            {active.id === 'workflow-config' && <WorkflowConfigPanel />}
-          </section>
+          {nav}
+          {content}
         </div>
       </div>
     </div>
@@ -914,6 +950,7 @@ function ClientsPanel({ kind }: { kind: Client['kind'] }) {
       role: CLIENT_ROLES[0],
       pic: '',
       active: true,
+      bankAccount: { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
     });
 
   const startEdit = (c: Client) => setEditing({ ...c });
@@ -951,6 +988,7 @@ function ClientsPanel({ kind }: { kind: Client['kind'] }) {
       username: editing.username.trim(),
       role: editing.role.trim() || CLIENT_ROLES[0],
       pic: editing.pic,
+      bankAccount: editing.bankAccount ?? { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
     };
     setClients((prev) => {
       if (editing.id) {
@@ -1309,6 +1347,41 @@ function ClientEditor({
             onChange={(e) => onChange({ ...value, active: e.target.checked })}
           />
         </label>
+      </div>
+
+      <div className="fv-settings-wf__group">
+        <div className="fv-settings-wf__group-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <span><i className="fas fa-university" aria-hidden="true" /> Bank Account Details</span>
+          <label className="fv-settings-wf__verify-inline">
+            <span>Verified</span>
+            <input
+              type="checkbox"
+              checked={Boolean(value.bankAccount?.verified)}
+              onChange={(e) => onChange({
+                ...value,
+                bankAccount: { ...(value.bankAccount ?? { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' }), verified: e.target.checked },
+              })}
+            />
+          </label>
+        </div>
+        <div className="fv-settings-wf__fields">
+          <div className="fv-settings-wf__field-row">
+            <label className="fv-settings-wf__field">
+              <span className="fv-settings-wf__field-label">Account Details</span>
+              <textarea
+                className="fv-settings-wf__textarea"
+                rows={5}
+                placeholder={'Paste full bank details here\nBank Name:\nAccount Name:\nAccount Number:\nSWIFT:\nIBAN:'}
+                value={value.bankAccount?.details ?? ''}
+                onChange={(e) => onChange({
+                  ...value,
+                  bankAccount: { ...(value.bankAccount ?? { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' }), details: e.target.value },
+                })}
+              />
+              <span className="fv-settings-wf__field-hint">Only verified account details are used in PDFs and payment handover to Accounts.</span>
+            </label>
+          </div>
+        </div>
       </div>
 
       <div className="fv-email-template__edit-actions">
@@ -1856,6 +1929,42 @@ function WorkflowConfigPanel() {
         </div>
       </div>
 
+      <div className="fv-settings-wf__group">
+        <div className="fv-settings-wf__group-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <span><i className="fas fa-university" aria-hidden="true" /> Company Bank Account</span>
+          <label className="fv-settings-wf__verify-inline">
+            <span>Verified</span>
+            <input
+              type="checkbox"
+              checked={Boolean(cfg.companyBankAccount.verified)}
+              onChange={(e) => setWorkflowConfig({
+                companyBankAccount: { ...cfg.companyBankAccount, verified: e.target.checked },
+              })}
+            />
+          </label>
+        </div>
+        <div className="fv-settings-wf__fields">
+          <p className="fv-settings-wf__intro">
+            Bank details used when your company is receiving payments on invoices.
+          </p>
+          <div className="fv-settings-wf__field-row">
+            <label className="fv-settings-wf__field">
+              <span className="fv-settings-wf__field-label">Account Details</span>
+              <textarea
+                className="fv-settings-wf__textarea"
+                rows={6}
+                placeholder={'Paste full bank details here\nBeneficiary:\nBank Name:\nAccount Number:\nSWIFT:\nIBAN:'}
+                value={cfg.companyBankAccount.details ?? ''}
+                onChange={(e) => setWorkflowConfig({
+                  companyBankAccount: { ...cfg.companyBankAccount, details: e.target.value },
+                })}
+              />
+              <span className="fv-settings-wf__field-hint">Only verified account details are used in PDFs and payment handover to Accounts.</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
       {/* Postfix workflow */}
       <div className="fv-settings-wf__group">
         <div className="fv-settings-wf__group-title"><i className="fas fa-file-signature" aria-hidden="true" /> Postfix Department</div>
@@ -1880,6 +1989,324 @@ function WorkflowConfigPanel() {
             <span className="fv-settings-wf__toggle-label">{cfg.postfixAlwaysShowOpsVoyages ? 'ON' : 'OFF'}</span>
           </button>
         </label>
+      </div>
+    </div>
+  );
+}
+
+function SavedPassagesPanel() {
+  const [passages, setPassages] = useState<SavedPassage[]>(() => loadSavedPassages());
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+  const [query, setQuery] = useState('');
+  const importRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    void importRoutes();
+  }, []);
+
+  const importRoutes = async () => {
+    setLoading(true);
+    const bundled = await loadBundledSavedPassages();
+    const before = passages.length;
+    const next = mergeSavedPassages(bundled);
+    setPassages(next);
+    setMessage(`${bundled.length} source routes checked; ${Math.max(0, next.length - before)} new passages added.`);
+    setLoading(false);
+  };
+
+  const mergeImportedPassages = (incoming: SavedPassage[]) => {
+    const current = loadSavedPassages();
+    const idSet = new Set(current.map((passage) => passage.id));
+    const geomSet = new Set(
+      current.map((passage) => passage.points.map((p) => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';')),
+    );
+    const accepted = incoming.filter((passage) => {
+      if (!passage.points || passage.points.length < 2) return false;
+      const geom = passage.points.map((p) => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';');
+      if (idSet.has(passage.id) || geomSet.has(geom)) return false;
+      idSet.add(passage.id);
+      geomSet.add(geom);
+      return true;
+    });
+    const next = [...current, ...accepted];
+    saveSavedPassages(next);
+    setPassages(next);
+    setMessage(`${incoming.length} route files parsed; ${accepted.length} new passages imported.`);
+  };
+
+  const slug = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'route';
+
+  const parseKmlPassage = (name: string, text: string): SavedPassage[] => {
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(text, 'application/xml');
+    const coordEls = Array.from(xml.getElementsByTagNameNS('*', 'coordinates'));
+    const placemarkName = xml.getElementsByTagNameNS('*', 'name')?.[0]?.textContent?.trim();
+    const points: [number, number][] = [];
+    coordEls.forEach((el) => {
+      const tokens = (el.textContent || '').trim().split(/\s+/);
+      tokens.forEach((token) => {
+        const [lonRaw, latRaw] = token.split(',');
+        const lon = Number(lonRaw);
+        const lat = Number(latRaw);
+        if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+          points.push([lat, lon]);
+        }
+      });
+    });
+    if (points.length < 2) return [];
+    const routeName = placemarkName || name.replace(/\.[^.]+$/, '');
+    return [{ id: `imp-${slug(routeName)}-${points.length}`, name: routeName, source: name, points }];
+  };
+
+  const parseWayfinderCsvPassage = (name: string, text: string): SavedPassage[] => {
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const points: [number, number][] = [];
+    for (const line of lines) {
+      if (!/^\d+,/.test(line)) continue;
+      const cols = line.split(',');
+      if (cols.length < 7) continue;
+      const latD = Number(cols[1]);
+      const latM = Number(cols[2]);
+      const latH = (cols[3] || '').toUpperCase();
+      const lonD = Number(cols[4]);
+      const lonM = Number(cols[5]);
+      const lonH = (cols[6] || '').toUpperCase();
+      if (![latD, latM, lonD, lonM].every(Number.isFinite)) continue;
+      let lat = Math.abs(latD) + Math.abs(latM) / 60;
+      let lon = Math.abs(lonD) + Math.abs(lonM) / 60;
+      if (latH === 'S') lat *= -1;
+      if (lonH === 'W') lon *= -1;
+      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) points.push([lat, lon]);
+    }
+    if (points.length < 2) return [];
+    const routeName = name.replace(/\.[^.]+$/, '');
+    return [{ id: `imp-${slug(routeName)}-${points.length}`, name: routeName, source: name, points }];
+  };
+
+  const parseTableRowsPassages = (
+    name: string,
+    rows: Array<Record<string, unknown>>,
+  ): SavedPassage[] => {
+    if (!rows.length) return [];
+    const sample = rows.find((row) => Object.keys(row).length > 0) ?? rows[0];
+    const keys = Object.keys(sample);
+    const latKey = keys.find((k) => /^lat/i.test(k));
+    const lonKey = keys.find((k) => /^(lon|lng|long)/i.test(k));
+    if (!latKey || !lonKey) return [];
+    const routeKey = keys.find((k) => /(route|passage|name|track)/i.test(k));
+
+    const grouped = new Map<string, [number, number][]>();
+    rows.forEach((row) => {
+      const lat = parseCoordinate(String(row[latKey] ?? ''), 'lat');
+      const lon = parseCoordinate(String(row[lonKey] ?? ''), 'lon');
+      if (lat == null || lon == null) return;
+      const routeName = String(
+        (routeKey ? row[routeKey] : '') || name.replace(/\.[^.]+$/, ''),
+      ).trim();
+      if (!grouped.has(routeName)) grouped.set(routeName, []);
+      grouped.get(routeName)!.push([lat, lon]);
+    });
+
+    return Array.from(grouped.entries())
+      .filter(([, pts]) => pts.length >= 2)
+      .map(([routeName, points]) => ({
+        id: `imp-${slug(routeName)}-${points.length}`,
+        name: routeName,
+        source: name,
+        points,
+      }));
+  };
+
+  const parseGenericCsvPassage = (name: string, text: string): SavedPassage[] => {
+    const lines = text.split(/\r?\n/).filter((line) => line.trim());
+    if (lines.length < 2) return [];
+    const headers = lines[0].split(',').map((h) => h.trim());
+    const rows = lines.slice(1).map((line) => {
+      const cells = line.split(',');
+      const row: Record<string, unknown> = {};
+      headers.forEach((h, i) => {
+        row[h] = (cells[i] ?? '').trim();
+      });
+      return row;
+    });
+    return parseTableRowsPassages(name, rows);
+  };
+
+  const parseExcelPassages = (name: string, bytes: ArrayBuffer): SavedPassage[] => {
+    try {
+      const wb = XLSX.read(bytes, { type: 'array' });
+      const passages: SavedPassage[] = [];
+      wb.SheetNames.forEach((sheetName) => {
+        const sheet = wb.Sheets[sheetName];
+        if (!sheet) return;
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+        passages.push(...parseTableRowsPassages(`${name}:${sheetName}`, rows));
+      });
+      return passages;
+    } catch {
+      return [];
+    }
+  };
+
+  const parseRtzPassages = (name: string, text: string): SavedPassage[] => {
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(text, 'application/xml');
+    const wpNodes = Array.from(xml.getElementsByTagNameNS('*', 'waypoint'));
+    const points: [number, number][] = [];
+    wpNodes.forEach((node) => {
+      const latAttr = node.getAttribute('lat') || node.getAttribute('latitude');
+      const lonAttr = node.getAttribute('lon') || node.getAttribute('longitude');
+      const pos = node.getElementsByTagNameNS('*', 'position')?.[0];
+      const latPos = pos?.getAttribute('lat') || pos?.getAttribute('latitude');
+      const lonPos = pos?.getAttribute('lon') || pos?.getAttribute('longitude');
+      const lat = parseCoordinate(String(latAttr || latPos || ''), 'lat');
+      const lon = parseCoordinate(String(lonAttr || lonPos || ''), 'lon');
+      if (lat != null && lon != null) points.push([lat, lon]);
+    });
+    if (points.length < 2) return [];
+    const routeName =
+      xml.getElementsByTagNameNS('*', 'route')?.[0]?.getAttribute('name') ||
+      name.replace(/\.[^.]+$/, '');
+    return [
+      {
+        id: `imp-${slug(routeName)}-${points.length}`,
+        name: routeName,
+        source: name,
+        points,
+      },
+    ];
+  };
+
+  const parseJsonPassages = (name: string, text: string): SavedPassage[] => {
+    try {
+      const parsed = JSON.parse(text);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      return list
+        .map((item, idx) => {
+          const pts = Array.isArray(item?.points)
+            ? item.points
+                .map((p: unknown) => {
+                  const pair = p as [number, number];
+                  return Array.isArray(pair) && Number.isFinite(pair[0]) && Number.isFinite(pair[1])
+                    ? [Number(pair[0]), Number(pair[1])] as [number, number]
+                    : null;
+                })
+                .filter(Boolean) as [number, number][]
+            : [];
+          if (pts.length < 2) return null;
+          const routeName = String(item?.name || `${name.replace(/\.[^.]+$/, '')} ${idx + 1}`);
+          return {
+            id: String(item?.id || `imp-${slug(routeName)}-${pts.length}`),
+            name: routeName,
+            source: String(item?.source || name),
+            points: pts,
+          } as SavedPassage;
+        })
+        .filter((x): x is SavedPassage => !!x);
+    } catch {
+      return [];
+    }
+  };
+
+  const onImportFiles = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const all: SavedPassage[] = [];
+    for (const file of files) {
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.kml')) {
+        const text = await file.text();
+        all.push(...parseKmlPassage(file.name, text));
+      } else if (lower.endsWith('.csv')) {
+        const text = await file.text();
+        const parsed = parseWayfinderCsvPassage(file.name, text);
+        all.push(...(parsed.length ? parsed : parseGenericCsvPassage(file.name, text)));
+      } else if (lower.endsWith('.xls') || lower.endsWith('.xlsx')) {
+        all.push(...parseExcelPassages(file.name, await file.arrayBuffer()));
+      } else if (lower.endsWith('.rtz')) {
+        const text = await file.text();
+        all.push(...parseRtzPassages(file.name, text));
+      } else if (lower.endsWith('.json')) {
+        const text = await file.text();
+        all.push(...parseJsonPassages(file.name, text));
+      }
+    }
+    mergeImportedPassages(all);
+    e.target.value = '';
+  };
+
+  const deletePassage = (id: string) => {
+    const next = passages.filter((passage) => passage.id !== id);
+    saveSavedPassages(next);
+    setPassages(next);
+  };
+
+  const filteredPassages = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return passages;
+    return passages.filter((passage) =>
+      `${passage.name} ${passage.source || ''}`.toLowerCase().includes(q),
+    );
+  }, [passages, query]);
+
+  return (
+    <div className="fv-saved-passages">
+      <div className="fv-saved-passages__toolbar">
+        <div className="fv-saved-passages__summary">
+          <strong>Saved passage routes</strong>
+          <span>{passages.length} routes available</span>
+        </div>
+        <div className="fv-saved-passages__actions">
+          <button type="button" className="fv-email-template__btn" onClick={() => importRef.current?.click()}>
+            <i className="fas fa-folder-open" aria-hidden="true" /> Import route files
+          </button>
+          <button type="button" className="fv-email-template__btn fv-email-template__btn--primary" onClick={importRoutes} disabled={loading}>
+            <i className="fas fa-file-import" aria-hidden="true" /> {loading ? 'Importing...' : 'Import source routes'}
+          </button>
+          <input
+            ref={importRef}
+            type="file"
+            accept=".kml,.csv,.json,.rtz,.xls,.xlsx"
+            multiple
+            hidden
+            onChange={onImportFiles}
+          />
+        </div>
+      </div>
+      <label className="fv-saved-passages__search">
+        <i className="fas fa-magnifying-glass" aria-hidden="true" />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search route name or source file"
+        />
+      </label>
+      {message && <p className="fv-saved-passages__message">{message}</p>}
+      <div className="fv-saved-passages__list" role="list" aria-label="Saved passages">
+        {filteredPassages.map((passage) => (
+          <div className="fv-saved-passages__row" key={passage.id} role="listitem">
+            <div className="fv-saved-passages__route">
+              <strong>{passage.name}</strong>
+              <small>{passage.source || 'Saved passage'} · {passage.points.length} waypoints</small>
+            </div>
+            <button
+              type="button"
+              className="fv-saved-passages__delete"
+              title="Delete saved passage"
+              aria-label={`Delete ${passage.name}`}
+              onClick={() => deletePassage(passage.id)}
+            >
+              <i className="fas fa-trash" aria-hidden="true" />
+            </button>
+          </div>
+        ))}
+        {!filteredPassages.length && <p className="fv-saved-passages__empty">No saved passages match your search or import criteria.</p>}
       </div>
     </div>
   );

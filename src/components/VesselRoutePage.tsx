@@ -14,6 +14,8 @@ import { PORT_COORDS } from '../data/fleet';
 import type { Voyage } from '../data/voyages';
 import { LeftSidebar } from './LeftSidebar';
 import { BottomPanel } from './BottomPanel';
+import { MapLayersControl } from './MapLayersControl';
+import { PortsControl, RulerControl } from './MapToolsControl';
 
 /**
  * Vessel Route View — `/vessel-route?voyage=<id>`.
@@ -255,9 +257,12 @@ export function VesselRoutePage() {
                     </Tooltip>
                   </Marker>
                 )}
-                <AreaConstraintsControl position="topright" />
+                <MapLayersControl position="topright" />
                 <WeatherFieldControl position="topright" />
+                <AreaConstraintsControl position="topright" />
                 <WeatherPointControl position="topright" />
+                <PortsControl position="topright" />
+                <RulerControl position="topright" />
                 <MapCursorPosition />
               </MapContainer>
             )}

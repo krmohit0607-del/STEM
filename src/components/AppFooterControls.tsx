@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useTheme } from '../theme';
-import { SettingsModal } from './SettingsModal';
 
 /**
  * Theme toggle + profile/settings controls. Shown as a small horizontal bar at
@@ -18,7 +18,7 @@ export function AppFooterControls() {
 
   const [theme, toggleTheme] = useTheme();
   const [profileOpen, setProfileOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const navigate = useNavigate();
 
   // Close the profile menu on any outside click.
   useEffect(() => {
@@ -91,7 +91,7 @@ export function AppFooterControls() {
               role="menuitem"
               onClick={() => {
                 setProfileOpen(false);
-                setSettingsOpen(true);
+                navigate('/settings');
               }}
             >
               <i className="fas fa-gear" aria-hidden="true" />
@@ -109,7 +109,6 @@ export function AppFooterControls() {
           </div>
         )}
       </div>
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

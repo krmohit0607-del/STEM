@@ -105,21 +105,24 @@ function ControlPortal({
 
 export function MapLayersControl({
   position = 'topright',
-  value,
+  value: controlledValue,
   onChange,
   overlayLayers = [],
   onOverlayToggle,
 }: {
   position?: ControlPosition;
-  value: MapLayerId;
-  onChange: (id: MapLayerId) => void;
+  value?: MapLayerId;
+  onChange?: (id: MapLayerId) => void;
   overlayLayers?: OverlayLayerId[];
   onOverlayToggle?: (layers: OverlayLayerId[]) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [internalValue, setInternalValue] = useState<MapLayerId>(() => readMapLayerId());
+  const value = controlledValue ?? internalValue;
 
   const select = (id: MapLayerId) => {
-    onChange(id);
+    setInternalValue(id);
+    onChange?.(id);
     persistMapLayerId(id);
     setOpen(false);
   };

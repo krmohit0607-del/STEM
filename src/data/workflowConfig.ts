@@ -21,6 +21,16 @@ export interface WorkflowConfig {
   companyAddress: string;
   /** Base-64 data-URL of the company logo image (PNG/JPG/SVG). */
   companyLogoDataUrl: string;
+    /** Company bank account details for receiving payments. */
+    companyBankAccount: {
+      verified: boolean;
+      details: string;
+      bankName: string;
+      accountHolder: string;
+      accountNumber: string;
+      swift: string;
+      iban: string;
+    };
 }
 
 const DEFAULTS: WorkflowConfig = {
@@ -28,6 +38,15 @@ const DEFAULTS: WorkflowConfig = {
   companyName: '',
   companyAddress: '',
   companyLogoDataUrl: '',
+    companyBankAccount: {
+      verified: false,
+      details: '',
+      bankName: '',
+      accountHolder: '',
+      accountNumber: '',
+      swift: '',
+      iban: '',
+    },
 };
 
 function load(): WorkflowConfig {
