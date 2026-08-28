@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import type { ReportEmail } from '../data/reports';
 import { useSelectedLegNo } from '../data/selectedLeg';
 import { buildView } from './voyage/buildView';
 import { InterimTabs } from './InterimTabs';
+import { ReportEmailComposer } from './ReportEmailComposer';
 import { STUB_ROWS as TRACKSHEET_ROWS, computeCons, type TrackRow } from './TracksheetGrid';
 import type { LegRow } from './voyage/types';
 
@@ -97,6 +99,85 @@ interface InterimSummaryRow {
   label: string;
   overall: InterimSummaryCell;
   goodWeather: InterimSummaryCell;
+}
+
+const INTERIM_EMAIL_CRITERIA = [
+  { key: 'combined', label: 'Combined' },
+  { key: 'goodWeather', label: 'Good Weather' },
+  { key: 'overall', label: 'Overall' },
+  { key: 'noGoodWxExtrapolation', label: 'No Extrapolation (Good Wx)' },
+  { key: 'noOverallProjection', label: 'No Projection (Overall)' },
+  { key: 'zeroAllowance', label: 'Zero Allowance Consumption' },
+] as const;
+
+type InterimEmailCriterion = typeof INTERIM_EMAIL_CRITERIA[number]['key'];
+
+function buildInterimReportEmail(
+  voyage: NonNullable<ReturnType<typeof useSelectedVoyage>>,
+  rows: InterimSummaryRow[],
+  cp: CpDetails,
+  criteria: InterimEmailCriterion[],
+): ReportEmail {
+  const showCombined = criteria.includes('combined');
+  const showOverall = criteria.includes('overall') || (!criteria.includes('goodWeather') && !showCombined);
+  const showGoodWeather = criteria.includes('goodWeather');
+  const valueFor = (row: InterimSummaryRow, side: 'overall' | 'goodWeather') => {
+    if (side === 'overall' && criteria.includes('noOverallProjection') && row.label.startsWith('PROJECTED')) return 'N/A';
+    if (side === 'goodWeather' && criteria.includes('noGoodWxExtrapolation') && row.label.startsWith('PROJECTED')) return 'N/A';
+    if (criteria.includes('zeroAllowance') && row.label.includes('ALLOWANCE')) return '0';
+    return side === 'overall' ? row.overall.primary : row.goodWeather.primary;
+  };
+  const selectedColumns = [
+    ...(showCombined ? ['Combined'] : []),
+    ...(showOverall ? ['Overall'] : []),
+    ...(showGoodWeather ? ['Good Weather'] : []),
+  ];
+  const summaryRows = rows
+    .map((row) => {
+      const values = [
+        ...(showCombined ? [`${valueFor(row, 'overall')} / ${valueFor(row, 'goodWeather')}`] : []),
+        ...(showOverall ? [valueFor(row, 'overall')] : []),
+        ...(showGoodWeather ? [valueFor(row, 'goodWeather')] : []),
+      ];
+      return `${row.label.padEnd(30)} | ${values.map((value) => value.padEnd(28)).join(' | ')}`;
+    })
+    .join('\n');
+  const summaryHeader = `Metric${' '.repeat(26)} | ${selectedColumns.map((column) => column.padEnd(28)).join(' | ')}`;
+  const summaryDivider = `${'-'.repeat(30)}-+-${selectedColumns.map(() => '-'.repeat(28)).join('-+-')}`;
+  const body = `To: ${voyage.client}
+From: ODAS Voyage Operations
+Subject: Interim Report - ${voyage.vessel} - ${voyage.portFrom} to ${voyage.portTo}
+
+Dear Sirs,
+
+Please find below the interim report for ${voyage.vessel} (IMO ${voyage.imo}) covering the voyage from ${voyage.portFrom} to ${voyage.portTo}.
+
+INTERIM SUMMARY AND PROJECTIONS
+CP Speed: ${cp.speed}
+CP Consumption FO: ${cp.consFo}
+CP Consumption GO: ${cp.consGo}
+Weather Clause: ${cp.weatherClause}
+Good Weather Definition: ${cp.goodWeatherDef}
+
+Criteria applied: ${criteria.length ? INTERIM_EMAIL_CRITERIA.filter((item) => criteria.includes(item.key)).map((item) => item.label).join(', ') : 'Standard Overall and Good Weather'}
+
+${summaryHeader}
+${summaryDivider}
+${summaryRows}
+
+The calculations are based on the latest available interim vessel reports. Projections are indicative and subject to actual vessel performance, weather, current, routing, and operational conditions.
+
+Please review and advise us of any correction, change in voyage intention, or abnormal report data.
+
+Best Regards,
+ODAS Voyage Operations
+ops@odasgroup.net`;
+  return {
+    to: voyage.clientEmail,
+    subject: `Interim Report - ${voyage.vessel} - ${voyage.portFrom} to ${voyage.portTo}`,
+    attachments: [],
+    body,
+  };
 }
 
 /** Human-readable label for a leg, used where the old stub `label` was shown. */
@@ -508,6 +589,8 @@ export function InterimDashboardPage() {
       return acc;
     }, {}),
   );
+  const [interimEmailOpen, setInterimEmailOpen] = useState(false);
+  const [interimEmailCriteria, setInterimEmailCriteria] = useState<InterimEmailCriterion[]>(['overall', 'goodWeather']);
 
   const activeLeg = useMemo(
     () => legs.find((leg) => leg.no === selectedLegNo) ?? legs[0],
@@ -778,7 +861,12 @@ export function InterimDashboardPage() {
 
       <div className="fv-interim__stats">
         <section className="fv-interim__stats-card fv-interim__stats-card--summary fv-interim__stats-card--summary-full">
-          <h3>{t('interimSummaryProjections', 'Interim Summary and Projections')}</h3>
+          <div className="fv-interim__summary-heading">
+            <h3>{t('interimSummaryProjections', 'Interim Summary and Projections')}</h3>
+            <button type="button" className="fv-report__btn fv-report__btn--primary" onClick={() => setInterimEmailOpen(true)}>
+              <i className="fas fa-envelope" aria-hidden="true" /> Send Interim Report
+            </button>
+          </div>
           <table className="fv-interim__summary-table fv-interim__summary-table--compact">
             <thead>
               <tr>
@@ -807,6 +895,40 @@ export function InterimDashboardPage() {
           </table>
         </section>
       </div>
+
+      {interimEmailOpen && selectedVoyage && (
+        <div className="fv-interim__email-backdrop" role="presentation" onMouseDown={() => setInterimEmailOpen(false)}>
+          <section className="fv-interim__email-modal" role="dialog" aria-modal="true" aria-labelledby="fv-interim-email-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header className="fv-interim__email-modal-head">
+              <div>
+                <span>Interim report email</span>
+                <h2 id="fv-interim-email-title">Send Interim Report to Client</h2>
+                <p>{selectedVoyage.vessel} · {selectedVoyage.client} · {selectedVoyage.portFrom} → {selectedVoyage.portTo}</p>
+              </div>
+              <button type="button" className="fv-interim__email-close" onClick={() => setInterimEmailOpen(false)} aria-label="Close">
+                <i className="fas fa-xmark" aria-hidden="true" />
+              </button>
+            </header>
+            <fieldset className="fv-interim__email-criteria">
+              <legend>Report criteria</legend>
+              {INTERIM_EMAIL_CRITERIA.map((item) => (
+                <label key={item.key}>
+                  <input
+                    type="checkbox"
+                    checked={interimEmailCriteria.includes(item.key)}
+                    onChange={() => setInterimEmailCriteria((current) => current.includes(item.key) ? current.filter((key) => key !== item.key) : [...current, item.key])}
+                  />
+                  {item.label}
+                </label>
+              ))}
+            </fieldset>
+            <ReportEmailComposer
+              key={`${selectedVoyage.id}-${interimEmailCriteria.join(',')}`}
+              build={() => buildInterimReportEmail(selectedVoyage, interimSummaryRows, cpDetails, interimEmailCriteria)}
+            />
+          </section>
+        </div>
+      )}
     </div>
   );
 }

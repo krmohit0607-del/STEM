@@ -81,6 +81,18 @@ export interface OrderConfirmation {
   reference: string;
   itinerary: string;
   amount: string;
+  legs: Array<{ legType: 'Ballast' | 'Laden' | 'Del' | 'Redel'; portFrom: string; portTo: string; cost: string }>;
+}
+
+function formatOrderLegsTable(legs: OrderConfirmation['legs']): string {
+  const headers = ['Leg Type', 'Port From', 'Port To', 'Cost'];
+  const rows = legs.map((leg) => [leg.legType, leg.portFrom, leg.portTo, leg.cost]);
+  const minimumWidths = [16, 26, 26, 16];
+  const widths = headers.map((header, index) => Math.max(minimumWidths[index], header.length, ...rows.map((row) => row[index].length)));
+  const formatRow = (row: string[]) => `| ${row.map((value, index) => value.padEnd(widths[index])).join(' | ')} |`;
+  const solidBorder = `+${widths.map((width) => '-'.repeat(width + 2)).join('+')}+`;
+
+  return `${solidBorder}\n${formatRow(headers)}\n${solidBorder}\n${rows.map(formatRow).join(`\n${solidBorder}\n`)}\n${solidBorder}`;
 }
 
 export function getOrderConfirmation(v: Voyage): OrderConfirmation {
@@ -95,6 +107,7 @@ export function getOrderConfirmation(v: Voyage): OrderConfirmation {
     reference: v.routeRef,
     itinerary: `${v.portFrom} - ${v.portTo}`,
     amount,
+    legs: [{ legType: 'Laden', portFrom: v.portFrom, portTo: v.portTo, cost: amount }],
   };
 }
 
@@ -111,7 +124,8 @@ Our Voyage Reference: ${o.reference}
 
 Thank you for the order form for subject vessel. We are attending.
 
-Itinerary: ${o.itinerary}    ${o.amount}
+Itinerary & Cost
+${formatOrderLegsTable(o.legs)}
 
 If you have any questions or require assistance during voyage, please contact ops@odasgroup.net
 
@@ -134,23 +148,51 @@ export function buildReportingInstructions(v: Voyage): ReportEmail {
   const reportingPortalUrl = typeof window === 'undefined'
     ? '/vessel-reports/offline'
     : `${window.location.origin}/vessel-reports/offline`;
+  const appOrigin = typeof window === 'undefined' ? '' : window.location.origin;
+  const voyageQuery = `?voyage=${encodeURIComponent(v.id)}`;
+  const vesselProfileUrl = `${appOrigin}/voyage${voyageQuery}#vessel`;
+  const limitsConstraintsUrl = `${appOrigin}/limits${voyageQuery}`;
+  const reportingPortalLink = `${reportingPortalUrl}${voyageQuery}`;
   const body = `To: Master ${v.vessel}
-Fm: ODAS Voyage Operations
-Dt: ${dt}
-Rf: ${v.routeRef}
+From: ODAS Voyage Operations
+Date: ${dt}
+Reference: ${v.routeRef}
 
-Itinerary
+Subject: Vessel Profile, Voyage Limits and Reporting Requirements
+
+VOYAGE
 ${itinerary}
 
-Good Day Captain,
+Dear Captain,
 
-We have been appointed by Messrs ${v.client} to provide Weather Routing + Performance Monitoring (RPM) for ${v.vessel} on the above itinerary.
+We have been appointed by Messrs ${v.client} to provide Weather Routing and Performance Monitoring (RPM) for ${v.vessel} on the above itinerary.
 
-Please review the voyage in ODAS and provide or confirm the following information before departure.
+Before departure, please review the three ODAS pages below for the selected voyage. Complete or correct the information and advise us immediately if anything is inaccurate or changes during the voyage.
+
+REQUIRED ODAS PAGES
+1. Vessel Profile
+${vesselProfileUrl}
+Use this page to confirm the vessel particulars, machinery and fuel information, ECDIS details, cargo information, drafts, and the vessel's operating performance data.
+
+2. Limits & Constraints
+${limitsConstraintsUrl}
+Use this page to confirm the ordered speed and consumption, weather safety limits, draft and under-keel limits, loadline and ECA restrictions, no-go areas, and any vessel-specific routing constraints. Save the updated values before reviewing the route.
+
+3. Vessel Reporting Portal
+${reportingPortalLink}
+Use this page to submit the required vessel reports. Select the correct report type, enter the event time in UTC and LT where requested, enter the position in degrees/minutes and direction, complete all applicable fields with units, review the formatted message, and then select Submit Report. If connectivity is unavailable, use No Internet? Email Report and send the generated message to ops@odasgroup.net.
+
+REPORTING RULES
+- Use the report type that matches the event. Do not combine separate events in one report.
+- Enter UTC and local time (LT) accurately. Retain the same time zone convention throughout each report.
+- Enter latitude and longitude as degrees, minutes, and N/S or E/W. Check the sign and direction before submitting.
+- Enter fuel and fresh-water ROB separately and use MT. Enter distance in NM, speed in knots, draft in metres, and temperature in °C.
+- Complete all applicable sections. Where a field does not apply, enter N/A rather than leaving the operational detail ambiguous.
+- Use the preview/message area to check the report before sending. Include explanations for abnormal readings, stoppages, delays, deviations, or missing data.
+- Attach supporting BDNs, survey reports, photographs, or other documents when relevant.
 
 VESSEL REPORTING PORTAL
-Online submission and offline email preparation: ${reportingPortalUrl}
-Open this link in a browser, select the required report type, complete the fields, and either submit online or generate an email when internet connectivity is unavailable.
+The portal contains the complete report formats, including Noon, Arrival (EOSP), Departure (COSP), Anchorage/Drifting Daily, In Port Daily, Bunkering, Shifting, Fuel Change-over, Stop/Resume, NOR, Cargo Operation, Completion of Cargo, Anchor, Drifting, Incident/Accident, Bunker Survey, Speed Change-over, and Drydock Daily reports.
 
 VESSEL PROFILE
 - Vessel name, IMO number, vessel type and flag of registry
@@ -178,25 +220,30 @@ VOYAGE SETTINGS AND SAFETY LIMITS
 - Any routing restrictions, pilotage requirements or special considerations
 - Route plan with key waypoints, distances and intended manoeuvring areas
 
-Please confirm that the route displayed in ODAS reflects the vessel's intentions. Waypoints and recommendations are for guidance only. The Master remains responsible for safe navigation and compliance with loadline regulations, ECA requirements and all vessel operating limits. Advise ODAS immediately if the itinerary, route, draft, speed or safety limits change.
+ROUTE AND SAFETY CONFIRMATION
+Please confirm that the route displayed in ODAS reflects the vessel's intended voyage, key waypoints, distances, draft, speed, and manoeuvring plan. Waypoints and routing recommendations are provided for guidance only. The Master remains responsible for safe navigation, compliance with loadline regulations and ECA requirements, and adherence to all vessel operating limits.
+
+If the itinerary, route, draft, speed, cargo condition, machinery status, safety limit, ETA, or port schedule changes, update the relevant ODAS page and notify ODAS Voyage Operations without delay.
 
 REPORTS TO BE SENT FROM THE VESSEL
-1. NOON REPORT - UTC position, course, speed, distance, weather, wind, waves, swell, current, drafts, ROB and engine performance.
-2. ARRIVAL REPORT (EOSP) - EOSP time and position, ETA, speed, drafts, ROB, weather and any route or operational remarks.
-3. DEPARTURE REPORT (COSP) - COSP time and position, departure drafts, cargo condition, ROB, engine settings and intended speed.
-4. PORT / BERTH REPORT - arrival, all fast, berth, port operations, ROB, consumption, drafts and next movement.
-5. NOR REPORT - notice of readiness time, position, tendered time, acceptance status and any exceptions.
-6. CARGO OPERATION REPORT - operation type, start time, quantity handled, rate, holds or tanks, stoppages and weather impact.
-7. COMPLETION OF CARGO REPORT - completion time, final quantity, drafts, ROB, documents and readiness to sail.
-8. ANCHOR REPORT - anchor drop or aweigh time, position, depth, reason, weather and ROB.
-9. DRIFTING REPORT - drifting start or stop time, position, reason, weather, course, speed and ROB.
-10. BUNKERING REPORT - supplier, port or position, start and completion, grades, quantities, ROB, BDN and samples.
-11. STOP / RESUME REPORT - stop or resume time, position, reason, weather, engine status, ROB and operational impact.
-12. BUNKER SURVEY REPORT - surveyor, time, location, tank soundings, quantities, density, temperature, ROB and survey documents.
-13. INCIDENT / ACCIDENT REPORT - time, position, persons or equipment involved, facts, damage, immediate actions and supporting evidence.
-14. SHIFTING REPORT - shifting start and completion, berth or anchorage, reason, drafts, ROB, weather and manoeuvring details.
-15. FUEL CHANGE-OVER REPORT - start and completion time, position, fuel grades, tanks, ROB, sulphur compliance and operational remarks.
-16. SPEED CHANGE-OVER REPORT - time, position, old and new speed, engine settings, reason, weather, ETA and consumption impact.
+1. NOON REPORT - Report details, steaming since last report, ROB, daily consumption, equipment consumption, calorific value, ME performance, weather conditions, total since COSP, next port, estimated ROB on arrival, voyage info, cargo onboard, remarks.
+2. ARRIVAL REPORT (EOSP) - Report details, EOSP, POB, anchored/berthed, FWE, NOR tendered, steaming to EOSP, EOSP to anchor/berth/FWE, total COSP to EOSP, cargo, drafts, port schedule, delays, remarks.
+3. DEPARTURE REPORT (COSP) - Report details, SBE, POB, all cast off, pilot off, ROB at COSP, cargo onboard, departure draft, next port, ETA next port, estimated arrival ROB, remarks.
+5. ANCHORAGE / DRIFTING - DAILY REPORT - Report details, ROB, daily consumption, equipment consumption, calorific value, drifting details, weather, bunkers/FW, expected berthing/departure, estimated departure ROB, remarks.
+6. IN PORT DAILY REPORT - Report details, ROB, daily consumption, bunkers/FW, cargo last 24 hours (HoldWise 1H-7H), total cargo to date, cargo remaining, weather, port schedule, estimated departure ROB, delays, remarks.
+7. BUNKERING REPORT - Report details, ROB before/after, bunker received, survey adjusted qty, barge name & timings, hose & pumping timings, documentation, departure, LOP, remarks.
+8. SHIFTING REPORT - Shifting types: Anchorage to Another Anchorage, Anchorage to Berth, Berth to Berth, Berth to Anchorage. Port details, commence/completed timings, totals (distance, duration, consumption, ROBs), weather, reason, cargo, draft, remarks.
+9. FUEL CHANGE-OVER REPORT - Fuel grades, commence & completion timings and positions, ECA details, consumption, calorific value, ME performance, remarks.
+10. STOP / RESUME REPORT - Stop/resume details, positions, STW, SOG, ROBs, stoppage distance/consumption/duration, voyage details, remarks.
+11. NOR REPORT - Report details, NOR tendered position & time, NOR acceptance time & party, vessel & cargo readiness, exceptions/remarks.
+12. CARGO OPERATION REPORT - Port/berth/terminal, operation timings, cargo name & quantities (period, total, remaining), holds distribution, drafts, delays, remarks.
+13. COMPLETION OF CARGO REPORT - Port/berth/terminal, completion timings, cargo name & final quantities, holds distribution, drafts, delays, remarks.
+14. ANCHOR REPORT - Anchor drop/aweigh, position, time, water depth, reason, ROB, weather, remarks.
+15. DRIFTING REPORT - Drifting start/stop positions & times, heading, STW, SOG, reason, ROB, weather, remarks.
+16. INCIDENT / ACCIDENT REPORT - Incident position & time, incident type, parties/equipment involved, facts, damage/impact, immediate actions, supporting documents, remarks.
+17. BUNKER SURVEY REPORT - Location, surveyor, date/time, tank soundings, fuel grades/density/temp, ROB before/after survey, survey documents, discrepancies/remarks.
+18. SPEED CHANGE-OVER REPORT - Position, date/time, steaming since last report, speed change (STW/SOG), engine settings/RPM/load before & after, reason, weather, ETA, remarks.
+19. DRYDOCK DAILY REPORT - Shipyard, berth/dock, drydock position, ROB, daily/equipment consumption, weather, bunkers/FW, expected departure, estimated departure ROB, daily jobs & remarks.
 
 Send each report through the ODAS reporting workflow at the required event time. Include UTC date and time, latitude and longitude, units, ROB by fuel grade, supporting BDN or survey documents, and an explanation for any missing or abnormal data.
 
@@ -301,29 +348,60 @@ export const MAJOR_WAYPOINTS: Array<[string, string, string, string]> = [
 
 export function buildVoyagePlanEmail(v: Voyage): ReportEmail {
   const s = getRouteSummary(v);
+  const sourceDate = v.etdIso ? new Date(v.etdIso) : null;
+  const departure = sourceDate && !Number.isNaN(sourceDate.getTime())
+    ? `${sourceDate.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+    : v.etdDisplay || 'Not specified';
+  const detailRows = [
+    ['Client Name', v.client, 'Departure Port', v.portFrom],
+    ['Vessel Name', v.vessel, 'Arrival Port', v.portTo],
+    ['Departure', departure, 'Reference', v.routeRef],
+  ];
+  const detailTable = detailRows.map((row) => `${row[0].padEnd(18)} | ${row[1].padEnd(24)} | ${row[2].padEnd(18)} | ${row[3]}`).join('\n');
+  const summaryTable = [
+    'Route'.padEnd(24) + ' | TTL Dist. (nm) | Avg. Speed (kts) | TTL Cons. (mt) | Sailing Time (days) | ETA (UTC)',
+    '-'.repeat(24) + '-+-' + '-'.repeat(15) + '-+-' + '-'.repeat(17) + '-+-' + '-'.repeat(15) + '-+-' + '-'.repeat(19) + '-+-' + '-'.repeat(20),
+    `${s.route.padEnd(24)} | ${s.ttlDistNm.padEnd(15)} | ${s.speedKts.padEnd(17)} | ${s.consMtDay.padEnd(15)} | ${s.sailingDays.padEnd(19)} | ${s.etaUtc}`,
+  ].join('\n');
+  const waypointTable = [
+    'Key Waypoint'.padEnd(24) + ' | Time (Expected)'.padEnd(24) + ' | Dist. (nm)'.padEnd(12) + ' | RL or GC | Remark (if any)',
+    '-'.repeat(24) + '-+-' + '-'.repeat(24) + '-+-' + '-'.repeat(12) + '-+-' + '-'.repeat(8) + '-+-' + '-'.repeat(18),
+    ...MAJOR_WAYPOINTS.map(([waypoint, expectedTime, distance, routeType]) => `${waypoint.padEnd(24)} | ${expectedTime.padEnd(24)} | ${distance.padEnd(12)} | ${routeType.padEnd(8)} | `),
+  ].join('\n');
   const body = `To: Master ${v.vessel}
-Fm: Accelleron Voyage Operations
+From: Accelleron Voyage Operations
+Reference: ${v.routeRef}
 
-Itinerary: ${v.portFrom} - ${v.portTo}
+Subject: Voyage Plan - ${v.portFrom} to ${v.portTo}
 
-VOYAGE PLAN
-Please find attached the Voyage Plan (route map, major waypoints and route forecast).
+Dear Captain,
+
+Please find below the voyage plan for ${v.vessel}. The route map is included as an attachment for review together with the route details and major waypoints.
+
+VOYAGE DETAILS
+${detailTable}
+
+ROUTE MAP
+Voyage route map attached. Please review the route, port sequence, and intended waypoints before departure.
 
 ROUTE SUMMARY
-Route        : ${s.route}
-TTL Distance : ${s.ttlDistNm} nm
-Speed        : ${s.speedKts} kts
-Total Cons   : ${s.consMtDay}
-Sailing Time : ${s.sailingDays} days
-ETA          : ${s.etaUtc}
+${summaryTable}
 
-Please refer to the approximate waypoints indicated for your voyage plan. Waypoints (if any) are for guidance only and not to be used for navigation. Please note in the event of changes to the above itinerary master must inform us and advise reason for same.
+ROUTE RECOMMENDATION
+Shortest safe navigable route to destination per the major waypoints below.
 
-Best Regards
+MAJOR WAYPOINTS
+${waypointTable}
+
+Please review the above itinerary, route, speed, ETA, and waypoints. Waypoints and recommendations are for guidance only and must not be used as a substitute for the vessel's approved passage plan or navigational procedures.
+
+The Master remains responsible for safe navigation and compliance with applicable regulations, loadline requirements, ECA restrictions, chart information, and vessel operating limits. Please advise Accelleron Voyage Operations immediately if the itinerary, route, draft, speed, ETA, or any safety restriction changes.
+
+Best Regards,
 Accelleron Voyage Operations`;
   return {
-    to: v.clientEmail,
-    subject: `Voyage Plan \u2014 ${v.vessel} \u2014 ${v.portFrom} - ${v.portTo}`,
+    to: `master@${v.vessel.toLowerCase().replace(/[^a-z0-9]+/g, '')}.com`,
+    subject: `Voyage Plan - ${v.vessel} - ${v.portFrom} - ${v.portTo}`,
     attachments: ['Voyage Plan.pdf'],
     body,
   };
@@ -331,26 +409,102 @@ Accelleron Voyage Operations`;
 
 // --- Forecast ----------------------------------------------------------------
 
-export function buildForecastEmail(v: Voyage): ReportEmail {
+export type ForecastCriterion = 'wind' | 'waves' | 'current' | 'swell' | 'gusts' | 'visibility' | 'airTemp' | 'seaTemp';
+
+export interface ForecastPoint {
+  dateTime: string;
+  latLon: string;
+  lat?: number;
+  lon?: number;
+  weather: Partial<Record<ForecastCriterion, string>>;
+}
+
+export interface ForecastOptions {
+  durationHours: number;
+  intervalHours: number;
+  averageSpeedKn: number;
+  distanceToGoNm: number;
+  sourceLabel: string;
+  sourceDateTime: string;
+  criteria: ForecastCriterion[];
+  points: ForecastPoint[];
+}
+
+const FORECAST_CRITERION_LABELS: Record<ForecastCriterion, string> = {
+  wind: 'Wind',
+  waves: 'Waves',
+  current: 'Current',
+  swell: 'Swell',
+  gusts: 'Wind Gusts',
+  visibility: 'Visibility',
+  airTemp: 'Air Temperature',
+  seaTemp: 'Sea Water Temperature',
+};
+
+export function buildForecastEmail(v: Voyage, options?: ForecastOptions): ReportEmail {
+  const forecast = options ?? {
+    durationHours: 72,
+    intervalHours: 6,
+    averageSpeedKn: v.cpSpeed || 13,
+    distanceToGoNm: (v.cpSpeed || 13) * 72,
+    sourceLabel: 'Latest available voyage position',
+    sourceDateTime: 'Not available',
+    criteria: ['wind', 'waves', 'current', 'swell'],
+    points: [],
+  };
+  const speed = Math.max(1, forecast.averageSpeedKn);
+  const predictedEta = new Date(Date.now() + (forecast.distanceToGoNm / speed) * 3600_000);
+  const fmtDate = (date: Date) => date.toUTCString().replace(' GMT', ' UTC');
+  const criterionHeaders = forecast.criteria.map((criterion) => FORECAST_CRITERION_LABELS[criterion]);
+  const pointRows = forecast.points.map((point) => [
+    point.dateTime,
+    point.latLon,
+    ...forecast.criteria.map((criterion) => point.weather[criterion] ?? '--'),
+  ]);
+  const columnWidths = ['Date/Time (UTC)', 'Lat / Lon', ...criterionHeaders].map((header, index) => Math.max(header.length, ...pointRows.map((row) => row[index]?.length ?? 0)));
+  const columnGap = '        ';
+  const formatRow = (row: string[]) => row.map((value, index) => value.padEnd(columnWidths[index])).join(columnGap);
+  const formatHeader = (row: string[]) => row.map((value, index) => {
+    const padding = Math.max(0, columnWidths[index] - value.length);
+    const left = Math.floor(padding / 2);
+    return `${' '.repeat(left)}${value}${' '.repeat(padding - left)}`;
+  }).join(columnGap);
+  const table = pointRows.length
+    ? [formatHeader(['Date/Time (UTC)', 'Lat / Lon', ...criterionHeaders]), '-'.repeat(columnWidths.reduce((sum, width) => sum + width, 0) + (columnWidths.length - 1) * columnGap.length), ...pointRows.map(formatRow)].join('\n')
+    : 'No route positions are available. Plot or activate a route before generating the forecast.';
   const body = `To: Master ${v.vessel}
-Fm: Accelleron Voyage Operations
+From: Accelleron Voyage Operations
+Date: ${fmtDate(new Date())}
+Reference: ${v.routeRef}
 
-Itinerary: ${v.portFrom} - ${v.portTo}
+Subject: Voyage Weather Forecast - ${v.portFrom} to ${v.portTo}
 
-VOYAGE FORECAST
-Please find attached the latest voyage forecast covering wind, seas, current and swell along the recommended route.
+Dear Captain,
 
-ROUTE RECOMMENDATION
-Our last route recommendation remains valid.
+Please find below the weather forecast for ${v.vessel} on the ${v.portFrom} to ${v.portTo} voyage.
 
-Please note that forecasts are advisory in nature and basis best available data from third party sources and subject to change. Above expected positions in forecast are not to be used for navigation.
+VOYAGE PREDICTION
+Predicted Speed: ${speed.toFixed(1)} knots
+Predicted ETA: ${fmtDate(predictedEta)}
+Distance to Go: ${forecast.distanceToGoNm.toFixed(0)} NM
 
-Best Regards
-Accelleron Voyage Operations`;
+RPM SETTING AND SPEED OPTIMIZATION:
+The forecast uses the expected average voyage speed of ${speed.toFixed(1)} knots, not the latest daily speed. The vessel should maintain the expected speed unless the Master determines that safety, traffic, machinery, or navigational conditions require otherwise.
+
+WEATHER SUMMARY:
+${table}
+
+IMPORTANT
+Forecasts are advisory and based on the best available third-party data. Conditions may change. The Master remains responsible for safe navigation. Please report any material change in route, speed, weather, ETA, or vessel condition through the Vessel Reporting Portal.
+
+Warm Regards,
+The Accelleron Team
+routing@odas.com
+ODAS Help Center | For Emergencies Call: +1 (855) 229 9558`;
   return {
     to: v.clientEmail,
-    subject: `Voyage Forecast \u2014 ${v.vessel} \u2014 ${v.portFrom} - ${v.portTo}`,
-    attachments: ['Voyage Forecast.pdf'],
+    subject: `Voyage Forecast - ${v.vessel} - ${v.portFrom} - ${v.portTo}`,
+    attachments: [],
     body,
   };
 }

@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useTheme } from '../theme';
@@ -18,7 +17,6 @@ export function AppFooterControls() {
 
   const [theme, toggleTheme] = useTheme();
   const [profileOpen, setProfileOpen] = useState(false);
-  const navigate = useNavigate();
 
   // Close the profile menu on any outside click.
   useEffect(() => {
@@ -91,7 +89,7 @@ export function AppFooterControls() {
               role="menuitem"
               onClick={() => {
                 setProfileOpen(false);
-                navigate('/settings');
+                window.open('/settings', '_blank', 'noopener,noreferrer');
               }}
             >
               <i className="fas fa-gear" aria-hidden="true" />

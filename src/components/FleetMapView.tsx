@@ -3,6 +3,7 @@ import { MapContainer, Marker, Polyline, TileLayer, Tooltip } from 'react-leafle
 import L from 'leaflet';
 
 import { PORT_COORDS } from '../data/fleet';
+import { unwrapRouteCoordinates } from '../data/antimeridian';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
@@ -155,7 +156,7 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
           hoveredId === v.id && v.from && v.to ? (
             <Polyline
               key={`passage-${v.id}`}
-              positions={[v.from, v.to]}
+              positions={unwrapRouteCoordinates([v.from, v.to])}
               pathOptions={{
                 color: priorityColor(v.priority),
                 weight: 2,

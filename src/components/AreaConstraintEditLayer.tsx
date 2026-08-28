@@ -3,6 +3,7 @@ import { Marker } from 'react-leaflet';
 import L from 'leaflet';
 
 import type { AreaConstraint } from '../data/areaConstraints';
+import { normalizeCoordinate, unwrapRouteCoordinates } from '../data/antimeridian';
 
 /**
  * Interactive on-map editing handles for the selected area constraint.
@@ -69,13 +70,11 @@ export function AreaConstraintEditLayer({
             {/* Midpoint handles (drawn first so vertices sit on top). */}
             {ring.map((pt, pi) => {
               const next = ring[(pi + 1) % ring.length];
-              // Normalize next longitude to shortest-path midpoint (antimeridian-safe)
-              let nextLon = next[1];
-              while (nextLon - pt[1] > 180) nextLon -= 360;
-              while (nextLon - pt[1] < -180) nextLon += 360;
+              const unwrapped = unwrapRouteCoordinates([pt, next]);
+              const nextLon = unwrapped[1][1];
               const mid: [number, number] = [
                 round5((pt[0] + next[0]) / 2),
-                round5((pt[1] + nextLon) / 2),
+                normalizeCoordinate([0, round5((pt[1] + nextLon) / 2)])[1],
               ];
               return (
                 <Marker
@@ -84,7 +83,7 @@ export function AreaConstraintEditLayer({
                   icon={mIcon}
                   keyboard={false}
                   eventHandlers={{
-                    click: () => onInsert(ri, pi, mid),
+                    click: () => onInsert(ri, pi, normalizeCoordinate(mid)),
                   }}
                 />
               );
@@ -101,7 +100,7 @@ export function AreaConstraintEditLayer({
                 eventHandlers={{
                   drag: (e) => {
                     const ll = (e.target as L.Marker).getLatLng();
-                    onMove(ri, pi, [round5(ll.lat), round5(ll.lng)]);
+                    onMove(ri, pi, normalizeCoordinate([round5(ll.lat), round5(ll.lng)]));
                   },
                   click: () => {
                     if (canRemove) onRemove(ri, pi);

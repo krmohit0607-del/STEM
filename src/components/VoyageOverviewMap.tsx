@@ -8,6 +8,7 @@ import {
   STUB_ROWS,
   getRoutePath,
 } from '../data/fleet';
+import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
 import { WeatherPointControl } from './WeatherPointControl';
@@ -123,28 +124,23 @@ interface InnerProps {
 
 function VoyageOverviewInner({ row }: InnerProps) {
   const path = useMemo(() => getRoutePath(row), [row]);
+  const renderPath = useMemo(() => unwrapRouteCoordinates(path), [path]);
   const positions: LatLngExpression[] = useMemo(
-    () => path.map(([lat, lon]) => [lat, lon] as LatLngExpression),
-    [path],
+    () => renderPath.map(([lat, lon]) => [lat, lon] as LatLngExpression),
+    [renderPath],
   );
 
   // Fit map bounds around the polyline (plus a little padding).
   const bounds: LatLngBoundsExpression | null = useMemo(() => {
     if (path.length === 0) return null;
-    const lats = path.map(([lat]) => lat);
-    const lons = path.map(([, lon]) => lon);
-    const pad = 4;
-    return [
-      [Math.min(...lats) - pad, Math.min(...lons) - pad],
-      [Math.max(...lats) + pad, Math.max(...lons) + pad],
-    ];
+    return getAntimeridianAwareBounds(path, 4);
   }, [path]);
 
   // Animate the ship marker along the polyline.
   const [progress, setProgress] = useState<number>(0);
   const rafRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
-  const lastIdx = Math.max(0, path.length - 1);
+  const lastIdx = Math.max(0, renderPath.length - 1);
 
   useEffect(() => {
     if (lastIdx === 0) return;
@@ -169,14 +165,14 @@ function VoyageOverviewInner({ row }: InnerProps) {
     };
   }, [lastIdx]);
 
-  const shipPos = useMemo(() => samplePath(path, progress), [path, progress]);
+  const shipPos = useMemo(() => samplePath(renderPath, progress), [renderPath, progress]);
   const shipHeading = useMemo(
     () =>
       bearingDeg(
-        samplePath(path, Math.max(0, progress - 0.5)),
-        samplePath(path, Math.min(lastIdx, progress + 0.5)),
+        samplePath(renderPath, Math.max(0, progress - 0.5)),
+        samplePath(renderPath, Math.min(lastIdx, progress + 0.5)),
       ),
-    [path, progress, lastIdx],
+    [renderPath, progress, lastIdx],
   );
   const icon = useMemo(() => shipIcon(shipHeading), [shipHeading]);
 

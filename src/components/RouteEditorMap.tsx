@@ -10,6 +10,7 @@ import {
   useMapEvents,
 } from 'react-leaflet';
 import L, { type LatLngExpression } from 'leaflet';
+import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
 
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
@@ -336,8 +337,8 @@ function FitBounds({ points }: { points: EditorPoint[] }) {
       map.setView([points[0].lat, points[0].lon], Math.max(map.getZoom(), 4));
       return;
     }
-    const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 9 });
+    const bounds = getAntimeridianAwareBounds(points.map((p) => [p.lat, p.lon]));
+    if (bounds) map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40], maxZoom: 9 });
     // Only the first non-empty render fits; deliberately ignore later changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points.length]);
@@ -492,11 +493,11 @@ export function RouteEditorMap({
           a new waypoint between the two endpoints. */}
       {points.slice(0, -1).map((p, i) => {
         const next = points[i + 1];
-        const visible = legPositions(p, next, p.legType ?? 'rhumb');
-        const hit: LatLngExpression[] = [
+        const visible = unwrapRouteCoordinates(legPositions(p, next, p.legType ?? 'rhumb') as Array<[number, number]>);
+        const hit: LatLngExpression[] = unwrapRouteCoordinates([
           [p.lat, p.lon],
           [next.lat, next.lon],
-        ];
+        ]);
         return (
           <Fragment key={`seg-${p.id}-${editable ? 'edit' : 'lock'}`}>
             <Polyline
@@ -534,7 +535,7 @@ export function RouteEditorMap({
           return (
             <Polyline
               key={r.id}
-              positions={r.path as LatLngExpression[]}
+              positions={unwrapRouteCoordinates(r.path) as LatLngExpression[]}
               pathOptions={{
                 color: r.color,
                 weight: isSel ? 5 : 3,

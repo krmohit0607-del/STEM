@@ -14,16 +14,19 @@ import {
   setMapShipMarkers,
   setMapPlannedColor,
   setMapRouteWaypoints,
+    clearActiveSimRoute,
   setSimWeatherHour,
   requestRouteEdit,
   useActiveSimRoute,
   useEditCompareRoute,
   useRouteEditActive,
 } from '../data/routeSimulatorStore';
-import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute } from '../data/optimizationStore';
+import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute, bumpSavedRoutes } from '../data/optimizationStore';
 import { computeRouteMetrics, DEFAULT_MARKET_FACTORS, type RouteMetrics } from '../data/routeMetrics';
 import { openScenarioReport } from '../data/optimizationReport';
 import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
+import { unwrapRouteCoordinates } from '../data/antimeridian';
+import * as XLSX from 'xlsx';
 
 /**
  * Route Simulator panel — multi-route comparison + playback, styled after the
@@ -304,9 +307,10 @@ function weatherAt(
   bounds: LatLngBounds | null,
   hour: number,
 ): number {
-  const lastIdx = path.length - 1;
+  const renderPath = unwrapRouteCoordinates(path);
+  const lastIdx = renderPath.length - 1;
   const clamped = Math.max(0, Math.min(1, frac));
-  const [lat, lon] = samplePath(path, clamped * lastIdx);
+  const [lat, lon] = samplePath(renderPath, clamped * lastIdx);
   if (bounds) {
     const live = sampleLiveField(lat, lon, factor.liveId, bounds, hour);
     if (live && Number.isFinite(live.magnitude)) return Math.max(0, live.magnitude);
@@ -949,6 +953,16 @@ export function RouteSimulatorPanel() {
 
   const simElapsedHours = simClock * simMaxHours;
   const cursorDate = new Date(simBaseDate.getTime() + simElapsedHours * 3600_000);
+  const simWeatherHour = clampHour(simElapsedHours);
+
+  // Fetch the weather slice for the current simulation time so the compass
+  // directions follow playback instead of remaining fixed at the initial hour.
+  useEffect(() => {
+    if (!simBounds) return;
+    ['waves', 'swell', 'wind', 'currents'].forEach((factorId) =>
+      ensureLiveData(factorId, simBounds, simWeatherHour, () => setLiveVersion((v) => v + 1)),
+    );
+  }, [simBounds, simWeatherHour]);
 
   /**
    * Vessel position on a route after `hours` of sailing. Uses the per-leg
@@ -956,10 +970,11 @@ export function RouteSimulatorPanel() {
    * otherwise falls back to constant-speed interpolation by path fraction.
    */
   const posAtHours = (r: SimRoute, hours: number): [number, number] => {
-    const byTime = positionAtHours(r.path, r.timeHours, hours);
+    const renderPath = unwrapRouteCoordinates(r.path);
+    const byTime = positionAtHours(renderPath, r.timeHours, hours);
     if (byTime) return byTime;
     const frac = r.hours > 0 ? Math.min(1, hours / r.hours) : 0;
-    return samplePath(r.path, frac * (r.path.length - 1));
+    return samplePath(renderPath, frac * (renderPath.length - 1));
   };
 
   /** Per-route fraction sailed + current-cursor weather on the chart factor. */
@@ -1081,6 +1096,18 @@ export function RouteSimulatorPanel() {
     });
   };
 
+  const deleteRoute = (route: SimRoute) => {
+    if (route.savedId) {
+      deleteSavedRoute(route.savedId);
+      return;
+    }
+    if (route.id === 'active-planned') {
+      requestRouteEdit('clear');
+      return;
+    }
+    clearActiveSimRoute();
+  };
+
   /** Mark a route as the single active (primary) route for the vessel. */
   const setRouteActive = (routeId: string) => {
     setActiveRouteId(routeId);
@@ -1153,36 +1180,114 @@ export function RouteSimulatorPanel() {
     setExportOpen(false);
   };
 
-  /** Open the file picker to import saved routes from a JSON file. */
+  const importedWaypoints = (points: Array<[number, number]>, name: string): SavedRoute => ({
+    id: `route-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: name || `${t('imported', 'Imported route')}`,
+    savedAt: new Date().toISOString(),
+    waypoints: points.map(([lat, lon], index) => ({
+      id: `wp-import-${Date.now()}-${index}`,
+      name: index === 0 ? 'Departure' : index === points.length - 1 ? 'Arrival' : `WP ${index}`,
+      lat: decToDM(lat, true), lon: decToDM(lon, false), course: 0, speed: SERVICE_SPEED_KN,
+      distanceFromPrev: index === 0 ? 0 : haversineNM(points[index - 1][0], points[index - 1][1], lat, lon),
+      eta: '', drift: false, isPort: index === 0 || index === points.length - 1, legType: 'rhumb',
+    })),
+  });
+
+  const parseRouteText = (text: string, extension: string): SavedRoute[] => {
+    if (extension === 'rtz' || extension === 'xml') {
+      const points: Array<[number, number]> = [];
+      const matches = text.matchAll(/<position\b[^>]*\blat="([-+\d.]+)"[^>]*\blon="([-+\d.]+)"[^>]*\/?\s*>/gi);
+      for (const match of matches) points.push([Number(match[1]), Number(match[2])]);
+      return points.length >= 2 ? [importedWaypoints(points, 'Imported RTZ route')] : [];
+    }
+    const lines = text.split(/\r?\n/).filter((line) => line.trim());
+    if (lines.length < 2) return [];
+    const parseCsv = (line: string) => line.split(',').map((value) => value.trim().replace(/^"|"$/g, ''));
+    const parsedRows = lines.map(parseCsv);
+    const headerRowIndex = findCoordinateHeaderRow(parsedRows);
+    if (headerRowIndex < 0) return [];
+    const header = parsedRows[headerRowIndex].map(normalizeColumnName);
+    const latIndex = findCoordinateColumn(header, 'lat');
+    const lonIndex = findCoordinateColumn(header, 'lon');
+    if (latIndex < 0 || lonIndex < 0) return [];
+    const points = parsedRows.slice(headerRowIndex + 1).map((row) => [parseCoordinateValue(row[latIndex], true), parseCoordinateValue(row[lonIndex], false)] as [number, number]).filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    return points.length >= 2 ? [importedWaypoints(points, 'Imported CSV route')] : [];
+  };
+
+  const normalizeColumnName = (value: unknown): string => String(value ?? '').toLowerCase().replace(/[^a-z]/g, '');
+
+  const findCoordinateColumn = (header: string[], axis: 'lat' | 'lon'): number => {
+    const aliases = axis === 'lat' ? ['lat', 'latitude', 'y', 'northing'] : ['lon', 'lng', 'longitude', 'x', 'easting'];
+    return header.findIndex((value) => aliases.includes(value) || aliases.some((alias) => value.startsWith(alias)));
+  };
+
+  const findCoordinateHeaderRow = (rows: unknown[][]): number => rows.slice(0, 20).findIndex((row) => {
+    const header = row.map(normalizeColumnName);
+    return findCoordinateColumn(header, 'lat') >= 0 && findCoordinateColumn(header, 'lon') >= 0;
+  });
+
+  const parseCoordinateValue = (value: unknown, latitude: boolean): number => {
+    if (typeof value === 'number') return value;
+    const raw = String(value ?? '').trim();
+    if (!raw) return NaN;
+    const parsed = Number(raw.replace(',', '.'));
+    if (Number.isFinite(parsed)) return parsed;
+    const result = dmToDec(raw);
+    return latitude && Math.abs(result) <= 90 || !latitude && Math.abs(result) <= 180 ? result : NaN;
+  };
+
+  const parseImportedJson = (text: string): SavedRoute[] => {
+    const parsed = JSON.parse(text);
+    const incoming = Array.isArray(parsed) ? parsed : [parsed];
+    return incoming.flatMap((route, index) => {
+      if (route && Array.isArray(route.waypoints)) {
+        const points: Array<[number, number]> = route.waypoints.map((wp: { lat?: string | number; lon?: string | number; lng?: string | number }) => [typeof wp.lat === 'number' ? wp.lat : dmToDec(String(wp.lat ?? '')), typeof wp.lon === 'number' ? wp.lon : dmToDec(String(wp.lon ?? wp.lng ?? ''))] as [number, number]).filter((point: [number, number]) => Number.isFinite(point[0]) && Number.isFinite(point[1]));
+        return points.length >= 2 ? [importedWaypoints(points, route.name || `Imported route ${index + 1}`)] : [];
+      }
+      if (route && Array.isArray(route.points)) {
+        const points: Array<[number, number]> = route.points.map((point: [number, number]) => [Number(point[0]), Number(point[1])] as [number, number]).filter((point: [number, number]) => Number.isFinite(point[0]) && Number.isFinite(point[1]));
+        return points.length >= 2 ? [importedWaypoints(points, route.name || `Imported route ${index + 1}`)] : [];
+      }
+      return [];
+    });
+  };
+
+  /** Open the file picker for JSON, CSV, RTZ, or Excel route files. */
   const importRoutes = () => importInputRef.current?.click();
 
-  const onImportFile = (e: ChangeEvent<HTMLInputElement>) => {
+  const onImportFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result));
-        const incoming: SavedRoute[] = Array.isArray(parsed) ? parsed : [parsed];
-        const now = Date.now();
-        const cleaned = incoming
-          .filter((r) => r && Array.isArray(r.waypoints))
-          .map((r, i) => ({
-            ...r,
-            id: `route-${now}-${i}`,
-            name: r.name || `${t('imported', 'Imported')} ${i + 1}`,
-            savedAt: r.savedAt || new Date().toISOString(),
-          }));
-        if (cleaned.length === 0) return;
-        const next = [...savedRoutes, ...cleaned];
-        setSavedRoutes(next);
-        writeSavedRoutes(next);
-      } catch {
-        window.alert(t('importRoutesError', 'Could not import routes: invalid file.'));
+    try {
+      const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+      let cleaned: SavedRoute[] = [];
+      if (extension === 'xlsx' || extension === 'xls') {
+        const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+        workbook.SheetNames.forEach((sheetName) => {
+          const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: true, defval: '' });
+          const headerRowIndex = findCoordinateHeaderRow(rows);
+          if (headerRowIndex < 0) return;
+          const header = (rows[headerRowIndex] ?? []).map(normalizeColumnName);
+          const latIndex = findCoordinateColumn(header, 'lat');
+          const lonIndex = findCoordinateColumn(header, 'lon');
+          if (latIndex < 0 || lonIndex < 0) return;
+          const points = rows.slice(headerRowIndex + 1).map((row) => [parseCoordinateValue(row[latIndex], true), parseCoordinateValue(row[lonIndex], false)] as [number, number]).filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+          if (points.length >= 2) cleaned.push(importedWaypoints(points, `${sheetName} - Imported route`));
+        });
+      } else {
+        const text = await file.text();
+        cleaned = extension === 'json' ? parseImportedJson(text) : parseRouteText(text, extension);
       }
-    };
-    reader.readAsText(file);
+      if (cleaned.length === 0) throw new Error('No route coordinates found');
+      const next = [...savedRoutes, ...cleaned];
+      setSavedRoutes(next);
+      writeSavedRoutes(next);
+      bumpSavedRoutes();
+      setSavedPassageMsg(`${cleaned.length} route${cleaned.length === 1 ? '' : 's'} imported successfully.`);
+    } catch {
+      window.alert(t('importRoutesError', 'Could not import routes: invalid or unsupported file. Use JSON, CSV, RTZ, XLS, or XLSX.'));
+    }
   };
 
   /** Merge the currently visible saved routes into a single new route. */
@@ -1439,25 +1544,48 @@ export function RouteSimulatorPanel() {
               >
                 <i className="fas fa-bookmark" aria-hidden="true" />
               </button>
-              {savedPassageMsg && <span className="fv-sim2__routes-note">{savedPassageMsg}</span>}
-              {optimizedResults.length > 0 && (
-                <button
-                  type="button"
-                  className="fv-sim2__routes-btn"
-                  onClick={() => {
+              <span className="fv-sim2__routes-tools" aria-label={t('routeTools', 'Route tools')}>
+                <button type="button" className="fv-sim2__routes-btn" onClick={importRoutes} title={t('importRoutes', 'Import routes')} aria-label={t('importRoutes', 'Import routes')}>
+                  <i className="fas fa-upload" aria-hidden="true" />
+                </button>
+                <button type="button" className="fv-sim2__routes-btn" onClick={exportRoutes} disabled={simRoutes.length === 0} title={t('exportRoutes', 'Export routes')} aria-label={t('exportRoutes', 'Export routes')}>
+                  <i className="fas fa-download" aria-hidden="true" />
+                </button>
+                <button type="button" className="fv-sim2__routes-btn" onClick={mergeVisibleRoutes} disabled={mergeableCount < 2} title={t('mergeRoutes', 'Merge routes')} aria-label={t('mergeRoutes', 'Merge routes')}>
+                  <i className="fas fa-object-group" aria-hidden="true" />
+                </button>
+                <button type="button" className="fv-sim2__routes-btn" onClick={splitSelectedRoute} disabled={!canSplit} title={t('splitRoute', 'Split route')} aria-label={t('splitRoute', 'Split route')}>
+                  <i className="fas fa-code-branch" aria-hidden="true" />
+                </button>
+                {routeEditActive ? (
+                  <>
+                    <button type="button" className="fv-sim2__routes-btn fv-sim2__routes-btn--on" onClick={() => requestRouteEdit('activate')} title={t('activateEditHint', 'Keep this edited route')} aria-label={t('activate', 'Activate')}>
+                      <i className="fas fa-circle-check" aria-hidden="true" />
+                    </button>
+                    <button type="button" className="fv-sim2__routes-btn" onClick={() => requestRouteEdit('discard')} title={t('discardEditHint', 'Discard edits and restore the original route')} aria-label={t('discard', 'Discard')}>
+                      <i className="fas fa-rotate-left" aria-hidden="true" />
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="fv-sim2__routes-btn" onClick={() => requestRouteEdit('start')} title={t('editRouteHint', 'Duplicate the route and edit the copy')} aria-label={t('duplicateEdit', 'Duplicate & Edit')}>
+                    <i className="fas fa-pen-to-square" aria-hidden="true" />
+                  </button>
+                )}
+                {optimizedResults.length > 0 && (
+                  <button type="button" className="fv-sim2__routes-btn" onClick={() => {
                     const visible = optimizedResults.filter((o) => !hiddenIds.includes(o.id));
                     openScenarioReport(
                       visible.map((o) => ({ name: o.name, metrics: o.metrics })),
                       optimizationRun,
                       t('nmUnit', 'NM'),
                     );
-                  }}
-                  title={t('optimizationReport', 'Optimization report')}
-                >
-                  <i className="fas fa-file-lines" aria-hidden="true" />{' '}
-                  {t('optimizationReport', 'Optimization report')}
-                </button>
-              )}
+                  }} title={t('optimizationReport', 'Optimization report')} aria-label={t('optimizationReport', 'Optimization report')}>
+                    <i className="fas fa-file-lines" aria-hidden="true" />
+                  </button>
+                )}
+                <input ref={importInputRef} type="file" accept=".json,.csv,.rtz,.xml,.xls,.xlsx,application/json,text/csv,application/xml,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onImportFile} hidden />
+              </span>
+              {savedPassageMsg && <span className="fv-sim2__routes-note">{savedPassageMsg}</span>}
             </div>
             <div className="fv-sim2__table-wrap">
               <table className="fv-sim2__table">
@@ -1466,65 +1594,6 @@ export function RouteSimulatorPanel() {
                     <th className="fv-sim2__col-check" aria-label={t('show', 'Show')} />
                     <th className="fv-sim2__col-name">
                       <span className="fv-sim2__col-name-label">{t('route', 'Route')}</span>
-                      <span className="fv-sim2__routes-tools">
-                        <button type="button" className="fv-sim2__routes-btn"
-                          onClick={importRoutes}
-                          title={t('importRoutes', 'Import routes')}
-                          aria-label={t('importRoutes', 'Import routes')}>
-                          <i className="fas fa-file-import" aria-hidden="true" />
-                        </button>
-                        <button type="button" className="fv-sim2__routes-btn"
-                          onClick={exportRoutes}
-                          disabled={simRoutes.length === 0}
-                          title={t('exportRoutes', 'Export routes')}
-                          aria-label={t('exportRoutes', 'Export routes')}>
-                          <i className="fas fa-file-export" aria-hidden="true" />
-                        </button>
-                        <button type="button" className="fv-sim2__routes-btn"
-                          onClick={mergeVisibleRoutes}
-                          disabled={mergeableCount < 2}
-                          title={t('mergeRoutes', 'Merge routes')}
-                          aria-label={t('mergeRoutes', 'Merge routes')}>
-                          <i className="fas fa-code-merge" aria-hidden="true" />
-                        </button>
-                        <button type="button" className="fv-sim2__routes-btn"
-                          onClick={splitSelectedRoute}
-                          disabled={!canSplit}
-                          title={t('splitRoute', 'Split route')}
-                          aria-label={t('splitRoute', 'Split route')}>
-                          <i className="fas fa-scissors" aria-hidden="true" />
-                        </button>
-                        {routeEditActive ? (
-                          <>
-                            <button type="button" className="fv-sim2__routes-btn fv-sim2__routes-btn--on"
-                              onClick={() => requestRouteEdit('activate')}
-                              title={t('activateEditHint', 'Keep this edited route')}
-                              aria-label={t('activate', 'Activate')}>
-                              <i className="fas fa-circle-check" aria-hidden="true" />
-                            </button>
-                            <button type="button" className="fv-sim2__routes-btn"
-                              onClick={() => requestRouteEdit('discard')}
-                              title={t('discardEditHint', 'Discard edits and restore the original route')}
-                              aria-label={t('discard', 'Discard')}>
-                              <i className="fas fa-rotate-left" aria-hidden="true" />
-                            </button>
-                          </>
-                        ) : (
-                          <button type="button" className="fv-sim2__routes-btn"
-                            onClick={() => requestRouteEdit('start')}
-                            title={t('editRouteHint', 'Duplicate the route and edit the copy')}
-                            aria-label={t('duplicateEdit', 'Duplicate & Edit')}>
-                            <i className="fas fa-pen-to-square" aria-hidden="true" />
-                          </button>
-                        )}
-                        <input
-                          ref={importInputRef}
-                          type="file"
-                          accept="application/json,.json"
-                          onChange={onImportFile}
-                          hidden
-                        />
-                      </span>
                     </th>
                     <th>{t('eta', 'ETA')}</th>
                     <th>{t('durationToGo', 'Duration to go')}</th>
@@ -1631,14 +1700,12 @@ export function RouteSimulatorPanel() {
                                   aria-label={r.active ? t('activeRoute', 'Active route') : t('setActive', 'Set as active')}>
                                   <i className="fas fa-circle-check" aria-hidden="true" />
                                 </button>
-                                {r.savedId && (
-                                  <button type="button" className="fv-sim2__row-btn fv-sim2__row-btn--danger"
-                                    onClick={() => deleteSavedRoute(r.savedId!)}
-                                    title={t('deleteRoute', 'Delete route')}
-                                    aria-label={t('deleteRoute', 'Delete route')}>
-                                    <i className="fas fa-trash" aria-hidden="true" />
-                                  </button>
-                                )}
+                                <button type="button" className="fv-sim2__row-btn fv-sim2__row-btn--danger"
+                                  onClick={() => deleteRoute(r)}
+                                  title={t('deleteRoute', 'Delete route')}
+                                  aria-label={t('deleteRoute', 'Delete route')}>
+                                  <i className="fas fa-trash" aria-hidden="true" />
+                                </button>
                               </>
                             )}
                           </span>

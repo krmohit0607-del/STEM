@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b",
+    "test:antimeridian": "tsx scripts/testAntimeridian.mts",
     "seed:export": "tsx scripts/exportSeed.mts"
   },
   "dependencies": {

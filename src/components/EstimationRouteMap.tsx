@@ -5,6 +5,7 @@ import type { LatLngBoundsExpression, LatLngExpression } from 'leaflet';
 
 import { useWorldPorts, type WorldPort } from '../data/ports';
 import { generateSeaRoute, type SeaRoutePoint } from '../data/seaRoute';
+import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
 
 /** Named canals / capes / straits used as routing waypoints and to resolve
  * canal-transit legs that aren't in the world-port list. */
@@ -188,17 +189,19 @@ export function EstimationRouteMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stops, canalKey]);
 
-  const routeLine = seaRoute ?? positions;
+  const routeLine = seaRoute
+    ? unwrapRouteCoordinates(seaRoute.map((point) => {
+        const [lat, lon] = point as [number, number];
+        return [lat, lon];
+      }))
+    : unwrapRouteCoordinates(positions.map((point) => {
+        const [lat, lon] = point as [number, number];
+        return [lat, lon];
+      }));
 
   const bounds = useMemo<LatLngBoundsExpression | null>(() => {
     if (stops.length === 0) return null;
-    const lats = stops.map((s) => s.lat);
-    const lons = stops.map((s) => s.lon);
-    const pad = 4;
-    return [
-      [Math.min(...lats) - pad, Math.min(...lons) - pad],
-      [Math.max(...lats) + pad, Math.max(...lons) + pad],
-    ];
+    return getAntimeridianAwareBounds(stops.map((s) => [s.lat, s.lon]), 4);
   }, [stops]);
 
   const mapRef = useRef<L.Map | null>(null);

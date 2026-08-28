@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Polyline, Polygon, Marker, useMapEvents } from 'react-leaflet';
 import L, { type LatLngBoundsLiteral, type Map as LeafletMap } from 'leaflet';
+import { getAntimeridianAwareBounds } from '../data/antimeridian';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useTheme } from '../theme';
@@ -161,22 +162,7 @@ function cloneRings(rings: [number, number][][]): [number, number][][] {
 
 // Bounding box across a constraint's rings.
 function boundsOf(c: AreaConstraint): LatLngBoundsLiteral {
-  let minLat = 90;
-  let minLon = 180;
-  let maxLat = -90;
-  let maxLon = -180;
-  for (const ring of c.rings) {
-    for (const [lat, lon] of normalizeRingLonLat(ring)) {
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
-      if (lon < minLon) minLon = lon;
-      if (lon > maxLon) maxLon = lon;
-    }
-  }
-  return [
-    [minLat, minLon],
-    [maxLat, maxLon],
-  ];
+  return getAntimeridianAwareBounds(c.rings.flat(), 0) ?? [[0, 0], [0, 0]];
 }
 
 function limitSummary(c: AreaConstraint): string {
@@ -811,9 +797,10 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
                 onAdd={(pt) => setDrawingState((prev) => prev ? { ...prev, pts: [...prev.pts, pt] } : null)}
                 onFinish={finalizeDrawing}
               />
-              {drawingState.pts.length >= 3 && (
+              {drawingState.pts.length >= 3 && splitRingAtAntimeridian(drawingState.pts).map((part, index) => (
                 <Polygon
-                  positions={splitRingAtAntimeridian(drawingState.pts)[0] ?? normalizeRingLonLat(drawingState.pts)}
+                  key={`drawing-part-${index}`}
+                  positions={part}
                   pathOptions={{
                     color: getZoneStyle(drawingState.zoneType).color,
                     weight: 2,
@@ -821,7 +808,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
                     fillOpacity: 0.2,
                   }}
                 />
-              )}
+              ))}
               {drawingState.pts.length > 1 && (
                 <Polyline
                   positions={normalizeRingLonLat(

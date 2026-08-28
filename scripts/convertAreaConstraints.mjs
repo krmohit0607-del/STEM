@@ -1,7 +1,7 @@
 // One-off converter: AreaConstraints.csv -> src/data/areaConstraints.ts
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const CSV = 'c:/Users/CHMOKUM/Downloads/AreaConstraints.csv';
+const CSV = 'c:/Users/CHMOKUM/Downloads/AreaConstraints (updated).csv';
 const OUT = 'src/data/areaConstraints.ts';
 
 const raw = readFileSync(CSV, 'utf8');
@@ -32,6 +32,7 @@ function splitCsv(line) {
 }
 
 const round = (n) => Math.round(n * 1e5) / 1e5;
+const normalizeLongitude = (lon) => ((((lon + 180) % 360) + 360) % 360) - 180;
 
 // Parse rows, splitting into contiguous rings. A new ring begins whenever the
 // constraint name changes between consecutive data rows. Rings that share the
@@ -48,7 +49,7 @@ for (const line of lines) {
   if (cols.length < 5) continue;
   const [name, zoneType, geomType, latS, lonS, rpmMin, rpmMax, spMin, spMax] = cols;
   const lat = Number(latS);
-  const lon = Number(lonS);
+  const lon = normalizeLongitude(Number(lonS));
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
 
   if (!constraints.has(name)) {
@@ -92,7 +93,7 @@ function shortName(name, idx) {
 const records = all
   .map((c, i) => ({
     id: `ac-${i + 1}`,
-    name: shortName(c.name, i),
+    name: c.name,
     rawName: c.name,
     zoneType: c.zoneType,
     geomType: c.geomType,
@@ -104,13 +105,14 @@ const records = all
   }))
   .filter((c) => c.rings.length > 0);
 
-const header = `// AUTO-GENERATED from AreaConstraints.csv — do not edit by hand.
+const header = `// AUTO-GENERATED from AreaConstraints (updated).csv — do not edit by hand.
 // Regenerate with: node scripts/convertAreaConstraints.mjs
 //
 // Each record is one area constraint. A constraint may have several polygon
 // \`rings\` (the original KML export stored some zones as multi-part geometry).
-// Each ring is an ordered list of [lat, lon] vertices. Speed limits are in
-// metres per second exactly as exported by SOFAR Wayfinder.
+// Each ring is an ordered list of [lat, lon] vertices. Longitudes are stored
+// canonically in [-180, 180). Speed limits are in metres per second exactly as
+// exported by SOFAR Wayfinder.
 
 export interface AreaConstraint {
   id: string;
@@ -129,6 +131,49 @@ export interface AreaConstraint {
   speedMax: string;
   /** One or more polygon rings, each an ordered list of [lat, lon] vertices. */
   rings: [number, number][][];
+  /** Voyage-specific constraints are stored separately from admin data. */
+  voyageId?: string;
+}
+
+export type AreaConstraintScope = 'admin' | 'voyage';
+
+export function constraintScope(c: AreaConstraint): AreaConstraintScope {
+  return c.voyageId ? 'voyage' : 'admin';
+}
+
+const VOYAGE_STORAGE_PREFIX = 'fv.areaConstraints.voyage:';
+const ADMIN_DELETED_KEY = 'fv.areaConstraints.deleted';
+
+export function loadVoyageConstraints(voyageId: string): AreaConstraint[] {
+  try {
+    const raw = window.localStorage.getItem(VOYAGE_STORAGE_PREFIX + voyageId);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed as AreaConstraint[] : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveVoyageConstraints(voyageId: string, constraints: AreaConstraint[]): void {
+  try { window.localStorage.setItem(VOYAGE_STORAGE_PREFIX + voyageId, JSON.stringify(constraints)); } catch { /* ignore */ }
+}
+
+export function newVoyageConstraintId(): string {
+  return 'voyage-ac-' + Date.now();
+}
+
+export function loadDeletedAdminIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(ADMIN_DELETED_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveDeletedAdminIds(ids: string[]): void {
+  try { window.localStorage.setItem(ADMIN_DELETED_KEY, JSON.stringify(ids)); } catch { /* ignore */ }
 }
 
 `;

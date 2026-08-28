@@ -3,6 +3,9 @@ import { Polygon, Tooltip } from 'react-leaflet';
 import type { PathOptions } from 'leaflet';
 
 import { AREA_CONSTRAINTS, type AreaConstraint } from '../data/areaConstraints';
+import { crossesAntimeridian, splitRingAtAntimeridian, wrappedMapCopies } from '../data/antimeridian';
+
+export { splitRingAtAntimeridian, unwrapLongitudes as normalizeRingLonLat } from '../data/antimeridian';
 
 /**
  * Renders the imported area constraints (SOFAR Wayfinder export) as polygons
@@ -18,74 +21,6 @@ import { AREA_CONSTRAINTS, type AreaConstraint } from '../data/areaConstraints';
 
 const MS_TO_KN = 1.94384;
 
-/** Adjust ring longitudes so no consecutive pair differs by more than 180° — fixes antimeridian rendering. */
-export function normalizeRingLonLat(ring: [number, number][]): [number, number][] {
-  if (ring.length === 0) return ring;
-  const out: [number, number][] = [[ring[0][0], ring[0][1]]];
-  for (let i = 1; i < ring.length; i++) {
-    let lon = ring[i][1];
-    const prevLon = out[i - 1][1];
-    while (lon - prevLon > 180) lon -= 360;
-    while (lon - prevLon < -180) lon += 360;
-    out.push([ring[i][0], lon]);
-  }
-  return out;
-}
-
-/**
- * Split a ring at the antimeridian so Leaflet's SVG fill never wraps across
- * the globe. Returns one ring when no crossing exists, or two rings (one on
- * each side of ±180°) when the ring straddles the antimeridian.
- */
-export function splitRingAtAntimeridian(ring: [number, number][]): [number, number][][] {
-  if (ring.length < 3) return [];
-  const wrapped: [number, number][] = ring.map(([lat, lon]) => [lat, ((lon + 180) % 360 + 360) % 360 - 180]);
-  const crossesDateline = wrapped.some((point, index) => {
-    const next = wrapped[(index + 1) % wrapped.length];
-    return Math.abs(next[1] - point[1]) > 180;
-  });
-  if (!crossesDateline) return [wrapped];
-
-  const norm = normalizeRingLonLat(wrapped);
-  const lons = norm.map(([, lon]) => lon);
-
-  // Find the split meridian: use 180 when any vertex has lon > 180,
-  // use -180 when any vertex has lon < -180.
-  const splitAt = lons.some((l) => l > 180) ? 180 : -180;
-
-  const sideA: [number, number][] = [];
-  const sideB: [number, number][] = [];
-
-  for (let i = 0; i < norm.length; i++) {
-    const curr = norm[i];
-    const next = norm[(i + 1) % norm.length];
-    const currLon = curr[1];
-    const nextLon = next[1];
-
-    // Assign current vertex to the appropriate side.
-    (currLon <= splitAt ? sideA : sideB).push(curr);
-
-    // If this edge crosses the split meridian, insert an interpolated vertex on both sides.
-    const crossesForward = currLon <= splitAt && nextLon > splitAt;
-    const crossesBack = currLon > splitAt && nextLon <= splitAt;
-    if (crossesForward || crossesBack) {
-      const t = (splitAt - currLon) / (nextLon - currLon);
-      const crossLat = curr[0] + t * (next[0] - curr[0]);
-      sideA.push([crossLat, splitAt]);
-      sideB.push([crossLat, splitAt]);
-    }
-  }
-
-  // Normalise the "other-side" vertices back into [-180, 180].
-  const normaliseBack = (pts: [number, number][]): [number, number][] =>
-    pts.map(([lat, lon]) => [lat, lon > 180 ? lon - 360 : lon < -180 ? lon + 360 : lon]);
-
-  const results: [number, number][][] = [];
-  if (sideA.length >= 3) results.push(sideA);
-  const adjB = normaliseBack(sideB);
-  if (adjB.length >= 3) results.push(adjB);
-  return results.length > 0 ? results : [norm];
-}
 
 export interface ZoneStyle {
   label: string;
@@ -198,9 +133,12 @@ export function AreaConstraintsLayer({
           <Fragment key={c.id}>
             {c.rings.map((ring, ri) => {
               const subRings = splitRingAtAntimeridian(ring);
-              return subRings.map((positions, si) => (
+              const renderRings = crossesAntimeridian(ring, true)
+                ? subRings.flatMap((positions) => wrappedMapCopies(positions))
+                : subRings;
+              return renderRings.map((positions, renderIndex) => (
                 <Polygon
-                  key={`${c.id}-${ri}-${si}`}
+                  key={`${c.id}-${ri}-${renderIndex}`}
                   positions={positions}
                   pathOptions={pathOptions}
                   eventHandlers={{
@@ -209,7 +147,7 @@ export function AreaConstraintsLayer({
                     click: () => onConstraintClick?.(c.id),
                   }}
                 >
-                  {si === 0 && <ConstraintTooltip c={c} />}
+                  <ConstraintTooltip c={c} />
                 </Polygon>
               ));
             })}

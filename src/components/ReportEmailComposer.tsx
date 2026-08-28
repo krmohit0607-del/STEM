@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import type { ReportEmail } from '../data/reports';
+import { sendSystemMail } from '../data/systemMail';
 
 /**
  * Editable email composer shared by the Reports pages.
@@ -11,10 +12,9 @@ import type { ReportEmail } from '../data/reports';
  * the underlying order data changes. Every field (recipient, subject,
  * attachments note and body) can be edited before sending.
  *
- * "Send Email" opens the operator's mail client via a `mailto:` link
- * (consistent with the Email Details page). "Copy" copies the body to
- * the clipboard. Remount with a `key` when the source voyage changes so
- * the draft resets.
+ * "Send Email" sends through the application's system mail workflow.
+ * "Copy" copies the body to the clipboard. Remount with a `key` when the
+ * source voyage changes so the draft resets.
  */
 export function ReportEmailComposer({ build }: { build: () => ReportEmail }) {
   const [draft, setDraft] = useState<ReportEmail>(() => build());
@@ -27,18 +27,19 @@ export function ReportEmailComposer({ build }: { build: () => ReportEmail }) {
 
   const refresh = () => {
     setDraft(build());
+    setSent(false);
     setRefreshed(true);
     window.setTimeout(() => setRefreshed(false), 2000);
   };
 
   const send = () => {
-    const href =
-      `mailto:${encodeURIComponent(draft.to)}` +
-      `?subject=${encodeURIComponent(draft.subject)}` +
-      `&body=${encodeURIComponent(draft.body)}`;
-    window.location.href = href;
+    sendSystemMail({
+      to: draft.to,
+      subject: draft.subject,
+      body: draft.body,
+      attachments: draft.attachments,
+    });
     setSent(true);
-    window.setTimeout(() => setSent(false), 4000);
   };
 
   const copy = async () => {
@@ -122,10 +123,14 @@ export function ReportEmailComposer({ build }: { build: () => ReportEmail }) {
       </div>
 
       {sent && (
-        <p className="fv-report__sent" role="status">
-          <i className="fas fa-circle-check" aria-hidden="true" /> Your mail client has been opened
-          with this report.
-        </p>
+        <div className="fv-report__sent fv-report__sent--persistent" role="status" aria-live="polite">
+          <i className="fas fa-circle-check" aria-hidden="true" />
+          <div>
+            <strong>Email sent successfully</strong>
+            <span>Delivered through the system mail workflow to {draft.to}.</span>
+            <small>{draft.subject}</small>
+          </div>
+        </div>
       )}
     </section>
   );

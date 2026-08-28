@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useLocation } from 'react-router-dom';
 
 import { useFleetView } from '../context/FleetViewContext';
 import { FleetMenu } from './FleetMenu';
@@ -34,6 +35,8 @@ export function Layout({
   showModuleChrome?: boolean;
 }) {
   const { isLoading, error, user } = useFleetView();
+  const { pathname } = useLocation();
+  const isSettingsPage = pathname === '/settings' || pathname.startsWith('/settings/');
 
   if (isLoading) {
     return <div className="fv-loading">Loading FleetView…</div>;
@@ -61,7 +64,7 @@ export function Layout({
       <TopNav />
 
       <div id="main-wrapper">
-        <FleetMenu />
+        {!isSettingsPage && <FleetMenu />}
         {showModuleChrome && <LeftSidebar />}
         <div id="portal" className="portal-container">
           {showModuleChrome && <ModuleBar />}

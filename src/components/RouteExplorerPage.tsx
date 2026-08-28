@@ -4,6 +4,7 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { loadVoyageShared } from '../data/voyageOverrides';
 import { PORT_COORDS } from '../data/fleet';
+import { normalizeLongitude } from '../data/antimeridian';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
 import { type OptimizedRoute } from '../data/routeOptimizer';
 import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
@@ -190,6 +191,11 @@ function decToDM(value: number, isLat: boolean): string {
   return `${String(deg).padStart(pad, '0')}° ${min.toFixed(1)}' ${hemi}`;
 }
 
+function canonicalLongitudeLabel(value: string): string {
+  const decimal = dmToDec(value);
+  return Number.isFinite(decimal) ? decToDM(normalizeLongitude(decimal), false) : value;
+}
+
 /** Parse a `01° 16.0' N` / `103 50.0 E` style string back to decimal. */
 function dmToDec(raw: string): number {
   if (!raw) return NaN;
@@ -371,7 +377,17 @@ export function RouteExplorerPage() {
 
   const selectedVoyage = useSelectedVoyage();
 
-  const [waypoints, setWaypoints] = useState<Waypoint[]>(STUB_WAYPOINTS);
+  const [waypoints, setWaypoints] = useState<Waypoint[]>(() => {
+    try {
+      const selectedEditorId = window.localStorage.getItem('fv.routeEditorRouteId');
+      const activeId = window.localStorage.getItem('fv.activeRouteId')?.replace(/^saved-/, '');
+      const saved = readSavedRoutes().find((route) => route.id === selectedEditorId || route.id === activeId);
+      if (saved?.waypoints?.length) return saved.waypoints;
+    } catch {
+      // Fall back to the seeded route when saved-route storage is unavailable.
+    }
+    return STUB_WAYPOINTS;
+  });
   const [selected, setSelected] = useState<string[]>([]);
   const selectedWaypoint =
     selected.length === 1 ? waypoints.find((w) => w.id === selected[0]) : undefined;
@@ -1044,11 +1060,15 @@ export function RouteExplorerPage() {
 
   const saveRoute = () => {
     const name = routeName.trim() || `Route ${savedRoutes.length + 1}`;
+    const canonicalWaypoints = waypoints.map((waypoint) => ({
+      ...waypoint,
+      lon: canonicalLongitudeLabel(waypoint.lon),
+    }));
     const route: SavedRoute = {
       id: `route-${Date.now()}`,
       name,
       savedAt: new Date().toISOString(),
-      waypoints,
+      waypoints: canonicalWaypoints,
     };
     const next = [...savedRoutes, route];
     setSavedRoutes(next);
@@ -1088,7 +1108,10 @@ export function RouteExplorerPage() {
         id: `route-${Date.now()}`,
         name: `${baseName} (original)`,
         savedAt: new Date().toISOString(),
-        waypoints: originalRoute,
+        waypoints: originalRoute.map((waypoint) => ({
+          ...waypoint,
+          lon: canonicalLongitudeLabel(waypoint.lon),
+        })),
       };
       const next = [...savedRoutes, saved];
       setSavedRoutes(next);
@@ -1128,6 +1151,7 @@ export function RouteExplorerPage() {
     if (editCommand.action === 'start') startEditDuplicate();
     else if (editCommand.action === 'activate') activateEdit();
     else if (editCommand.action === 'discard') discardEdit();
+      else if (editCommand.action === 'clear') clearRoute();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editCommand]);
 

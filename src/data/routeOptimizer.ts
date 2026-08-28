@@ -30,6 +30,7 @@
 
 import { AREA_CONSTRAINTS } from './areaConstraints';
 import { isLand } from './landMask';
+import { normalizeLongitude } from './antimeridian';
 
 /**
  * Land avoidance penalty (fuel-tonne equivalents per NM). Much larger than any
@@ -517,8 +518,8 @@ function searchRoute(
   let arrLon = arrival.lon;
   while (arrLon - depLon > 180) arrLon -= 360;
   while (arrLon - depLon < -180) arrLon += 360;
-  const dep: LatLon = { lat: departure.lat, lon: depLon };
-  const arr: LatLon = { lat: arrival.lat, lon: arrLon };
+  const dep: LatLon = { lat: departure.lat, lon: normalizeLongitude(depLon) };
+  const arr: LatLon = { lat: arrival.lat, lon: normalizeLongitude(arrLon) };
 
   const directNm = haversineNM(departure, arrival);
 

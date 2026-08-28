@@ -127,7 +127,13 @@ export function setSimWeatherHour(hour: number | null): void {
 // editable route is owned by the Route Explorer map. The panel issues commands;
 // the map reports whether an edit is in progress so the panel can swap the
 // button for Activate / Discard.
-type RouteEditAction = 'start' | 'activate' | 'discard';
+ type RouteEditAction = 'start' | 'activate' | 'discard' | 'clear';
+
+/** Clear the currently published non-saved route from the simulator. */
+export function clearActiveSimRoute(): void {
+  activeRoute = null;
+  emit();
+}
 let routeEditActive = false;
 let routeEditCommand: { action: RouteEditAction; nonce: number } | null = null;
 
@@ -185,6 +191,6 @@ export function useRouteEditActive(): boolean {
 }
 
 /** The latest route-edit command from the panel (null until one is issued). */
-export function useRouteEditCommand(): { action: RouteEditAction; nonce: number } | null {
+ export function useRouteEditCommand(): { action: RouteEditAction; nonce: number } | null {
   return useSyncExternalStore(subscribe, () => routeEditCommand);
 }

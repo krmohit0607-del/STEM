@@ -2,11 +2,9 @@ import { useSelectedVoyage } from '../data/selectedVoyage';
 import { buildOrderConfirmationEmail } from '../data/reports';
 import { ReportsPageShell } from './ReportsTabs';
 import { ReportEmailComposer } from './ReportEmailComposer';
-
 /**
  * Order Confirmation page — `/reports/order-confirmation`.
  *
- * Sends the order confirmation email to the client, generated from the
  * voyage / client / vessel / port data for the selected order.
  */
 export function OrderConfirmationPage() {
@@ -28,7 +26,10 @@ export function OrderConfirmationPage() {
 
   return (
     <ReportsPageShell active="order" icon="fa-file-signature" title="Order Confirmation">
-      <ReportEmailComposer key={voyage.id} build={() => buildOrderConfirmationEmail(voyage)} />
+      <ReportEmailComposer
+        key={voyage.id}
+        build={() => buildOrderConfirmationEmail(voyage)}
+      />
     </ReportsPageShell>
   );
 }

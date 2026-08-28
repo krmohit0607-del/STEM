@@ -44,8 +44,7 @@ import { addPayable, findTxnByInvoice, updateTxn } from '../data/accounts';
 import { addNotification } from '../data/workflow';
 import { useFleetView } from '../context/FleetViewContext';
 import { getWorkflowConfig } from '../data/workflowConfig';
-import { loadClients, newClientId, saveClients, type Client } from '../data/clients';
-import { BankAccountBox, type BankAccount } from './BankAccountBox';
+import { loadClients } from '../data/clients';
 
 /**
  * Bunker Management module — the central collaboration hub between Operations,
@@ -1422,37 +1421,6 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
     const liveInvoiceAmount = fuelCost + chargesTotal - claimsTotal;
     const liveOutstanding = liveInvoiceAmount - (r.amountPaid ?? 0);
     const invoiceDocs = r.documents.filter((d) => d.type === 'Invoice');
-    const supplierName = (r.supplier ?? '').trim();
-    const supplierClient = loadClients().find((c) => c.name.trim().toLowerCase() === supplierName.toLowerCase());
-    const supplierBank: BankAccount = supplierClient?.bankAccount ?? { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' };
-    const saveSupplierBank = (account: BankAccount) => {
-      if (!supplierName) return;
-      const all = loadClients();
-      const idx = all.findIndex((c) => c.name.trim().toLowerCase() === supplierName.toLowerCase());
-      if (idx >= 0) {
-        const updated = [...all];
-        updated[idx] = { ...updated[idx], bankAccount: account };
-        saveClients(updated);
-        return;
-      }
-      const created: Client = {
-        id: newClientId(),
-        kind: 'Service Provider',
-        category: 'Bunker Supplier / Trader',
-        name: supplierName,
-        location: '',
-        email: '',
-        contactName: '',
-        phone: '',
-        username: '',
-        password: '',
-        role: 'Account User',
-        pic: '',
-        active: true,
-        bankAccount: account,
-      };
-      saveClients([created, ...all]);
-    };
     const deleteInvoice = () => {
       if (!window.confirm(`Delete invoice ${r.invoiceNo}? This clears the invoice and payment details so a new one can be registered.`)) return;
       deleteBunkerInvoice(r.id);
@@ -1635,13 +1603,6 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
                 {r.paymentRef && <span>Payment Ref.: <strong>{r.paymentRef}</strong></span>}
               </div>
               <PaymentWorkflowActions r={r} />
-              <BankAccountBox
-                label="Supplier Account Details"
-                partyName={r.supplier || 'Supplier'}
-                account={supplierBank}
-                editable
-                onUpdate={saveSupplierBank}
-              />
             </>
           )}
         </PanelSection>

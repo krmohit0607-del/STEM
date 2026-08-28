@@ -66,6 +66,28 @@ export function WeatherFieldLayer({
     }
 
     let raf = 0;
+    let particleWidth = 0;
+    let particleHeight = 0;
+    let particles: Array<{ x: number; y: number; age: number }> = [];
+    let fieldCanvas: HTMLCanvasElement | null = null;
+    let fieldKey = '';
+
+    const resetParticle = (particle: { x: number; y: number; age: number }, w: number, h: number) => {
+      particle.x = Math.random() * w;
+      particle.y = Math.random() * h;
+      particle.age = Math.random() * 90;
+    };
+
+    const ensureParticles = (w: number, h: number) => {
+      if (particleWidth === w && particleHeight === h && particles.length > 0) return;
+      particleWidth = w;
+      particleHeight = h;
+      particles = Array.from({ length: Math.min(1800, Math.max(700, Math.round((w * h) / 550))) }, () => ({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        age: Math.random() * 90,
+      }));
+    };
 
     // Pull live values from Open-Meteo when available, otherwise fall back
     // to the deterministic synthetic field (e.g. while a grid is loading).
@@ -94,7 +116,10 @@ export function WeatherFieldLayer({
           factorId,
           { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() },
           hour,
-          () => schedule(),
+          () => {
+            fieldKey = '';
+            schedule();
+          },
         );
       }
       const dpr = window.devicePixelRatio || 1;
@@ -103,7 +128,9 @@ export function WeatherFieldLayer({
       canvas.style.width = `${w}px`;
       canvas.style.height = `${h}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = false;
       ctx.clearRect(0, 0, w, h);
+      ensureParticles(w, h);
 
       // Sample the underlying basemap so the field is painted on water only.
       // Returns a predicate; if the basemap can't be read (tainted canvas,
@@ -113,35 +140,66 @@ export function WeatherFieldLayer({
 
       // --- colour field ---
       if (showField) {
-        const cell = 16;
-        for (let y = 0; y < h; y += cell) {
-          for (let x = 0; x < w; x += cell) {
-            if (isWater && !isWater(x + cell / 2, y + cell / 2)) continue;
-            const ll = map.containerPointToLatLng([x + cell / 2, y + cell / 2]);
-            const s = sample(ll.lat, ll.lng);
-            const frac = s.magnitude / factor.max;
-            ctx.fillStyle = rampColor(factor.stops, frac, 0.5);
-            ctx.fillRect(x, y, cell + 1, cell + 1);
+        const bounds = map.getBounds();
+        const nextFieldKey = `${w}:${h}:${bounds.getSouth().toFixed(3)}:${bounds.getWest().toFixed(3)}:${bounds.getNorth().toFixed(3)}:${bounds.getEast().toFixed(3)}:${factorId}:${hour}`;
+        if (!fieldCanvas || fieldKey !== nextFieldKey) {
+          fieldCanvas = document.createElement('canvas');
+          fieldCanvas.width = Math.round(w * dpr);
+          fieldCanvas.height = Math.round(h * dpr);
+          const fieldCtx = fieldCanvas.getContext('2d');
+          if (fieldCtx) {
+            fieldCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            fieldCtx.imageSmoothingEnabled = false;
+            const cell = 4;
+            for (let y = 0; y < h; y += cell) {
+              for (let x = 0; x < w; x += cell) {
+                if (isWater && !isWater(x + cell / 2, y + cell / 2)) continue;
+                const ll = map.containerPointToLatLng([x + cell / 2, y + cell / 2]);
+                const s = sample(ll.lat, ll.lng);
+                const frac = s.magnitude / factor.max;
+                fieldCtx.fillStyle = rampColor(factor.stops, frac, 0.72);
+                fieldCtx.fillRect(x, y, cell + 1, cell + 1);
+              }
+            }
+            fieldKey = nextFieldKey;
           }
+        if (fieldCanvas) ctx.drawImage(fieldCanvas, 0, 0, w, h);
         }
       }
 
-      // --- direction / magnitude arrows ---
+      // --- animated direction / magnitude particles (Windy-style) ---
       if (showArrows && factor.directional) {
-        const step = 66;
+        ctx.globalCompositeOperation = 'source-over';
         ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        for (let y = step / 2; y < h; y += step) {
-          for (let x = step / 2; x < w; x += step) {
-            if (isWater && !isWater(x, y)) continue;
-            const ll = map.containerPointToLatLng([x, y]);
-            const s = sample(ll.lat, ll.lng);
-            const frac = Math.max(0, Math.min(1, s.magnitude / factor.max));
-            const len = 10 + frac * 16;
-            drawArrow(ctx, x, y, s.directionDeg, len, rampColor(factor.stops, frac, 0.95));
+        particles.forEach((particle) => {
+          if (particle.x < 0 || particle.x >= w || particle.y < 0 || particle.y >= h || (isWater && !isWater(particle.x, particle.y))) {
+            resetParticle(particle, w, h);
           }
-        }
+          const ll = map.containerPointToLatLng([particle.x, particle.y]);
+          const s = sample(ll.lat, ll.lng);
+          const frac = Math.max(0, Math.min(1, s.magnitude / factor.max));
+          const direction = (s.directionDeg * Math.PI) / 180;
+          const speed = 0.55 + frac * 2.4;
+          const nextX = particle.x + Math.sin(direction) * speed;
+          const nextY = particle.y - Math.cos(direction) * speed;
+          const length = 3 + frac * 9;
+          const tailX = particle.x - Math.sin(direction) * length;
+          const tailY = particle.y + Math.cos(direction) * length;
+          ctx.strokeStyle = `rgba(245, 248, 255, ${0.42 + frac * 0.45})`;
+          ctx.lineWidth = 0.8 + frac * 0.9;
+          ctx.beginPath();
+          ctx.moveTo(tailX, tailY);
+          ctx.lineTo(nextX, nextY);
+          ctx.stroke();
+          particle.x = nextX;
+          particle.y = nextY;
+          particle.age += 1;
+          if (particle.age > 120) resetParticle(particle, w, h);
+        });
+        ctx.globalCompositeOperation = 'source-over';
       }
+
+      raf = window.requestAnimationFrame(draw);
     };
 
     const schedule = () => {
@@ -155,6 +213,7 @@ export function WeatherFieldLayer({
     const reset = () => {
       const topLeft = map.containerPointToLayerPoint([0, 0]);
       L.DomUtil.setPosition(canvas, topLeft);
+      fieldKey = '';
       schedule();
     };
 
@@ -243,41 +302,3 @@ function buildWaterTest(
   };
 }
 
-/** Draw an arrow centred at (x, y) pointing toward `deg` (clockwise N). */
-function drawArrow(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  deg: number,
-  len: number,
-  color: string,
-) {
-  const rad = (deg * Math.PI) / 180;
-  const dx = Math.sin(rad);
-  const dy = -Math.cos(rad);
-  const half = len / 2;
-  const tipX = x + dx * half;
-  const tipY = y + dy * half;
-  const tailX = x - dx * half;
-  const tailY = y - dy * half;
-
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 1.6;
-
-  ctx.beginPath();
-  ctx.moveTo(tailX, tailY);
-  ctx.lineTo(tipX, tipY);
-  ctx.stroke();
-
-  // arrowhead
-  const headLen = Math.min(7, len * 0.45);
-  const left = rad + Math.PI - 0.5;
-  const right = rad + Math.PI + 0.5;
-  ctx.beginPath();
-  ctx.moveTo(tipX, tipY);
-  ctx.lineTo(tipX + Math.sin(left) * headLen, tipY - Math.cos(left) * headLen);
-  ctx.lineTo(tipX + Math.sin(right) * headLen, tipY - Math.cos(right) * headLen);
-  ctx.closePath();
-  ctx.fill();
-}
