@@ -305,24 +305,34 @@ export function VoyageSummarySection({ view, title, collapsed, onToggleCollapse 
                   <tr>
                     <th>Order</th>
                     <th>RPM</th>
+                    <th>Speed, Ballast (kt)</th>
+                    <th>Speed, Laden (kt)</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
                     <td>Dead Slow Ahead</td>
                     <td>{dash(view.deadSlowRpm)}</td>
+                    <td>{dash(view.deadSlowSpeedBallast)}</td>
+                    <td>{dash(view.deadSlowSpeedLaden)}</td>
                   </tr>
                   <tr>
                     <td>Slow Ahead</td>
                     <td>{dash(view.slowAheadRpm)}</td>
+                    <td>{dash(view.slowAheadSpeedBallast)}</td>
+                    <td>{dash(view.slowAheadSpeedLaden)}</td>
                   </tr>
                   <tr>
                     <td>Half Ahead</td>
                     <td>{dash(view.halfAheadRpm)}</td>
+                    <td>{dash(view.halfAheadSpeedBallast)}</td>
+                    <td>{dash(view.halfAheadSpeedLaden)}</td>
                   </tr>
                   <tr>
                     <td>Full Ahead</td>
                     <td>{dash(view.fullAheadRpm)}</td>
+                    <td>{dash(view.fullAheadSpeedBallast)}</td>
+                    <td>{dash(view.fullAheadSpeedLaden)}</td>
                   </tr>
                 </tbody>
               </table>

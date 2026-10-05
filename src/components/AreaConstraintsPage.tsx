@@ -6,6 +6,8 @@ import { getAntimeridianAwareBounds } from '../data/antimeridian';
 import { useL } from '../i18n/LocalizationProvider';
 import { useTheme } from '../theme';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
 import { PortsControl, RulerControl } from './MapToolsControl';
@@ -778,6 +780,8 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
           <WeatherPointControl position="topright" />
           <PortsControl position="topright" />
           <RulerControl position="topright" />
+          <CycloneLayer position="topright" />
+          <WeatherAlertsControl position="topright" />
           <MapCursorPosition position="topleft" />
           {overlayLayers.includes('loadLineZones') && (
             <LoadLineZonesLayer />

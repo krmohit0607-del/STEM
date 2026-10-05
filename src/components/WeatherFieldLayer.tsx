@@ -1,28 +1,48 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useMap } from 'react-leaflet';
 import L from 'leaflet';
+import { contours } from 'd3-contour';
+import * as polygonClippingNs from 'polygon-clipping';
 
-import {
-  getFieldFactor,
-  rampColor,
-  sampleWeatherField,
-} from '../data/weatherField';
+import { bandColor, getFieldFactor, sampleWeatherField } from '../data/weatherField';
 import { ensureLiveData, hasLiveSource, sampleLiveField } from '../data/openMeteo';
+import { landPolygonsInBounds } from '../data/landMaskGeo';
+import { isLand } from '../data/landMask';
+
+/** [lon, lat] polygon coordinates, as used by `polygon-clipping` and our
+ *  own land ring data. */
+type LonLatPoint = [number, number];
+type LonLatMultiPolygon = LonLatPoint[][][];
+
+// `polygon-clipping`'s shipped .d.ts declares named exports (`difference`,
+// etc.) that don't actually exist on its ESM build — the bundle only has a
+// default export object with those as methods. Import as a namespace and
+// cast to the real runtime shape rather than the (incorrect) declared one.
+const polygonClipping = (polygonClippingNs as unknown as {
+  default: { difference(subject: LonLatMultiPolygon, ...clips: LonLatMultiPolygon[]): LonLatMultiPolygon };
+}).default;
 
 /**
- * MarineTraffic-style weather field, drawn on a canvas over the map.
- *
- * Paints a smooth colour field for the selected factor (magnitude → colour
- * ramp) and, for vector factors (wind, waves, currents …), a grid of
- * arrows showing direction and magnitude. Drop it as a child of any
+ * MarineTraffic-style weather field on the map: a contour-chart colour field
+ * (magnitude quantised into discrete bands, exact smooth boundaries via
+ * marching squares — see `d3-contour`) plus, for vector factors, a grid of
+ * direction glyphs — proper wind barbs for wind/gusts, small tinted arrows
+ * for waves/swell/currents, so each factor reads as its own distinct colour
+ * + pattern when several are layered together. Drop it as a child of any
  * `<MapContainer>`:
  *
  *   <MapContainer ...>
  *     <WeatherFieldLayer factorId="wind" />
  *   </MapContainer>
  *
- * The canvas tracks the map by recomputing each pixel's coordinate every
- * frame, so it pans and zooms with the base map.
+ * Performance: the contour polygons are a real Leaflet vector layer, so
+ * Leaflet pans/zooms it the same (cheap, GPU-composited) way it does tile
+ * layers — content is only recomputed on `moveend`/`zoomend`, not on every
+ * intermediate drag frame, which is what makes this feel smooth. The
+ * direction-glyph canvas follows the same schedule. `hour` is read from a
+ * ref (not a redraw-everything effect dependency) so forecast
+ * playback/scrubbing can update many times a second without re-creating the
+ * map pane/layers.
  */
 export function WeatherFieldLayer({
   factorId,
@@ -35,59 +55,57 @@ export function WeatherFieldLayer({
   showField?: boolean;
   /** Draw direction/magnitude arrows for vector factors. */
   showArrows?: boolean;
-  /** Hours ahead of now to forecast (0 = current conditions). */
+  /** Hours ahead of now to forecast (0 = current conditions); may be
+   *  fractional while scrubbing/playing a simulation. */
   hour?: number;
 }) {
   const map = useMap();
+  // `hour` can change many times a second during simulation playback. Kept in
+  // a ref + cheap redraw (below) instead of the main effect's deps so the
+  // panes/layers aren't torn down and recreated on every tick.
+  const hourRef = useRef(hour);
+  const scheduleRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    hourRef.current = hour;
+    scheduleRef.current?.();
+  }, [hour]);
 
   useEffect(() => {
     const factor = getFieldFactor(factorId);
     if (!factor) return;
 
-    // Render into a dedicated pane that sits above the tiles but below the
-    // route/marker overlays — appending to the map container instead would
-    // be hidden behind Leaflet's map pane (z-index 400).
-    const PANE = 'fvWeatherFieldPane';
-    if (!map.getPane(PANE)) {
-      map.createPane(PANE);
-    }
-    const pane = map.getPane(PANE);
-    if (!pane) return;
-    pane.style.zIndex = '350';
-    pane.style.pointerEvents = 'none';
+    // Glyphs (wind barbs / vector arrows) render into a dedicated canvas
+    // pane above the tiles but below route/marker overlays (zIndex 400).
+    const GLYPH_PANE = 'fvWeatherFieldPane';
+    if (!map.getPane(GLYPH_PANE)) map.createPane(GLYPH_PANE);
+    const glyphPane = map.getPane(GLYPH_PANE);
+    if (!glyphPane) return;
+    glyphPane.style.zIndex = '350';
+    glyphPane.style.pointerEvents = 'none';
 
-    const canvas = document.createElement('canvas');
-    canvas.className = 'fv-wf-canvas';
-    pane.appendChild(canvas);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      canvas.remove();
-      return;
-    }
+    // The colour-band contours render as real Leaflet vector paths, in their
+    // own pane just below the glyphs.
+    const CONTOUR_PANE = 'fvWeatherContourPane';
+    if (!map.getPane(CONTOUR_PANE)) map.createPane(CONTOUR_PANE);
+    const contourPane = map.getPane(CONTOUR_PANE);
+    if (!contourPane) return;
+    contourPane.style.zIndex = '345';
+    contourPane.style.pointerEvents = 'none';
+    const contourRenderer = L.canvas({ pane: CONTOUR_PANE, padding: 0.2 });
+    let contourLayer: L.LayerGroup | null = null;
+
+    const glyphCanvas = document.createElement('canvas');
+    glyphCanvas.className = 'fv-wf-canvas';
+    glyphPane.appendChild(glyphCanvas);
+    const glyphCtx = glyphCanvas.getContext('2d');
 
     let raf = 0;
-    let particleWidth = 0;
-    let particleHeight = 0;
-    let particles: Array<{ x: number; y: number; age: number }> = [];
-    let fieldCanvas: HTMLCanvasElement | null = null;
-    let fieldKey = '';
-
-    const resetParticle = (particle: { x: number; y: number; age: number }, w: number, h: number) => {
-      particle.x = Math.random() * w;
-      particle.y = Math.random() * h;
-      particle.age = Math.random() * 90;
-    };
-
-    const ensureParticles = (w: number, h: number) => {
-      if (particleWidth === w && particleHeight === h && particles.length > 0) return;
-      particleWidth = w;
-      particleHeight = h;
-      particles = Array.from({ length: Math.min(1800, Math.max(700, Math.round((w * h) / 550))) }, () => ({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        age: Math.random() * 90,
-      }));
-    };
+    // Cache land polygons per viewport — they don't change between redraws
+    // triggered purely by `hour` ticking (sim playback), only when the map
+    // actually pans/zooms, so recomputing them every tick would be wasted work.
+    let landCacheKey = '';
+    let landCache: LonLatMultiPolygon = [];
 
     // Pull live values from Open-Meteo when available, otherwise fall back
     // to the deterministic synthetic field (e.g. while a grid is loading).
@@ -99,8 +117,8 @@ export function WeatherFieldLayer({
         north: b.getNorth(),
         east: b.getEast(),
       };
-      const live = sampleLiveField(lat, lon, factorId, bounds, hour);
-      return live ?? sampleWeatherField(lat, lon, factorId);
+      const live = sampleLiveField(lat, lon, factorId, bounds, hourRef.current);
+      return live ?? sampleWeatherField(lat, lon, factorId, hourRef.current);
     };
 
     const draw = () => {
@@ -108,6 +126,7 @@ export function WeatherFieldLayer({
       const w = size.x;
       const h = size.y;
       if (w === 0 || h === 0) return;
+      const hour = hourRef.current;
 
       // Ensure live data for the current view; redraw once it arrives.
       if (hasLiveSource(factorId)) {
@@ -116,104 +135,152 @@ export function WeatherFieldLayer({
           factorId,
           { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() },
           hour,
-          () => {
-            fieldKey = '';
-            schedule();
-          },
+          schedule,
         );
       }
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, w, h);
-      ensureParticles(w, h);
 
-      // Sample the underlying basemap so the field is painted on water only.
-      // Returns a predicate; if the basemap can't be read (tainted canvas,
-      // tiles not ready) it returns null and we fall back to drawing
-      // everywhere rather than hiding the field entirely.
-      const isWater = buildWaterTest(map, w, h);
-
-      // --- colour field ---
+      // --- colour field: a real smooth isoband contour (marching squares
+      // via d3-contour) at each band threshold, each drawn over the last so
+      // the visible remainder of the lower band is its own flat colour,
+      // exactly like a significant-wave-height chart — with genuinely
+      // smooth, curved boundaries instead of a pixel staircase, clipped to
+      // water only against the real (vector, not grid-sampled) coastline so
+      // land stays clearly visible and uncoloured. ---
       if (showField) {
         const bounds = map.getBounds();
-        const nextFieldKey = `${w}:${h}:${bounds.getSouth().toFixed(3)}:${bounds.getWest().toFixed(3)}:${bounds.getNorth().toFixed(3)}:${bounds.getEast().toFixed(3)}:${factorId}:${hour}`;
-        if (!fieldCanvas || fieldKey !== nextFieldKey) {
-          fieldCanvas = document.createElement('canvas');
-          fieldCanvas.width = Math.round(w * dpr);
-          fieldCanvas.height = Math.round(h * dpr);
-          const fieldCtx = fieldCanvas.getContext('2d');
-          if (fieldCtx) {
-            fieldCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            fieldCtx.imageSmoothingEnabled = false;
-            const cell = 4;
-            for (let y = 0; y < h; y += cell) {
-              for (let x = 0; x < w; x += cell) {
-                if (isWater && !isWater(x + cell / 2, y + cell / 2)) continue;
-                const ll = map.containerPointToLatLng([x + cell / 2, y + cell / 2]);
-                const s = sample(ll.lat, ll.lng);
-                const frac = s.magnitude / factor.max;
-                fieldCtx.fillStyle = rampColor(factor.stops, frac, 0.72);
-                fieldCtx.fillRect(x, y, cell + 1, cell + 1);
-              }
-            }
-            fieldKey = nextFieldKey;
+        const north = bounds.getNorth();
+        const south = bounds.getSouth();
+        const west = bounds.getWest();
+        const east = bounds.getEast();
+        const cols = Math.max(50, Math.min(170, Math.round(w / 7)));
+        const rows = Math.max(34, Math.min(110, Math.round(h / 7)));
+
+        const gridToLonLat = (gx: number, gy: number): [number, number] => {
+          const fx = gx / (cols - 1);
+          const fy = gy / (rows - 1);
+          return [west + (east - west) * fx, north + (south - north) * fy];
+        };
+
+        const values: number[] = new Array(cols * rows);
+        for (let gy = 0; gy < rows; gy += 1) {
+          for (let gx = 0; gx < cols; gx += 1) {
+            const [lon, lat] = gridToLonLat(gx, gy);
+            values[gy * cols + gx] = sample(lat, lon).magnitude;
           }
-        if (fieldCanvas) ctx.drawImage(fieldCanvas, 0, 0, w, h);
+        }
+
+        const thresholds = factor.stops.map(([frac]) => frac * factor.max);
+        const bands = contours().size([cols, rows]).thresholds(thresholds)(values);
+
+        // Pre-clipped (to the viewport) land rings — exact Natural Earth
+        // coastline geometry, not an approximation of the weather grid.
+        // Cached per viewport since it's identical across hour-only redraws.
+        const landKey = `${west.toFixed(2)},${south.toFixed(2)},${east.toFixed(2)},${north.toFixed(2)}`;
+        if (landKey !== landCacheKey) {
+          landCache = landPolygonsInBounds({ west, south, east, north }) as unknown as LonLatMultiPolygon;
+          landCacheKey = landKey;
+        }
+        const land = landCache;
+
+        const polygons = bands
+          .map((band, i) => {
+            if (band.coordinates.length === 0) return null;
+            const lonLat: LonLatMultiPolygon = band.coordinates.map((polygon) =>
+              polygon.map((ring) => ring.map(([gx, gy]): LonLatPoint => gridToLonLat(gx, gy))),
+            );
+            // The land data's rings are plain number[][], structurally the
+            // same shape as LonLatMultiPolygon at runtime, just not typed as
+            // strict 2-tuples — cast at this narrow boundary. Always clip
+            // (even mid-animation) so weather never flashes over land while
+            // the forecast hour is scrubbing/playing. Guarded: a pathological
+            // input (e.g. near-world bounds) can make the boolean op throw —
+            // skip that band rather than letting one bad band blank the rest.
+            let water: LonLatMultiPolygon;
+            try {
+              water = land.length
+                ? polygonClipping.difference(lonLat, land as unknown as LonLatMultiPolygon)
+                : lonLat;
+            } catch {
+              return null;
+            }
+            if (water.length === 0) return null;
+            const latlngs = water.map((polygon) =>
+              polygon.map((ring) => ring.map(([lon, lat]) => L.latLng(lat, lon))),
+            );
+            return L.polygon(latlngs, {
+              renderer: contourRenderer,
+              pane: CONTOUR_PANE,
+              stroke: true,
+              color: 'rgba(255, 255, 255, 0.6)',
+              weight: 1,
+              fill: true,
+              fillColor: bandColor(factor.stops, i),
+              fillOpacity: 0.78,
+              interactive: false,
+            });
+          })
+          .filter((p): p is L.Polygon => p != null);
+
+        contourLayer?.remove();
+        contourLayer = polygons.length ? L.layerGroup(polygons).addTo(map) : null;
+      } else {
+        contourLayer?.remove();
+        contourLayer = null;
+      }
+
+      // --- direction glyphs on a fixed grid: real wind barbs for wind/gusts,
+      // tinted arrows for the other vector factors (waves, swell, currents)
+      // so each factor keeps its own recognisable colour + pattern. ---
+      if (glyphCtx) {
+        const dpr = window.devicePixelRatio || 1;
+        glyphCanvas.width = Math.round(w * dpr);
+        glyphCanvas.height = Math.round(h * dpr);
+        glyphCanvas.style.width = `${w}px`;
+        glyphCanvas.style.height = `${h}px`;
+        glyphCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        glyphCtx.clearRect(0, 0, w, h);
+
+        if (showArrows && factor.directional) {
+          const color = factor.glyphColor ?? '#1a2233';
+          const spacing = 46;
+          const offsetX = (w % spacing) / 2;
+          const offsetY = (h % spacing) / 2;
+          for (let y = offsetY; y < h; y += spacing) {
+            for (let x = offsetX; x < w; x += spacing) {
+              const ll = map.containerPointToLatLng([x, y]);
+              if (isLand(ll.lat, ll.lng)) continue;
+              const s = sample(ll.lat, ll.lng);
+              const frac = Math.max(0, Math.min(1, s.magnitude / factor.max));
+              glyphCtx.save();
+              glyphCtx.globalAlpha = 0.55 + frac * 0.45;
+              if (factor.id === 'wind' || factor.id === 'gusts') {
+                drawWindBarb(glyphCtx, x, y, s.magnitude, s.directionDeg, color);
+              } else {
+                drawVectorArrow(glyphCtx, x, y, s.directionDeg, color, frac);
+              }
+              glyphCtx.restore();
+            }
+          }
         }
       }
-
-      // --- animated direction / magnitude particles (Windy-style) ---
-      if (showArrows && factor.directional) {
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.lineCap = 'round';
-        particles.forEach((particle) => {
-          if (particle.x < 0 || particle.x >= w || particle.y < 0 || particle.y >= h || (isWater && !isWater(particle.x, particle.y))) {
-            resetParticle(particle, w, h);
-          }
-          const ll = map.containerPointToLatLng([particle.x, particle.y]);
-          const s = sample(ll.lat, ll.lng);
-          const frac = Math.max(0, Math.min(1, s.magnitude / factor.max));
-          const direction = (s.directionDeg * Math.PI) / 180;
-          const speed = 0.55 + frac * 2.4;
-          const nextX = particle.x + Math.sin(direction) * speed;
-          const nextY = particle.y - Math.cos(direction) * speed;
-          const length = 3 + frac * 9;
-          const tailX = particle.x - Math.sin(direction) * length;
-          const tailY = particle.y + Math.cos(direction) * length;
-          ctx.strokeStyle = `rgba(245, 248, 255, ${0.42 + frac * 0.45})`;
-          ctx.lineWidth = 0.8 + frac * 0.9;
-          ctx.beginPath();
-          ctx.moveTo(tailX, tailY);
-          ctx.lineTo(nextX, nextY);
-          ctx.stroke();
-          particle.x = nextX;
-          particle.y = nextY;
-          particle.age += 1;
-          if (particle.age > 120) resetParticle(particle, w, h);
-        });
-        ctx.globalCompositeOperation = 'source-over';
-      }
-
-      raf = window.requestAnimationFrame(draw);
     };
 
     const schedule = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(draw);
     };
+    scheduleRef.current = schedule;
 
-    // Pin the canvas to the current viewport (the pane is translated as the
-    // map pans, so position the canvas at the viewport's top-left in layer
-    // coordinates) and redraw.
+    // Pin the glyph canvas to the current viewport (the pane is translated
+    // as the map pans, so position the canvas at the viewport's top-left in
+    // layer coordinates) and redraw. Bound only to the *end* of pan/zoom
+    // gestures (not the continuous 'move'/'zoom' events) — Leaflet already
+    // translates the whole pane via CSS transform during the gesture itself
+    // (the same trick tile layers use), so dragging stays native-smooth and
+    // we only pay the recompute cost once, when the gesture settles.
     const reset = () => {
       const topLeft = map.containerPointToLayerPoint([0, 0]);
-      L.DomUtil.setPosition(canvas, topLeft);
-      fieldKey = '';
+      L.DomUtil.setPosition(glyphCanvas, topLeft);
       schedule();
     };
 
@@ -223,82 +290,134 @@ export function WeatherFieldLayer({
     map.whenReady(reset);
     const t1 = window.setTimeout(reset, 120);
     const t2 = window.setTimeout(reset, 400);
-    map.on('move zoom moveend zoomend resize viewreset load', reset);
+    map.on('moveend zoomend resize viewreset load', reset);
 
     return () => {
-      map.off('move zoom moveend zoomend resize viewreset load', reset);
+      map.off('moveend zoomend resize viewreset load', reset);
       cancelAnimationFrame(raf);
       window.clearTimeout(t1);
       window.clearTimeout(t2);
-      canvas.remove();
+      scheduleRef.current = null;
+      contourLayer?.remove();
+      glyphCanvas.remove();
     };
-  }, [map, factorId, showField, showArrows, hour]);
+  }, [map, factorId, showField, showArrows]);
 
   return null;
 }
 
-/**
- * Build a land/water test for the current viewport by sampling the basemap
- * tiles. Water renders bluish on every basemap we use (Carto, OSM, Esri
- * Ocean), so a pixel counts as water when its blue channel clearly leads.
- *
- * Returns `null` when the basemap can't be read (tiles not ready, or a
- * cross-origin-tainted canvas) so the caller draws everywhere instead of
- * hiding the field.
- */
-function buildWaterTest(
-  map: L.Map,
-  w: number,
-  h: number,
-): ((x: number, y: number) => boolean) | null {
-  const container = map.getContainer();
-  // Only the first tile layer is the base map; later layers (seamarks,
-  // weather tiles) may be transparent or not CORS-enabled.
-  const tilePane = container.querySelector('.leaflet-tile-pane');
-  const baseLayer = tilePane?.querySelector('.leaflet-layer');
-  if (!baseLayer) return null;
-  const tiles = baseLayer.querySelectorAll<HTMLImageElement>('img.leaflet-tile');
-  if (tiles.length === 0) return null;
 
-  const off = document.createElement('canvas');
-  off.width = w;
-  off.height = h;
-  const octx = off.getContext('2d', { willReadFrequently: true });
-  if (!octx) return null;
+/** Standard meteorological wind barb: shaft + pennants (50kt) / full ticks
+ *  (10kt) / half ticks (5kt), rounded to the nearest 5 knots. */
+function drawWindBarb(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  speedKt: number,
+  dirDeg: number,
+  color: string,
+): void {
+  const rad = (dirDeg * Math.PI) / 180;
+  const dx = Math.sin(rad);
+  const dy = -Math.cos(rad);
+  const perpX = dy;
+  const perpY = -dx;
+  const shaftLen = 15;
+  const tipX = cx + dx * shaftLen;
+  const tipY = cy + dy * shaftLen;
 
-  const cr = container.getBoundingClientRect();
-  let drew = 0;
-  tiles.forEach((img) => {
-    if (!img.complete || img.naturalWidth === 0) return;
-    const r = img.getBoundingClientRect();
-    try {
-      octx.drawImage(img, r.left - cr.left, r.top - cr.top, r.width, r.height);
-      drew += 1;
-    } catch {
-      /* ignore a single bad tile */
-    }
-  });
-  if (drew === 0) return null;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.25;
+  ctx.lineCap = 'round';
 
-  let data: Uint8ClampedArray;
-  try {
-    data = octx.getImageData(0, 0, w, h).data;
-  } catch {
-    // Canvas tainted (tiles served without CORS) — can't read pixels.
-    return null;
+  if (speedKt < 2.5) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+    ctx.stroke();
+    return;
   }
 
-  return (x: number, y: number) => {
-    const ix = Math.max(0, Math.min(w - 1, x | 0));
-    const iy = Math.max(0, Math.min(h - 1, y | 0));
-    const o = (iy * w + ix) * 4;
-    const a = data[o + 3];
-    if (a === 0) return true; // no tile drawn here → treat as open sea
-    const r = data[o];
-    const g = data[o + 1];
-    const b = data[o + 2];
-    // Bluish → water; grey/cream/green land has no clear blue dominance.
-    return b > r + 4 && b >= g - 2;
-  };
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+
+  let remaining = Math.round(speedKt / 5) * 5;
+  const tickGap = 3.2;
+  const tickLen = 6.5;
+  let step = 0;
+  const tickBase = (n: number) => ({ x: tipX - dx * n * tickGap, y: tipY - dy * n * tickGap });
+
+  while (remaining >= 50) {
+    const base = tickBase(step);
+    const base2 = tickBase(step + 1.1);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(base.x + perpX * tickLen, base.y + perpY * tickLen);
+    ctx.lineTo(base2.x, base2.y);
+    ctx.closePath();
+    ctx.fill();
+    remaining -= 50;
+    step += 1.1;
+  }
+  while (remaining >= 10) {
+    const base = tickBase(step);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(base.x + perpX * tickLen, base.y + perpY * tickLen);
+    ctx.stroke();
+    remaining -= 10;
+    step += 1;
+  }
+  if (remaining >= 5) {
+    const base = tickBase(step);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(base.x + perpX * tickLen * 0.55, base.y + perpY * tickLen * 0.55);
+    ctx.stroke();
+  }
+}
+
+/** Small filled-head arrow used for non-wind vector factors (waves, swell,
+ *  currents), length/opacity following the sampled magnitude. */
+function drawVectorArrow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  dirDeg: number,
+  color: string,
+  frac: number,
+): void {
+  const rad = (dirDeg * Math.PI) / 180;
+  const dx = Math.sin(rad);
+  const dy = -Math.cos(rad);
+  const len = 7 + frac * 10;
+  const tipX = cx + dx * len;
+  const tipY = cy + dy * len;
+  const tailX = cx - dx * len * 0.4;
+  const tailY = cy - dy * len * 0.4;
+
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(tailX, tailY);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+
+  const headLen = 4 + frac * 2.5;
+  const headAngle = Math.PI / 7;
+  const leftX = tipX - Math.sin(rad - headAngle) * headLen;
+  const leftY = tipY + Math.cos(rad - headAngle) * headLen;
+  const rightX = tipX - Math.sin(rad + headAngle) * headLen;
+  const rightY = tipY + Math.cos(rad + headAngle) * headLen;
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(leftX, leftY);
+  ctx.lineTo(rightX, rightY);
+  ctx.closePath();
+  ctx.fill();
 }
 

@@ -7,6 +7,7 @@
  */
 
 import { useSyncExternalStore } from 'react';
+import { settingsApi } from '../api/settingsApi';
 
 export interface SavedPort {
   id: string;
@@ -21,6 +22,7 @@ const STORAGE_KEY = 'fv.savedPorts';
 
 let cache: SavedPort[] | null = null;
 const listeners = new Set<() => void>();
+const SETTING_KEY = 'savedPorts';
 
 function read(): SavedPort[] {
   if (cache) return cache;
@@ -45,6 +47,21 @@ function persist(): void {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cache ?? []));
   } catch {
     /* storage unavailable — ignore */
+  }
+  void settingsApi.put(SETTING_KEY, cache ?? []).catch(() => { /* local fallback */ });
+}
+
+async function hydrate(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as unknown;
+    if (Array.isArray(parsed)) {
+      cache = parsed.filter(isSavedPort).sort((a, b) => a.name.localeCompare(b.name));
+      listeners.forEach((fn) => fn());
+    }
+  } catch {
+    const local = read();
+    if (local.length) void settingsApi.put(SETTING_KEY, local).catch(() => { /* unavailable */ });
   }
 }
 
@@ -75,6 +92,8 @@ function subscribe(cb: () => void): () => void {
 export function useSavedPorts(): SavedPort[] {
   return useSyncExternalStore(subscribe, read, read);
 }
+
+void hydrate();
 
 function isSavedPort(v: unknown): v is SavedPort {
   return (

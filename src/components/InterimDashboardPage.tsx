@@ -4,6 +4,7 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import type { ReportEmail } from '../data/reports';
 import { useSelectedLegNo } from '../data/selectedLeg';
+import { useFloatingDialog } from '../hooks/useFloatingDialog';
 import { buildView } from './voyage/buildView';
 import { InterimTabs } from './InterimTabs';
 import { ReportEmailComposer } from './ReportEmailComposer';
@@ -591,6 +592,12 @@ export function InterimDashboardPage() {
   );
   const [interimEmailOpen, setInterimEmailOpen] = useState(false);
   const [interimEmailCriteria, setInterimEmailCriteria] = useState<InterimEmailCriterion[]>(['overall', 'goodWeather']);
+  const {
+    style: interimEmailFloatStyle,
+    onDragStart: onInterimEmailDragStart,
+    onResizeStart: onInterimEmailResizeStart,
+    resetPosition: resetInterimEmailPosition,
+  } = useFloatingDialog({ defaultWidth: 980, defaultHeight: 720, minWidth: 460, minHeight: 360 });
 
   const activeLeg = useMemo(
     () => legs.find((leg) => leg.no === selectedLegNo) ?? legs[0],
@@ -898,33 +905,53 @@ export function InterimDashboardPage() {
 
       {interimEmailOpen && selectedVoyage && (
         <div className="fv-interim__email-backdrop" role="presentation" onMouseDown={() => setInterimEmailOpen(false)}>
-          <section className="fv-interim__email-modal" role="dialog" aria-modal="true" aria-labelledby="fv-interim-email-title" onMouseDown={(event) => event.stopPropagation()}>
-            <header className="fv-interim__email-modal-head">
+          <section
+            className="fv-interim__email-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="fv-interim-email-title"
+            style={interimEmailFloatStyle}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="fv-interim__email-modal-head" onMouseDown={onInterimEmailDragStart}>
               <div>
                 <span>Interim report email</span>
                 <h2 id="fv-interim-email-title">Send Interim Report to Client</h2>
                 <p>{selectedVoyage.vessel} · {selectedVoyage.client} · {selectedVoyage.portFrom} → {selectedVoyage.portTo}</p>
               </div>
-              <button type="button" className="fv-interim__email-close" onClick={() => setInterimEmailOpen(false)} aria-label="Close">
-                <i className="fas fa-xmark" aria-hidden="true" />
-              </button>
+              <div className="fv-interim__email-head-actions">
+                <button type="button" className="fv-interim__email-close" onClick={resetInterimEmailPosition} title="Reset size &amp; position" aria-label="Reset size and position">
+                  <i className="fas fa-compress" aria-hidden="true" />
+                </button>
+                <button type="button" className="fv-interim__email-close" onClick={() => setInterimEmailOpen(false)} aria-label="Close">
+                  <i className="fas fa-xmark" aria-hidden="true" />
+                </button>
+              </div>
             </header>
-            <fieldset className="fv-interim__email-criteria">
-              <legend>Report criteria</legend>
-              {INTERIM_EMAIL_CRITERIA.map((item) => (
-                <label key={item.key}>
-                  <input
-                    type="checkbox"
-                    checked={interimEmailCriteria.includes(item.key)}
-                    onChange={() => setInterimEmailCriteria((current) => current.includes(item.key) ? current.filter((key) => key !== item.key) : [...current, item.key])}
-                  />
-                  {item.label}
-                </label>
-              ))}
-            </fieldset>
-            <ReportEmailComposer
-              key={`${selectedVoyage.id}-${interimEmailCriteria.join(',')}`}
-              build={() => buildInterimReportEmail(selectedVoyage, interimSummaryRows, cpDetails, interimEmailCriteria)}
+            <div className="fv-interim__email-scroll">
+              <fieldset className="fv-interim__email-criteria">
+                <legend>Report criteria</legend>
+                {INTERIM_EMAIL_CRITERIA.map((item) => (
+                  <label key={item.key}>
+                    <input
+                      type="checkbox"
+                      checked={interimEmailCriteria.includes(item.key)}
+                      onChange={() => setInterimEmailCriteria((current) => current.includes(item.key) ? current.filter((key) => key !== item.key) : [...current, item.key])}
+                    />
+                    {item.label}
+                  </label>
+                ))}
+              </fieldset>
+              <ReportEmailComposer
+                key={`${selectedVoyage.id}-${interimEmailCriteria.join(',')}`}
+                build={() => buildInterimReportEmail(selectedVoyage, interimSummaryRows, cpDetails, interimEmailCriteria)}
+              />
+            </div>
+            <div
+              className="fv-interim__email-resize-handle"
+              onMouseDown={onInterimEmailResizeStart}
+              title="Drag to resize"
+              aria-hidden="true"
             />
           </section>
         </div>

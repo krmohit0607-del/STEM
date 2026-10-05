@@ -119,7 +119,7 @@ function buildPostfix(v: Voyage) {
   const servicesTotal = services.reduce((s, x) => s + x.cost + x.tax, 0);
   const claimsPayable = claims.filter((c) => c.owner === 'Owner').reduce((s, c) => s + (c.settlement || c.amount), 0);
   const claimsReceivable = claims.filter((c) => c.owner !== 'Owner').reduce((s, c) => s + c.amount, 0);
-  const receivable = finalFreight + demurrage + claimsReceivable - freight.advance + Math.max(0, balanceFreight);
+  const receivable = finalFreight + demurrage + claimsReceivable - freight.advance;
   const payable = fdaTotal + servicesTotal + despatch + claimsPayable - pda.reduce((s, p) => s + p.advance, 0);
   const net = receivable - payable;
   const completion = Math.round((timeline.filter((s) => s.status === 'done').length / timeline.length) * 100);
@@ -211,7 +211,7 @@ export function PostfixPage({ mode }: { mode?: 'create' } = {}) {
             <ModuleVesselSearch />
             <i className="fas fa-file-signature" aria-hidden="true" />
             <div>
-              <span className="fv-ops__recap-sub fv-ops__recap-details">{voyage.id} · IMO {voyage.imo} · {b.load} → {b.disch} · {voyage.client}{cpdds[voyage.id] ? ` / CPDD ${cpdds[voyage.id]}` : ''}</span>
+              <span className="fv-ops__recap-sub fv-ops__recap-details">{voyage.id} · IMO {recap.vesselImo || voyage.imo} · {b.load} → {b.disch} · {voyage.client}{cpdds[voyage.id] ? ` / CPDD ${cpdds[voyage.id]}` : ''}</span>
             </div>
             <span className="fv-ops__recap-badge">Settlement In Progress</span>
             <div className="fv-pf__topbar-status">

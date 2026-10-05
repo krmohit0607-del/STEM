@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
@@ -12,8 +12,11 @@ import {
   STATUS_TONES,
   stamp,
   useSelectedAccountVessel,
+  computeAccountAlerts,
+  createManualTxn,
   type FinTxn,
   type TxnStatus,
+  type TxnKind,
   type Approval,
   type Priority,
   type TxnCategory,
@@ -21,10 +24,13 @@ import {
 import { addNotification } from '../data/workflow';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { useFixtureNumbers } from '../data/workflow';
+import { useAuth } from '../context/AuthContext';
 import { ModuleVesselSearch } from './ModuleVesselSearch';
 import { getBunkerRequirements, updateBunkerRequirement } from '../data/bunker';
-import { loadClients, newClientId, saveClients, type Client } from '../data/clients';
-import { getWorkflowConfig, setWorkflowConfig } from '../data/workflowConfig';
+import { loadClients, newClientId, saveClients, clientToCreateDto, clientToUpdateDto, type Client } from '../data/clients';
+import { clientsApi } from '../api/clientsApi';
+import { getWorkflowConfig, setWorkflowConfig, useWorkflowConfig } from '../data/workflowConfig';
+import { appendConfigHistory, newConfigHistoryId, diffAcctSettings, useAcctConfigHistory, type ConfigHistoryEntry } from '../data/acctConfigHistory';
 import { BankAccountBox, type BankAccount } from './BankAccountBox';
 
 /**
@@ -72,6 +78,18 @@ function accountPdf(headers: string[], rows: (string | number | undefined)[][]):
   const esc = (value: string | number | undefined) => String(value ?? '').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character] ?? character));
   popup.document.write(`<html><head><title>Accounts Reports</title><style>body{font:10px Arial;margin:20px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:4px;text-align:left}th{background:#e8edf5}</style></head><body><h2>Accounts Reports</h2><table><thead><tr>${headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${esc(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table><script>window.onload=function(){window.print()}</script></body></html>`);
   popup.document.close();
+}
+
+const TXN_EXPORT_HEADERS = ['Transaction ID', 'Vessel', 'Module', 'Category', 'Kind', 'Counterparty', 'Invoice', 'Currency', 'Amount', 'Due Date', 'Status', 'Approval', 'Reference'];
+function txnExportRows(list: FinTxn[]): (string | number | undefined)[][] {
+  return list.map((t) => [t.id, t.vessel, t.module, t.category, t.kind, t.counterparty, t.invoiceNo, t.currency, t.amount, t.dueDate, t.status, t.approval, t.reference]);
+}
+
+/** One-line summary of a bank account for the Configuration History before/after columns. */
+function summarizeBankAccount(b: BankAccount): string {
+  if (b.details?.trim()) return `Details set (${b.details.trim().length} chars)`;
+  if (b.bankName || b.accountNumber) return [b.bankName, b.accountNumber].filter(Boolean).join(' · ');
+  return '—';
 }
 
 function openPaymentPdf(t: FinTxn): void {
@@ -136,7 +154,7 @@ const ACCOUNT_REPORTS = [
 
 /* --------- small ui atoms --------- */
 
-function Kpi({ label, value, delta, tone, icon, hint }: { label: string; value: string; delta?: string; tone?: string; icon: string; hint?: string }) {
+function Kpi({ label, value, delta, tone, icon, hint, onEdit }: { label: string; value: string; delta?: string; tone?: string; icon: string; hint?: string; onEdit?: () => void }) {
   const up = delta?.startsWith('+');
   return (
     <div className={`fv-acct__kpi${tone ? ` fv-acct__kpi--${tone}` : ''}`}>
@@ -149,6 +167,7 @@ function Kpi({ label, value, delta, tone, icon, hint }: { label: string; value: 
           {hint && <span className="fv-acct__kpi-hint">{hint}</span>}
         </span>
       </div>
+      {onEdit && <button type="button" className="fv-acct__icon-btn" title={`Edit ${label}`} style={{ position: 'absolute', top: 6, right: 6, width: 20, height: 20 }} onClick={onEdit}><i className="fas fa-pen" style={{ fontSize: 10 }} /></button>}
     </div>
   );
 }
@@ -288,8 +307,18 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
   }, [live.counterparty]);
 
   const saveCounterpartyBank = (account: BankAccount) => {
-    setCounterpartyBank(account);
     const name = live.counterparty.trim();
+    if (JSON.stringify(counterpartyBank) !== JSON.stringify(account)) {
+      appendConfigHistory([{
+        id: newConfigHistoryId(),
+        at: new Date().toISOString(),
+        by: 'Accounts',
+        field: `Payee Bank — ${name || 'Unknown'}`,
+        before: summarizeBankAccount(counterpartyBank),
+        after: summarizeBankAccount(account),
+      }]);
+    }
+    setCounterpartyBank(account);
     if (!name) return;
     const all = loadClients();
     const idx = all.findIndex((c) => c.name.trim().toLowerCase() === name.toLowerCase());
@@ -297,6 +326,7 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
       const updated = [...all];
       updated[idx] = { ...updated[idx], bankAccount: account };
       saveClients(updated);
+      void clientsApi.update(updated[idx].id, clientToUpdateDto(updated[idx])).catch(() => { /* local fallback */ });
       return;
     }
     const created: Client = {
@@ -316,6 +346,11 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
       bankAccount: account,
     };
     saveClients([created, ...all]);
+    void clientsApi.create(clientToCreateDto(created)).then((res) => {
+      if (!res?.id) return;
+      const withBackendId = loadClients().map((c) => (c.id === created.id ? { ...c, id: res.id } : c));
+      saveClients(withBackendId);
+    }).catch(() => { /* local fallback */ });
   };
 
   const saveCompanyBank = (account: BankAccount) => {
@@ -427,6 +462,92 @@ function TxnDetail({ t, onClose }: { t: FinTxn; onClose: () => void }) {
             editable
             onUpdate={live.kind === 'Receivable' ? saveCompanyBank : saveCounterpartyBank}
           />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------- new transaction modal --------- */
+
+const CATEGORY_OPTIONS: TxnCategory[] = ['Hire', 'Freight', 'PDA', 'FDA', 'Bunker', 'Agency', 'Port', 'Canal', 'Demurrage', 'Despatch', 'Claims', 'Commission', 'Performance', 'Weather', 'Insurance', 'Taxes', 'Misc'];
+
+function isoToDisplay(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
+  return `${String(d.getDate()).padStart(2, '0')} ${mon} ${d.getFullYear()}`;
+}
+
+/** Manual transaction entry — the only way, previously, to raise a transaction in Accounts was
+ * via the cross-module bridge (Bunker/Operations/etc.); there was no UI to originate one directly. */
+function NewTxnModal({ vessels, onClose, onCreated }: { vessels: string[]; onClose: () => void; onCreated: (t: FinTxn) => void }) {
+  const [kind, setKind] = useState<TxnKind>('Payable');
+  const [category, setCategory] = useState<TxnCategory>('Hire');
+  const [vessel, setVessel] = useState('');
+  const [voyage, setVoyage] = useState('');
+  const [counterparty, setCounterparty] = useState('');
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [currency, setCurrency] = useState('USD');
+  const [amount, setAmount] = useState('');
+  const [invoiceDateIso, setInvoiceDateIso] = useState(() => new Date().toISOString().slice(0, 10));
+  const [dueDateIso, setDueDateIso] = useState('');
+  const [priority, setPriority] = useState<Priority>('Medium');
+  const [remarks, setRemarks] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setError(null);
+    if (!vessel.trim() || !counterparty.trim() || !invoiceNo.trim() || !dueDateIso || !(Number(amount) > 0)) {
+      setError('Vessel, Counterparty, Invoice No, Amount and Due Date are required.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const created = await createManualTxn({
+        kind, category, vessel: vessel.trim(), voyage: voyage.trim() || undefined,
+        counterparty: counterparty.trim(), invoiceNo: invoiceNo.trim(), currency, amount: Number(amount),
+        invoiceDate: isoToDisplay(invoiceDateIso), dueDate: isoToDisplay(dueDateIso), dueIso: dueDateIso,
+        priority, remarks: remarks.trim() || undefined,
+      });
+      addNotification(`${created.invoiceNo} · ${created.vessel} created manually`, 'Accounts');
+      onCreated(created);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create transaction.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fv-acct__modal-backdrop" onClick={onClose}>
+      <div className="fv-acct__modal" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-acct__modal-head">
+          <span><i className="fas fa-circle-plus" /> New Transaction</span>
+          <button type="button" className="fv-acct__icon-btn" onClick={onClose}><i className="fas fa-xmark" /></button>
+        </div>
+        <div className="fv-acct__modal-body">
+          <div className="fv-acct__grid4">
+            <label className="fv-acct__field"><span>Kind</span><select value={kind} onChange={(e) => setKind(e.target.value as TxnKind)}><option value="Payable">Payable</option><option value="Receivable">Receivable</option></select></label>
+            <label className="fv-acct__field"><span>Category</span><select value={category} onChange={(e) => setCategory(e.target.value as TxnCategory)}>{CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}</select></label>
+            <label className="fv-acct__field"><span>Vessel *</span><input list="acct-vessel-list" value={vessel} onChange={(e) => setVessel(e.target.value)} /><datalist id="acct-vessel-list">{vessels.map((v) => <option key={v} value={v} />)}</datalist></label>
+            <label className="fv-acct__field"><span>Voyage</span><input value={voyage} onChange={(e) => setVoyage(e.target.value)} /></label>
+            <label className="fv-acct__field"><span>Counterparty *</span><input value={counterparty} onChange={(e) => setCounterparty(e.target.value)} /></label>
+            <label className="fv-acct__field"><span>Invoice No *</span><input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} /></label>
+            <label className="fv-acct__field"><span>Currency</span><select value={currency} onChange={(e) => setCurrency(e.target.value)}>{['USD', 'EUR', 'CNY', 'SGD'].map((c) => <option key={c}>{c}</option>)}</select></label>
+            <label className="fv-acct__field"><span>Amount *</span><input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
+            <label className="fv-acct__field"><span>Invoice Date</span><input type="date" value={invoiceDateIso} onChange={(e) => setInvoiceDateIso(e.target.value)} /></label>
+            <label className="fv-acct__field"><span>Due Date *</span><input type="date" value={dueDateIso} onChange={(e) => setDueDateIso(e.target.value)} /></label>
+            <label className="fv-acct__field"><span>Priority</span><select value={priority} onChange={(e) => setPriority(e.target.value as Priority)}><option>High</option><option>Medium</option><option>Low</option></select></label>
+            <div className="fv-acct__field fv-acct__field--full"><span>Remarks</span><input value={remarks} onChange={(e) => setRemarks(e.target.value)} /></div>
+          </div>
+          {error && <div className="fv-acct__hint" style={{ color: 'var(--a-bad)', marginTop: 8 }}><i className="fas fa-triangle-exclamation" /> {error}</div>}
+          <div className="fv-acct__outputs" style={{ marginTop: 12 }}>
+            <button type="button" className="fv-acct__btn fv-acct__btn--go" disabled={saving} onClick={() => void submit()}><i className="fas fa-floppy-disk" /> {saving ? 'Creating…' : 'Create Transaction'}</button>
+            <button type="button" className="fv-acct__btn fv-acct__btn--ghost" onClick={onClose}>Cancel</button>
+          </div>
         </div>
       </div>
     </div>
@@ -562,9 +683,56 @@ function TxnGrid({ rows, onView }: { rows: FinTxn[]; onView: (t: FinTxn) => void
   );
 }
 
+/* --------- configuration history --------- */
+
+function fmtHistoryAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Fleet-wide audit log of every change made in the Accounts module — mirrors the Operations
+ * Configuration History pattern (one entry per committed change, never per keystroke). */
+function ConfigHistoryTab({ entries }: { entries: ConfigHistoryEntry[] }) {
+  const [q, setQ] = useState('');
+  const filtered = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return query ? entries.filter((e) => `${e.field} ${e.by} ${e.before} ${e.after}`.toLowerCase().includes(query)) : entries;
+  }, [entries, q]);
+  return (
+    <section className="fv-acct__card">
+      <div className="fv-acct__card-head">
+        <span><i className="fas fa-clock-rotate-left" /> Configuration History</span>
+        <span className="fv-acct__search"><i className="fas fa-magnifying-glass" /><input value={q} placeholder="Search field, user, value…" onChange={(e) => setQ(e.target.value)} />{q && <button type="button" className="fv-acct__icon-btn" style={{ width: 16, height: 16 }} onClick={() => setQ('')}><i className="fas fa-xmark" /></button>}</span>
+      </div>
+      <div className="fv-acct__card-body" style={{ padding: 0 }}>
+        {filtered.length === 0 ? (
+          <div className="fv-acct__empty"><i className="fas fa-inbox" aria-hidden="true" /> No changes recorded yet — every transaction status change, SWIFT upload, new transaction, bank-detail edit and settings change made in Accounts will appear here.</div>
+        ) : (
+          <table className="fv-acct__table">
+            <thead><tr><th>Date &amp; Time</th><th>User</th><th>Change</th><th>Before</th><th>After</th></tr></thead>
+            <tbody>
+              {filtered.map((e) => (
+                <tr key={e.id}>
+                  <td className="fv-acct__ref">{fmtHistoryAt(e.at)}</td>
+                  <td><i className="fas fa-user" style={{ marginRight: 5, color: 'var(--a-faint)' }} /> {e.by}</td>
+                  <td>{e.field}</td>
+                  <td className="fv-acct__sub">{e.before}</td>
+                  <td><b>{e.after}</b></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------ main page */
 
-type Tab = 'dashboard' | 'cashflow' | 'calendar' | 'payments' | 'reports';
+type Tab = 'dashboard' | 'cashflow' | 'calendar' | 'payments' | 'reports' | 'confighistory';
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-gauge-high' },
@@ -572,16 +740,18 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'calendar', label: 'Calendar', icon: 'fa-calendar' },
   { id: 'payments', label: 'Payments', icon: 'fa-money-bill-wave' },
   { id: 'reports', label: 'Reports', icon: 'fa-file-chart-column' },
+  { id: 'confighistory', label: 'Configuration History', icon: 'fa-clock-rotate-left' },
 ];
-
-const CASH_IN_BANK = 4_245_890;
 
 export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
   const createMode = mode === 'create' || searchParams.get('new') === '1';
   const txns = useAccountTxns();
-  const rows = createMode ? [] : txns;
+  const rows = txns;
   const sidebarVessel = useSelectedAccountVessel();
+  const workflowConfig = useWorkflowConfig();
+  const configHistory = useAcctConfigHistory();
+  const { user } = useAuth();
   const [tab, setTab] = useState<Tab>('dashboard');
   const [vessel, setVessel] = useState('All');
   const [typeF, setTypeF] = useState('All');
@@ -598,6 +768,10 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
   const [calShowPay, setCalShowPay] = useState(true);
   const [detail, setDetail] = useState<FinTxn | null>(null);
   const [selectedReports, setSelectedReports] = useState<string[]>(['cashflow']);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [newTxnOpen, setNewTxnOpen] = useState(createMode);
+  const [editingCash, setEditingCash] = useState(false);
+  const [cashDraft, setCashDraft] = useState('');
 
   const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   const fixtureNo = useFixtureNumbers()[selectedVoyage?.id ?? ''];
@@ -607,6 +781,42 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
   useEffect(() => {
     if (!sidebarVessel && !selectedVoyage && vessel !== 'All') setVessel('All');
   }, [sidebarVessel, selectedVoyage, vessel]);
+
+  // Configuration History for the settings-style fields (Cash In Bank, Company Bank Account) —
+  // a quiet-period debounce + before/after diff, same mechanism as Operations' recap history, so
+  // a burst of edits (e.g. typing "101") logs once with the final value, never once per keystroke.
+  const historyBaseRef = useRef<Record<string, unknown> | null>(null);
+  const historyLastRef = useRef<Record<string, unknown> | null>(null);
+  const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const snap: Record<string, unknown> = {
+      cashInBankUsd: workflowConfig.cashInBankUsd,
+      companyBankVerified: workflowConfig.companyBankAccount.verified,
+      companyBankDetails: workflowConfig.companyBankAccount.details,
+      companyBankName: workflowConfig.companyBankAccount.bankName,
+      companyBankAccountHolder: workflowConfig.companyBankAccount.accountHolder,
+      companyBankAccountNumber: workflowConfig.companyBankAccount.accountNumber,
+      companyBankSwift: workflowConfig.companyBankAccount.swift,
+      companyBankIban: workflowConfig.companyBankAccount.iban,
+    };
+    const previous = historyLastRef.current;
+    historyLastRef.current = snap;
+    if (previous && JSON.stringify(previous) !== JSON.stringify(snap)) {
+      if (!historyBaseRef.current) historyBaseRef.current = previous;
+      if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+      const by = user?.fullName || 'Accounts User';
+      historyTimerRef.current = setTimeout(() => {
+        historyTimerRef.current = null;
+        const base = historyBaseRef.current;
+        historyBaseRef.current = null;
+        if (!base || !historyLastRef.current) return;
+        const entries = diffAcctSettings(base, historyLastRef.current, by);
+        if (entries.length) appendConfigHistory(entries);
+      }, 1200);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowConfig]);
+
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -636,15 +846,15 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
     const paidToday = scope.filter((t) => t.status === 'Paid').reduce((s, t) => s + t.amount, 0);
     return {
       totalPay, totalRec, payCount: payUnpaid.length, recCount: recUnpaid.length,
-      cash: CASH_IN_BANK,
+      cash: workflowConfig.cashInBankUsd,
       paidToday, paidTodayCount: scope.filter((t) => t.status === 'Paid').length,
       recToday: recToday.reduce((s, t) => s + t.amount, 0),
       upcomingAmt: upcoming.reduce((s, t) => s + t.amount, 0), upcomingCount: upcoming.length,
       overdueAmt: overdue.reduce((s, t) => s + t.amount, 0), overdueCount: overdue.length,
       dueTodayAmt: dueToday.reduce((s, t) => s + t.amount, 0), dueTodayCount: dueToday.length,
-      working: totalRec - totalPay + CASH_IN_BANK,
+      working: totalRec - totalPay + workflowConfig.cashInBankUsd,
     };
-  }, [scope]);
+  }, [scope, workflowConfig.cashInBankUsd]);
 
   const catSegments = useMemo(() => {
     const map = new Map<TxnCategory, number>();
@@ -664,14 +874,13 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
       const iso = day.toISOString().slice(0, 10);
       const inn = scope.filter((t) => t.kind === 'Receivable' && t.status !== 'Received' && t.dueIso.startsWith(iso.slice(0, step > 1 ? 7 : 10))).reduce((s, t) => s + t.amount, 0);
       const out = scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.dueIso.startsWith(iso.slice(0, step > 1 ? 7 : 10))).reduce((s, t) => s + t.amount, 0);
-      const base = Math.sin(i / 2) * 80_000;
       const label = step >= 30 ? MONTHS[day.getMonth()] : `${day.getDate()} ${MONTHS[day.getMonth()]}`;
-      bars.push({ label, inn, out, net: inn - out + base });
+      bars.push({ label, inn, out, net: inn - out });
     }
     return bars;
   }, [scope, cfRange]);
 
-  const paymentsDue7 = useMemo(() => scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && daysUntil(t.dueIso) >= 0 && daysUntil(t.dueIso) <= 8).sort((a, b) => daysUntil(a.dueIso) - daysUntil(b.dueIso)), [scope]);
+  const paymentsDue7 = useMemo(() => scope.filter((t) => t.kind === 'Payable' && t.status !== 'Paid' && t.status !== 'Cancelled' && daysUntil(t.dueIso) >= 0 && daysUntil(t.dueIso) <= 8).sort((a, b) => daysUntil(a.dueIso) - daysUntil(b.dueIso)), [scope]);
 
 
   const asOn = `${ACCT_NOW.getDate()} Jun ${ACCT_NOW.getFullYear()}`;
@@ -727,14 +936,17 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
     return { collected, paid };
   }, [scope]);
 
-  // Calendar helpers
+  // Calendar helpers. The Calendar tab has its own "Vessel" dropdown (independent of the
+  // sidebar) — calScope applies it on top of `scope` so the dropdown actually filters the
+  // calendar (previously rendered but had no effect on calTxnsByDay/dayTxns/rangeTxns).
+  const calScope = useMemo(() => (vessel === 'All' ? scope : scope.filter((t) => t.vessel === vessel)), [scope, vessel]);
   const calYear = calMonth.getFullYear();
   const calMon = calMonth.getMonth();
   const calDaysInMonth = new Date(calYear, calMon + 1, 0).getDate();
   const calFirstDay = new Date(calYear, calMon, 1).getDay();
   const calTxnsByDay = useMemo(() => {
     const map = new Map<number, { pay: number; rec: number; count: number }>();
-    scope.forEach((t) => {
+    calScope.forEach((t) => {
       if (!t.dueIso) return;
       const d = new Date(t.dueIso);
       if (d.getFullYear() !== calYear || d.getMonth() !== calMon) return;
@@ -745,8 +957,26 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
       map.set(day, e);
     });
     return map;
-  }, [scope, calYear, calMon]);
+  }, [calScope, calYear, calMon]);
 
+  // Alerts for the topbar Notifications bell — scoped to the current sidebar vessel (fleet-wide when none), same source as the global TopNav bell.
+  const acctAlerts = useMemo(() => computeAccountAlerts(scope), [scope]);
+
+  const exportCurrentTab = () => {
+    const stampTag = ACCT_NOW.toISOString().slice(0, 10);
+    if (tab === 'calendar') { downloadAccountFile(`accounts-calendar-${stampTag}.xls`, accountExcel(TXN_EXPORT_HEADERS, txnExportRows(calScope)), 'application/vnd.ms-excel'); return; }
+    if (tab === 'payments') { downloadAccountFile(`accounts-payments-${stampTag}.xls`, accountExcel(TXN_EXPORT_HEADERS, txnExportRows(filtered)), 'application/vnd.ms-excel'); return; }
+    if (tab === 'cashflow') { downloadAccountFile(`accounts-cashflow-${stampTag}.xls`, accountExcel(TXN_EXPORT_HEADERS, txnExportRows(vessel === 'All' ? scope : scope.filter((t) => t.vessel === vessel))), 'application/vnd.ms-excel'); return; }
+    if (tab === 'reports') { setTab('reports'); return; }
+    // dashboard — export whatever is currently in scope (fleet-wide unless a vessel is selected).
+    downloadAccountFile(`accounts-dashboard-${stampTag}.xls`, accountExcel(TXN_EXPORT_HEADERS, txnExportRows(scope)), 'application/vnd.ms-excel');
+  };
+
+  const saveCashInBank = () => {
+    const n = Number(cashDraft.replace(/[,$\s]/g, ''));
+    if (Number.isFinite(n)) setWorkflowConfig({ cashInBankUsd: n });
+    setEditingCash(false);
+  };
 
   return (
     <div className="fv-acct">
@@ -759,8 +989,32 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
             {selectedVoyage && <span className="fv-acct__vessel-meta">{fixtureNo || selectedVoyage.id} · IMO {selectedVoyage.imo || '—'} · {selectedVoyage.portFrom || '—'} → {selectedVoyage.portTo || '—'} · {selectedVoyage.client || '—'}</span>}
           </div>
           <div className="fv-acct__actions">
-            <button type="button" className="fv-acct__btn fv-acct__btn--ghost" onClick={() => setTab('reports')}><i className="fas fa-file-export" /> Export</button>
-            <button type="button" className="fv-acct__icon-btn fv-acct__icon-btn--lg" title="Notifications"><i className="fas fa-bell" /></button>
+            <button type="button" className="fv-acct__btn fv-acct__btn--go" onClick={() => setNewTxnOpen(true)}><i className="fas fa-plus" /> New Transaction</button>
+            <button type="button" className="fv-acct__btn fv-acct__btn--ghost" onClick={exportCurrentTab} title={`Export the current ${TABS.find((tb) => tb.id === tab)?.label} view`}><i className="fas fa-file-export" /> Export</button>
+            <div style={{ position: 'relative' }}>
+              <button type="button" className="fv-acct__icon-btn fv-acct__icon-btn--lg" title="Notifications" onClick={() => setNotifOpen((v) => !v)}>
+                <i className="fas fa-bell" />
+                {acctAlerts.length > 0 && <span className="fv-acct__audit-badge" style={{ position: 'absolute', top: -4, right: -4 }}>{acctAlerts.length}</span>}
+              </button>
+              {notifOpen && (
+                <div className="fv-acct__audit-popup" style={{ right: 0, left: 'auto', width: 320 }} onClick={(e) => e.stopPropagation()}>
+                  <div className="fv-acct__audit-popup-head">
+                    <span><i className="fas fa-bell" /> Accounts Alerts</span>
+                    <button type="button" className="fv-acct__icon-btn" onClick={() => setNotifOpen(false)}><i className="fas fa-xmark" /></button>
+                  </div>
+                  <ul className="fv-acct__list" style={{ maxHeight: 280, overflowY: 'auto', padding: '8px 12px', margin: 0 }}>
+                    {acctAlerts.length === 0 ? (
+                      <li style={{ color: 'var(--a-faint)', fontSize: 11, padding: '8px 0' }}>Nothing needs attention right now.</li>
+                    ) : acctAlerts.map((a) => (
+                      <li key={a.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--a-border)', cursor: 'pointer' }} onClick={() => { setTab('payments'); setNotifOpen(false); }}>
+                        <div><i className={`fas ${a.icon}`} style={{ marginRight: 6 }} /> <b>{a.text}</b></div>
+                        <small style={{ color: 'var(--a-faint)' }}>{a.sub}</small>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           </div>
         </header>
         <nav className="fv-acct__tabs" aria-label="Accounts sections">
@@ -785,7 +1039,21 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
               <Kpi label="Due Today (In)" value={abbr(recDueToday.reduce((s,t)=>s+t.amount,0))} tone="green" icon="fa-arrow-down-to-bracket" hint={`${recDueToday.length} receivables`} />
               <Kpi label="Pending Approval" value={String(pendingApprovals.length)} tone="purple" icon="fa-user-clock" hint={`${abbr(pendingApprovals.reduce((s,t)=>s+t.amount,0))} total`} />
               <Kpi label="Due This Week" value={abbr(kpi.upcomingAmt)} tone="blue" icon="fa-calendar-week" hint={`${kpi.upcomingCount} payables`} />
-              <Kpi label="Cash In Bank" value={abbr(kpi.cash)} tone="blue" icon="fa-vault" hint={`As on ${asOn}`} />
+              {editingCash ? (
+                <div className="fv-acct__kpi fv-acct__kpi--blue">
+                  <div className="fv-acct__kpi-icon"><i className="fas fa-vault" aria-hidden="true" /></div>
+                  <div className="fv-acct__kpi-body">
+                    <span className="fv-acct__kpi-label">Cash In Bank</span>
+                    <input className="fv-acct__in" autoFocus value={cashDraft} onChange={(e) => setCashDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveCashInBank(); if (e.key === 'Escape') setEditingCash(false); }} style={{ width: '100%', marginTop: 2 }} />
+                    <span className="fv-acct__kpi-foot">
+                      <button type="button" className="fv-acct__link-btn" onClick={saveCashInBank}>Save</button>
+                      <button type="button" className="fv-acct__link-btn" onClick={() => setEditingCash(false)} style={{ marginLeft: 8 }}>Cancel</button>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <Kpi label="Cash In Bank" value={abbr(kpi.cash)} tone="blue" icon="fa-vault" hint={`As on ${asOn}`} onEdit={() => { setCashDraft(String(workflowConfig.cashInBankUsd)); setEditingCash(true); }} />
+              )}
               <Kpi label="MTD Collected" value={abbr(mtd.collected)} tone="green" icon="fa-circle-check" hint="This month" />
               <Kpi label="Working Capital" value={abbr(kpi.working)} tone="green" icon="fa-scale-balanced" />
             </div>
@@ -1158,7 +1426,7 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
                 // Apply date range filter
                 const inRange = (!calFrom || dayIso >= calFrom) && (!calTo || dayIso <= calTo);
                 const info = calTxnsByDay.get(day);
-                const dayTxns = (info && inRange) ? scope.filter(t => {
+                const dayTxns = (info && inRange) ? calScope.filter(t => {
                   if (!t.dueIso) return false;
                   const d = new Date(t.dueIso);
                   return d.getFullYear() === calYear && d.getMonth() === calMon && d.getDate() === day;
@@ -1184,7 +1452,7 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
             </div>
             {/* Date range summary list */}
             {(calFrom || calTo) && (() => {
-              const rangeTxns = scope.filter(t => {
+              const rangeTxns = calScope.filter(t => {
                 if (!t.dueIso) return false;
                 return (!calFrom || t.dueIso >= calFrom) && (!calTo || t.dueIso <= calTo);
               }).sort((a,b)=>a.dueIso.localeCompare(b.dueIso));
@@ -1271,9 +1539,19 @@ export function AccountsPage({ mode }: { mode?: 'create' } = {}) {
                   </div></div>
                 </section>;
               })()}
+
+        {/* ---- CONFIGURATION HISTORY ---- */}
+        {tab === 'confighistory' && <ConfigHistoryTab entries={configHistory} />}
       </div>
 
       {detail && <TxnDetail t={detail} onClose={() => setDetail(null)} />}
+      {newTxnOpen && (
+        <NewTxnModal
+          vessels={vessels.filter((v) => v !== 'All')}
+          onClose={() => setNewTxnOpen(false)}
+          onCreated={() => setNewTxnOpen(false)}
+        />
+      )}
     </div>
   );
 }

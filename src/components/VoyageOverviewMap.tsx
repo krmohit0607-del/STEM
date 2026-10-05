@@ -11,10 +11,21 @@ import {
 import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
+
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
 import { MapCursorPosition } from './MapCursorPosition';
-import { MapLayersControl } from './MapLayersControl';
+import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapLayersControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
 /**
  * Voyage Overview Map — rendered on `/?voyage=ID`.
@@ -138,6 +149,7 @@ function VoyageOverviewInner({ row }: InnerProps) {
 
   // Animate the ship marker along the polyline.
   const [progress, setProgress] = useState<number>(0);
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
   const rafRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
   const lastIdx = Math.max(0, renderPath.length - 1);
@@ -294,6 +306,8 @@ function VoyageOverviewInner({ row }: InnerProps) {
           {...(bounds ? { bounds } : { center: [20, 0] as LatLngExpression, zoom: 3 })}
           minZoom={2}
           maxZoom={10}
+          maxBounds={WORLD_PAN_BOUNDS}
+          maxBoundsViscosity={1.0}
           worldCopyJump
           scrollWheelZoom
           style={{ height: '100%', width: '100%' }}
@@ -348,12 +362,15 @@ function VoyageOverviewInner({ row }: InnerProps) {
             </Marker>
           )}
 
-          <MapLayersControl position="topright" />
+          <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+          {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
           <WeatherFieldControl position="topright" />
           <AreaConstraintsControl position="topright" />
           <WeatherPointControl position="topright" />
           <PortsControl position="topright" />
           <RulerControl position="topright" />
+          <CycloneLayer position="topright" />
+          <WeatherAlertsControl position="topright" />
           <MapCursorPosition />
         </MapContainer>
       </div>

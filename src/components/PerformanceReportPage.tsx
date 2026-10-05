@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { getPerformanceReport, type AbstractRow, type DetailedRow, type PerformanceReport, type VoyageSummaryRow } from '../data/reports';
 import type { Voyage } from '../data/voyages';
+import { performanceApi } from '../api/performanceApi';
 import { ReportsPageShell } from './ReportsTabs';
 import { STUB_ROWS } from './TracksheetGrid';
 
@@ -62,19 +63,24 @@ function buildFullVoyageReport(voyage: Parameters<typeof getPerformanceReport>[0
       lsmgoCons: lsmgoCons.toFixed(3),
     };
   });
-  const abstract = STUB_ROWS.map((row, index) => ({
-    code: index === 0 ? 'D' : index === STUB_ROWS.length - 1 ? 'A' : row.rt || 'N',
-    date: row.date,
-    time: row.time,
-    lat: row.lat,
-    lon: row.lng,
-    dist: row.distR?.toFixed(2) ?? '',
-    spd: row.avgSpeedO?.toFixed(2) ?? '',
-    vlsfoRob: row.vlsfoRob?.toFixed(3) ?? '0.000',
-    vlsfoDaily: row.vlsfoRob?.toFixed(3) ?? '0.000',
-    lsmgoRob: row.lsmgoRob?.toFixed(3) ?? '0.000',
-    lsmgoDaily: row.lsmgoRob?.toFixed(3) ?? '0.000',
-  }));
+  const abstract = STUB_ROWS.map((row, index) => {
+    const previous = STUB_ROWS[index - 1];
+    const vlsfoDaily = previous?.vlsfoRob != null && row.vlsfoRob != null ? Math.max(0, previous.vlsfoRob - row.vlsfoRob) : 0;
+    const lsmgoDaily = previous?.lsmgoRob != null && row.lsmgoRob != null ? Math.max(0, previous.lsmgoRob - row.lsmgoRob) : 0;
+    return {
+      code: index === 0 ? 'D' : index === STUB_ROWS.length - 1 ? 'A' : row.rt || 'N',
+      date: row.date,
+      time: row.time,
+      lat: row.lat,
+      lon: row.lng,
+      dist: row.distR?.toFixed(2) ?? '',
+      spd: row.avgSpeedO?.toFixed(2) ?? '',
+      vlsfoRob: row.vlsfoRob?.toFixed(3) ?? '0.000',
+      vlsfoDaily: vlsfoDaily.toFixed(3),
+      lsmgoRob: row.lsmgoRob?.toFixed(3) ?? '0.000',
+      lsmgoDaily: lsmgoDaily.toFixed(3),
+    };
+  });
   const detailed = STUB_ROWS.map((row, index) => ({
     code: index === 0 ? 'D' : index === STUB_ROWS.length - 1 ? 'A' : row.rt || 'N',
     date: row.date,
@@ -123,8 +129,41 @@ export function PerformanceReportPage() {
 function PerformanceReportContent({ voyage }: { voyage: Voyage }) {
   const [editing, setEditing] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [report, setReport] = useState<PerformanceReport>(() => buildFullVoyageReport(voyage));
   const r = useMemo(() => recalculateReport(report), [report]);
+
+  // Prefer a previously-saved report (from the Performance module's own
+  // backend/database) over the locally-generated one, once it loads.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const saved = await performanceApi.getReport(voyage.id);
+        if (!cancelled && saved) setReport(saved.report);
+      } catch {
+        /* keep the generated report on failure — backend may be offline */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [voyage.id]);
+
+  const saveChanges = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await performanceApi.saveReport(voyage.id, voyage.imo, voyage.vessel, r);
+      setSaved(true);
+      setEditing(false);
+    } catch {
+      setSaveError('Could not save — check your connection and try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const updateMeta = (key: keyof typeof r.meta, value: string) => {
     setReport((current) => ({ ...current, meta: { ...current.meta, [key]: value } }));
@@ -198,13 +237,19 @@ function PerformanceReportContent({ voyage }: { voyage: Voyage }) {
           <button type="button" className="fv-report__btn" onClick={() => { setEditing((value) => !value); setSaved(false); }}>
             <i className={`fas ${editing ? 'fa-eye' : 'fa-pen-to-square'}`} aria-hidden="true" /> {editing ? 'Preview Report' : 'Edit Report'}
           </button>
-          {editing && <button type="button" className="fv-report__btn" onClick={() => { setSaved(true); setEditing(false); }}> <i className="fas fa-save" aria-hidden="true" /> Save Changes</button>}
+          {editing && (
+            <button type="button" className="fv-report__btn" onClick={() => void saveChanges()} disabled={saving}>
+              <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-save'}`} aria-hidden="true" /> {saving ? 'Saving…' : 'Save Changes'}
+            </button>
+          )}
           <button type="button" className="fv-report__btn fv-report__btn--primary" onClick={() => window.print()}>
             <i className="fas fa-file-pdf" aria-hidden="true" /> Generate PDF
           </button>
         </div>
       </div>
-      {saved && <p className="fv-performance__saved"><i className="fas fa-circle-check" aria-hidden="true" /> Report changes saved for this session. Calculations updated automatically.</p>}
+      {saved && <p className="fv-performance__saved"><i className="fas fa-circle-check" aria-hidden="true" /> Report changes saved to the database. Calculations updated automatically.</p>}
+      {saveError && <p className="fv-performance__save-error"><i className="fas fa-triangle-exclamation" aria-hidden="true" /> {saveError}</p>}
+
 
       {/* 1. Cover / report details */}
       <section className="fv-voyage__card">

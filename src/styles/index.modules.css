@@ -196,8 +196,10 @@
 .fv-bk__field-value--accent { color: var(--b-accent); }
 .fv-bk__field-value--good { color: var(--b-good); }
 .fv-bk__field-value--bad { color: var(--b-bad); }
+.fv-bk__qty-flag { color: var(--b-bad); margin-left: 6px; font-size: 11px; }
 .fv-bk__note { font-size: 11px; color: var(--b-muted); background: rgba(255,255,255,.02); border: 1px solid var(--b-border-soft); border-radius: 7px; padding: 6px 8px; }
 .fv-bk__note i { color: var(--b-accent); margin-right: 5px; }
+.fv-bk__divider { border: none; border-top: 1px solid var(--b-border-soft); margin: 10px 0; }
 
 /* timeline */
 .fv-bk__timeline { list-style: none; margin: 0; padding: 2px 0 2px 4px; }
@@ -400,9 +402,14 @@
 .fv-bk__modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--b-border); }
 .fv-bk__form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
 .fv-bk__ffield { display: flex; flex-direction: column; gap: 4px; font-size: 10px; color: var(--b-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
-.fv-bk__ffield input, .fv-bk__ffield select { background: var(--b-panel-2); border: 1px solid var(--b-border); color: var(--b-text); border-radius: 7px; padding: 7px 9px; font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.fv-bk__ffield input, .fv-bk__ffield select, .fv-bk__ffield textarea { background: var(--b-panel-2); border: 1px solid var(--b-border); color: var(--b-text); border-radius: 7px; padding: 7px 9px; font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; font-family: inherit; resize: vertical; }
 .fv-bk__ffield input:disabled { color: var(--b-muted); }
-.fv-bk__ffield input:focus, .fv-bk__ffield select:focus { outline: none; border-color: var(--b-accent); }
+.fv-bk__ffield input:focus, .fv-bk__ffield select:focus, .fv-bk__ffield textarea:focus { outline: none; border-color: var(--b-accent); }
+.fv-bk__rfq-suppliers { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow: auto; }
+.fv-bk__rfq-supplier-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--b-border); border-radius: 7px; font-size: 12px; }
+.fv-bk__rfq-supplier-row span:first-of-type { flex: 1 1 auto; font-weight: 600; }
+.fv-bk__rfq-add-row { display: flex; gap: 8px; margin-top: 6px; }
+.fv-bk__rfq-add-row input { flex: 1 1 auto; background: var(--b-panel-2); border: 1px solid var(--b-border); color: var(--b-text); border-radius: 7px; padding: 7px 9px; font-size: 12px; }
 
 /* ==========================================================================
    Accounts ï¿½ Financial Control Center (.fv-acct)
@@ -686,6 +693,10 @@
 .fv-acct__field { display: flex; flex-direction: column; gap: 2px; }
 .fv-acct__field span { font-size: 9.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--a-faint); font-weight: 600; }
 .fv-acct__field b { font-size: 12px; font-weight: 600; word-break: break-word; }
+.fv-acct__field select, .fv-acct__field input { background: var(--a-panel-2); border: 1px solid var(--a-border); color: var(--a-text); border-radius: 7px; padding: 6px 8px; font-size: 12px; font-weight: 500; }
+.fv-acct__field select:focus, .fv-acct__field input:focus { outline: none; border-color: var(--a-accent); }
+.fv-acct__in { background: var(--a-panel-2); border: 1px solid var(--a-border); color: var(--a-text); border-radius: 7px; padding: 5px 7px; font-size: 12px; font-weight: 600; }
+.fv-acct__in:focus { outline: none; border-color: var(--a-accent); }
 /* Workflow tab */
 .fv-acct__wf-body { display: flex; flex-direction: column; gap: 16px; }
 .fv-acct__wf-pipeline { display: flex; align-items: flex-start; gap: 0; overflow-x: auto; padding: 12px 4px; background: var(--a-bg); border-radius: 10px; border: 1px solid var(--a-border); }
@@ -931,7 +942,7 @@
 .fv-fleetmenu__acct-split { color: #8b949e; font-size: 10px; }
 .fv-fleetmenu__acct-count { margin-left: auto; font-size: 10px; color: #8b949e; }
 /* Accounts vessel card — aligns with .fv-fleetmenu__item base styles */
-.fv-fleetmenu__acct-item { display: flex; flex-direction: column; gap: 3px; }
+.fv-fleetmenu__acct-item { display: flex; flex-direction: column; gap: 3px; width: 100%; box-sizing: border-box; }
 .fv-fleetmenu__acct-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; margin-top: 2px; flex-shrink: 0; }
 .fv-fleetmenu__acct-row1 { display: flex; align-items: center; gap: 6px; }
 .fv-fleetmenu__acct-row1 .fv-fleetmenu__vessel { flex: 1; font-size: 13px; font-weight: 600; color: #fff; }

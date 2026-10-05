@@ -1,16 +1,27 @@
 import { useMemo, useState } from 'react';
 import { MapContainer, Marker, Polyline, TileLayer, Tooltip } from 'react-leaflet';
-import L from 'leaflet';
+import L, { type LatLngBoundsExpression } from 'leaflet';
 
 import { PORT_COORDS } from '../data/fleet';
 import { unwrapRouteCoordinates } from '../data/antimeridian';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
-import { MapLayersControl } from './MapLayersControl';
+import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapLayersControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
+
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
 
 /**
  * Fleet Map View — rendered when the Fleet List View toggle is set to
@@ -114,6 +125,7 @@ interface PlacedVessel extends MapVessel {
 
 export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
 
   const placed = useMemo<PlacedVessel[]>(() => {
     return vessels.map((v) => {
@@ -139,6 +151,8 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
         center={[20, 30]}
         zoom={2}
         minZoom={2}
+        maxBounds={WORLD_PAN_BOUNDS}
+        maxBoundsViscosity={1.0}
         worldCopyJump
         scrollWheelZoom
         style={{ height: '100%', width: '100%' }}
@@ -210,12 +224,15 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
             </Tooltip>
           </Marker>
         ))}
-        <MapLayersControl position="topright" />
+        <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+        {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
         <WeatherFieldControl position="topright" />
         <AreaConstraintsControl position="topright" />
         <WeatherPointControl position="topright" />
         <PortsControl position="topright" />
         <RulerControl position="topright" />
+        <CycloneLayer position="topright" />
+        <WeatherAlertsControl position="topright" />
         <MapCursorPosition />
       </MapContainer>
     </div>

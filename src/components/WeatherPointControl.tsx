@@ -1,15 +1,33 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Popup, useMap, useMapEvents } from 'react-leaflet';
 import L, { type ControlPosition } from 'leaflet';
 
-import { FIELD_FACTORS, type FieldFactor } from '../data/weatherField';
+import { FIELD_FACTORS, sampleWeatherField, type FieldFactor } from '../data/weatherField';
 import {
   fetchPointForecast,
   fetchPointWeather,
+  fetchPointWeatherAt,
   type ForecastRow,
   type PointFactor,
 } from '../data/openMeteo';
+import { useSimWeatherHour } from '../data/routeSimulatorStore';
+
+// Same storage key/event WeatherFieldControl.tsx uses for the shared
+// forecast hour — kept as plain string constants here (not a shared import)
+// so editing either file can never break the other's React Fast Refresh
+// boundary (a component file should only export components).
+const HOUR_KEY = 'fv.map.weatherField.hour';
+const HOUR_EVENT = 'fv-weatherfield-change';
+
+function readSharedHour(): number {
+  try {
+    const n = Number(localStorage.getItem(HOUR_KEY));
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * Drop-in map control that lets the user inspect the weather at any point.
@@ -39,7 +57,7 @@ function ControlPortal({
   useEffect(() => {
     const ctrl = new L.Control({ position });
     ctrl.onAdd = () => {
-      const div = L.DomUtil.create('div', 'fv-wp-control');
+      const div = L.DomUtil.create('div', 'fv-wp-control fv-weather-point-control');
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
       setContainer(div);
@@ -72,6 +90,16 @@ function formatValue(v: PointFactor, factor: FieldFactor): string {
 function formatCoord(value: number, isLat: boolean): string {
   const hemi = isLat ? (value >= 0 ? 'N' : 'S') : value >= 0 ? 'E' : 'W';
   return `${Math.abs(value).toFixed(2)}° ${hemi}`;
+}
+
+/** "Now" or a UTC date+time label for an hour offset from now, e.g. "Oct 7, 15:00 UTC". */
+function utcWhenLabel(offsetHours: number): string {
+  if (offsetHours <= 0) return 'Now';
+  const d = new Date(Date.now() + offsetHours * 3600_000);
+  const month = d.toLocaleString('en-US', { timeZone: 'UTC', month: 'short' });
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${month} ${d.getUTCDate()}, ${hh}:${mm} UTC`;
 }
 
 /** Build a CSV of the hourly forecast, one column per (directional) factor. */
@@ -109,6 +137,19 @@ function downloadTextFile(text: string, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** Synthetic/modelled readout for every factor at a point — used when the
+ *  live API is unavailable (rate-limited, offline, etc.) so a click always
+ *  shows something instead of a dead-end error, matching how the map's own
+ *  colour field already falls back to this same model. */
+function buildSyntheticReadout(lat: number, lon: number, hour: number): Record<string, PointFactor> {
+  const out: Record<string, PointFactor> = {};
+  for (const f of FIELD_FACTORS) {
+    const s = sampleWeatherField(lat, lon, f.id, hour);
+    out[f.id] = { id: f.id, magnitude: s.magnitude, directionDeg: f.directional ? s.directionDeg : null };
+  }
+  return out;
+}
+
 export function WeatherPointControl({
   position = 'topright',
 }: {
@@ -123,7 +164,45 @@ export function WeatherPointControl({
   } | null>(null);
   const [data, setData] = useState<Record<string, PointFactor> | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('ready');
+  const [estimated, setEstimated] = useState(false);
   const [downloading, setDownloading] = useState(false);
+
+  // Follow the same shared forecast hour as the weather field/timeline, so
+  // an open popup updates to match whenever the timeline moves.
+  const [hour, setHour] = useState<number>(() => readSharedHour());
+  const simHour = useSimWeatherHour();
+  const effectiveHour = simHour ?? hour;
+  useEffect(() => {
+    const sync = () => setHour(readSharedHour());
+    window.addEventListener(HOUR_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(HOUR_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+
+  const fetchWeatherFor = (lat: number, lon: number, hourAt: number) => {
+    setStatus('loading');
+    const fetcher = hourAt > 0 ? fetchPointWeatherAt(lat, lon, new Date(Date.now() + hourAt * 3600_000)) : fetchPointWeather(lat, lon);
+    fetcher
+      .then((res) => {
+        if (Object.keys(res).length === 0) {
+          setData(buildSyntheticReadout(lat, lon, hourAt));
+          setEstimated(true);
+          setStatus('ready');
+          return;
+        }
+        setData(res);
+        setEstimated(false);
+        setStatus('ready');
+      })
+      .catch(() => {
+        setData(buildSyntheticReadout(lat, lon, hourAt));
+        setEstimated(true);
+        setStatus('ready');
+      });
+  };
 
   const map = useMapEvents({
     click(e) {
@@ -137,19 +216,23 @@ export function WeatherPointControl({
       const lon = wrapped.lng;
       setPoint({ lat, lon, displayLat: e.latlng.lat, displayLng: e.latlng.lng });
       setData(null);
-      setStatus('loading');
-      fetchPointWeather(lat, lon)
-        .then((res) => {
-          if (Object.keys(res).length === 0) {
-            setStatus('error');
-            return;
-          }
-          setData(res);
-          setStatus('ready');
-        })
-        .catch(() => setStatus('error'));
+      fetchWeatherFor(lat, lon, effectiveHour);
     },
   });
+
+  // Re-fetch for the currently-open point whenever the timeline hour moves —
+  // debounced so scrubbing/playback doesn't fire a request every tick.
+  const pointRef = useRef(point);
+  pointRef.current = point;
+  useEffect(() => {
+    if (!pointRef.current) return;
+    const id = window.setTimeout(() => {
+      const p = pointRef.current;
+      if (p) fetchWeatherFor(p.lat, p.lon, effectiveHour);
+    }, 500);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveHour]);
 
   // Crosshair cursor while inspecting.
   useEffect(() => {
@@ -164,6 +247,7 @@ export function WeatherPointControl({
     setPoint(null);
     setData(null);
     setStatus('ready');
+    setEstimated(false);
   };
 
   const handleDownload = () => {
@@ -210,6 +294,13 @@ export function WeatherPointControl({
                 {formatCoord(point.lat, true)}, {formatCoord(point.lon, false)}
               </span>
             </div>
+            <div className="fv-wp-popup__when">{utcWhenLabel(effectiveHour)}</div>
+            {estimated && status === 'ready' && (
+              <div className="fv-wp-popup__estimated">
+                <i className="fas fa-triangle-exclamation" aria-hidden="true" /> Live data
+                unavailable right now — showing an estimated reading.
+              </div>
+            )}
 
             {status === 'loading' && (
               <div className="fv-wp-popup__msg">Loading weather…</div>

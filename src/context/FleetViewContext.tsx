@@ -20,7 +20,7 @@ import type { AuthenticatedUserDto, CurrentUser } from '../types';
 export interface FleetViewContextValue {
   user: CurrentUser | undefined;
   roles: string[];
-  /** True when `/api/security/users/current` is in flight on first load. */
+  /** True when `/api/users/me` is in flight on first load. */
   isLoading: boolean;
   /** Truthy when the API call failed (e.g. unauthenticated). */
   error: ApiError | undefined;
@@ -40,7 +40,7 @@ const FleetViewReactContext = createContext<FleetViewContextValue | undefined>(u
 /**
  * Dev-mode stub user. The auth flow is cross-origin (cookie set on
  * `localhost:5001`, app served from `localhost:5173`), so during local
- * development the `/api/security/users/current` call will usually fail.
+ * development the `/api/users/me` call will usually fail.
  * In `vite dev` (`import.meta.env.DEV`) we fall back to this stub so the
  * layout actually renders. Production builds (`vite build`) never use it.
  */
@@ -58,12 +58,21 @@ const DEV_STUB_USER: CurrentUser = {
 };
 
 function extractRoles(dto: AuthenticatedUserDto | undefined): string[] {
-  const list = dto?.Roles ?? dto?.User?.Roles ?? dto?.CurrentUser?.Roles ?? [];
-  return list.map((r) => r.text).filter((t): t is string => typeof t === 'string');
+  const list = dto?.Roles ?? dto?.User?.Roles ?? dto?.CurrentUser?.Roles;
+  if (list) return list.map((r) => r.text).filter((t): t is string => typeof t === 'string');
+  // Flat `/api/users/me` shape returns a single `role` string instead of a Roles collection.
+  const single = (dto as { role?: unknown } | undefined)?.role;
+  return typeof single === 'string' ? [single] : [];
 }
 
 function pickUser(dto: AuthenticatedUserDto | undefined): CurrentUser | undefined {
-  return dto?.CurrentUser ?? dto?.User;
+  if (!dto) return undefined;
+  if (dto.CurrentUser) return dto.CurrentUser;
+  if (dto.User) return dto.User;
+  // Flat `/api/users/me` shape (current backend): the dto itself IS the user record
+  // (`{ id, fullName, email, role, ... }`), not wrapped in `User`/`CurrentUser`.
+  if ('id' in dto || 'email' in dto || 'fullName' in dto) return dto as unknown as CurrentUser;
+  return undefined;
 }
 
 export function FleetViewProvider({ children }: { children: ReactNode }) {
@@ -79,7 +88,7 @@ export function FleetViewProvider({ children }: { children: ReactNode }) {
     setError(undefined);
     setIsStubbed(false);
     try {
-      const dto = await api.get<AuthenticatedUserDto>('/api/security/users/current');
+      const dto = await api.get<AuthenticatedUserDto>('/api/users/me');
       const u = pickUser(dto);
       setUser(u);
       setRoles(extractRoles(dto));

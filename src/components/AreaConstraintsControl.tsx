@@ -5,6 +5,7 @@ import L, { type ControlPosition } from 'leaflet';
 
 import { AreaConstraintsLayer, ZONE_STYLES } from './AreaConstraintsLayer';
 import { AREA_CONSTRAINTS } from '../data/areaConstraints';
+import { MAP_CONTROL_OPEN_EVENT, notifyMapControlOpen } from './mapControlEvents';
 
 /**
  * Drop-in map control that lets the user show area constraints on ANY map and
@@ -88,6 +89,22 @@ export function AreaConstraintsControl({
   const [types, setTypes] = useState<Set<string>>(() => readTypes());
 
   useEffect(() => {
+    const closeWhenAnotherOpens = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== 'area-constraints') setOpen(false);
+    };
+    window.addEventListener(MAP_CONTROL_OPEN_EVENT, closeWhenAnotherOpens);
+    return () => window.removeEventListener(MAP_CONTROL_OPEN_EVENT, closeWhenAnotherOpens);
+  }, []);
+
+  const toggleOpen = () => {
+    setOpen((current) => {
+      const next = !current;
+      if (next) notifyMapControlOpen('area-constraints');
+      return next;
+    });
+  };
+
+  useEffect(() => {
     try {
       localStorage.setItem(VISIBLE_KEY, visible ? '1' : '0');
     } catch {
@@ -137,7 +154,7 @@ export function AreaConstraintsControl({
           title="Area constraints"
           aria-label="Area constraints"
           aria-expanded={open}
-          onClick={() => setOpen((o) => !o)}
+          onClick={toggleOpen}
         >
           <i className="fas fa-draw-polygon" aria-hidden="true" />
         </button>

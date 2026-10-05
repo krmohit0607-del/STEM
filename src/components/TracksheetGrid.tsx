@@ -29,6 +29,7 @@ import { setRouteReportMarkers } from '../data/routeReportMarkers';
 import { useActiveSimRoute } from '../data/routeSimulatorStore';
 import { loadVoyageShared } from '../data/voyageOverrides';
 import { queueCommsDraft } from '../data/commsStore';
+import { performanceApi, type TracksheetRowApiDto } from '../api/performanceApi';
 import {
   fromDateInput,
   fromTimeInput,
@@ -554,9 +555,30 @@ export function TracksheetGrid() {
   const [editing, setEditing] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
   const [forecasting, setForecasting] = useState(false);
   const [forecastData, setForecastData] = useState<{ lat: number; lng: number; label: string; windSpd: string; wavHt: string; time: string }[] | null>(null);
+
+  // Load any previously-saved tracksheet for this voyage from the Performance
+  // module's own backend/database; falls back to the bundled stub rows (demo
+  // data) when nothing has been saved for this voyage yet.
+  useEffect(() => {
+    const voyageId = selectedVoyage?.id;
+    if (!voyageId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const saved = await performanceApi.getTracksheet(voyageId);
+        if (!cancelled && saved.length > 0) setRows(saved);
+      } catch {
+        /* keep stub rows on failure — backend may be offline */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVoyage?.id]);
 
   const allChecked = rows.length > 0 && checkedIds.length === rows.length;
   const someChecked = checkedIds.length > 0;
@@ -668,11 +690,21 @@ export function TracksheetGrid() {
     setCheckedIds([]);
   };
 
-  const saveSelected = () => {
-    // No tracksheet API yet — flash a confirmation. Selection is preserved so
-    // the operator can see which rows were saved.
-    setSavedFlash(true);
-    window.setTimeout(() => setSavedFlash(false), 1500);
+  const saveSelected = async () => {
+    // Persists the whole grid (the Performance module's tracksheet is a
+    // single ordered document per voyage) to its own backend/database;
+    // selection just gates the button per the existing UX convention.
+    const voyageId = selectedVoyage?.id;
+    if (!voyageId) return;
+    setSaveError(null);
+    try {
+      const payload: TracksheetRowApiDto[] = rows.map(({ id, nextPort, ...rest }) => ({ id, nextPort, ...rest }));
+      await performanceApi.saveTracksheet(voyageId, selectedVoyage?.imo ?? '', payload);
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 1500);
+    } catch {
+      setSaveError('Could not save — check your connection and try again.');
+    }
   };
 
   /**
@@ -1101,6 +1133,7 @@ export function TracksheetGrid() {
             <i className={`fas ${savedFlash ? 'fa-check' : 'fa-floppy-disk'}`} aria-hidden="true" />{' '}
             {savedFlash ? 'Saved' : `Save${someChecked ? ` (${checkedIds.length})` : ''}`}
           </button>
+          {saveError && <span className="fv-tracksheet__save-error">{saveError}</span>}
           <button
             type="button"
             className="fv-tracksheet__action fv-tracksheet__action--danger"

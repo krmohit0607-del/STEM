@@ -4,8 +4,15 @@
  *
  * Admin store: contact details plus login credentials and role. User edits
  * (add / update / delete) are persisted to localStorage and layered over the
- * built-in seed list, mirroring the Email Templates store.
+ * built-in seed list, mirroring the Email Templates store, and mirrored to the
+ * tenant database via `clientsApi` so every module (Operations, Chartering,
+ * Accounts) sees the same account/charterer/broker list, not just the browser
+ * that created it. Login credentials (`username`/`password`) have no backend
+ * equivalent (the Clients API only models the commercial counterparty record)
+ * so they're preserved locally across a backend sync rather than round-tripped.
  */
+import { useSyncExternalStore } from 'react';
+import { clientsApi, type BackendClientDto, type CreateClientDto, type UpdateClientDto } from '../api/clientsApi';
 
 export interface Client {
   id: string;
@@ -218,7 +225,9 @@ export function loadClients(): Client[] {
 
 export function saveClients(clients: Client[]): void {
   try {
+    clientSnapshot = clients;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(clients));
+    notifyClientListeners();
   } catch {
     /* storage unavailable — ignore */
   }
@@ -235,6 +244,106 @@ export function resetClients(): Client[] {
 
 export function newClientId(): string {
   return `cl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/* ----- Backend sync ----- */
+
+const toBackendKind = (kind: Client['kind']): string => (kind === 'Service Provider' ? 'ServiceProvider' : 'Account');
+const fromBackendKind = (kind: string): Client['kind'] => (kind === 'ServiceProvider' ? 'Service Provider' : 'Account');
+
+function mapBackendToClient(dto: BackendClientDto, existing?: Client): Client {
+  return {
+    id: dto.id,
+    kind: fromBackendKind(dto.kind),
+    category: dto.category ?? '',
+    name: dto.name,
+    location: dto.location ?? '',
+    email: dto.email ?? '',
+    contactName: dto.contactName ?? '',
+    phone: dto.phone ?? '',
+    // Login credentials aren't part of the backend Client record — keep whatever this
+    // browser already has locally for this account rather than wiping it on every sync.
+    username: existing?.username ?? '',
+    password: existing?.password ?? '',
+    role: dto.role ?? '',
+    pic: dto.picAssignment ?? '',
+    active: dto.isActive,
+    bankAccount: {
+      verified: dto.bankAccountVerified,
+      details: existing?.bankAccount?.details ?? '',
+      bankName: dto.bankName ?? '',
+      accountHolder: dto.accountHolder ?? '',
+      accountNumber: dto.accountNumber ?? '',
+      swift: dto.swift ?? '',
+      iban: dto.iban ?? '',
+    },
+  };
+}
+
+export function clientToCreateDto(c: Client): CreateClientDto {
+  return {
+    name: c.name,
+    kind: toBackendKind(c.kind),
+    category: c.category,
+    location: c.location,
+    email: c.email,
+    contactName: c.contactName,
+    phone: c.phone,
+    role: c.role,
+    picAssignment: c.pic,
+    bankName: c.bankAccount.bankName,
+    accountHolder: c.bankAccount.accountHolder,
+    accountNumber: c.bankAccount.accountNumber,
+    swift: c.bankAccount.swift,
+    iban: c.bankAccount.iban,
+  };
+}
+
+export function clientToUpdateDto(c: Client): UpdateClientDto {
+  return { ...clientToCreateDto(c), isActive: c.active, bankAccountVerified: c.bankAccount.verified };
+}
+
+/** Pull the tenant's Clients from the backend, merging over the local cache (by id) so
+ *  browser-only fields like login credentials survive; returns the merged list. Never wipes
+ *  the local cache when the backend has no records yet — an empty backend just means nothing
+ *  has been pushed there so far, not that the locally-held accounts should be deleted. */
+export async function syncClientsFromBackend(): Promise<Client[]> {
+  try {
+    const list = await clientsApi.list();
+    if (!list || list.length === 0) return loadClients();
+    const existingById = new Map(loadClients().map((c) => [c.id, c]));
+    const mapped = list.map((dto) => mapBackendToClient(dto, existingById.get(dto.id)));
+    saveClients(mapped);
+    return mapped;
+  } catch {
+    // Offline / backend unavailable — fall back to whatever's cached locally.
+  }
+  return loadClients();
+}
+
+/* ----- Reactive client state management ----- */
+
+let clientSnapshot: Client[] = loadClients();
+const clientListeners = new Set<() => void>();
+
+function subscribeClients(listener: () => void): () => void {
+  clientListeners.add(listener);
+  return () => clientListeners.delete(listener);
+}
+
+function notifyClientListeners(): void {
+  clientListeners.forEach((l) => l());
+}
+
+export function getClients(): Client[] {
+  return clientSnapshot;
+}
+
+/** React hook: the live list of clients/accounts (updates whenever any component or a
+ *  backend sync changes them) — use this instead of `loadClients()` in components so
+ *  autocomplete lists (Owners/Charterers/Brokers) stay current without a page reload. */
+export function useClients(): Client[] {
+  return useSyncExternalStore(subscribeClients, getClients, getClients);
 }
 
 /**

@@ -1,3 +1,5 @@
+import { settingsApi } from '../api/settingsApi';
+
 // AUTO-GENERATED from AreaConstraints (updated).csv — do not edit by hand.
 // Regenerate with: node scripts/convertAreaConstraints.mjs
 //
@@ -36,6 +38,8 @@ export function constraintScope(c: AreaConstraint): AreaConstraintScope {
 
 const VOYAGE_STORAGE_PREFIX = 'fv.areaConstraints.voyage:';
 const ADMIN_DELETED_KEY = 'fv.areaConstraints.deleted';
+const ADMIN_DELETED_SETTING_KEY = 'areaConstraints.deleted';
+const voyageSettingKey = (voyageId: string) => `areaConstraints.voyage.${voyageId}`;
 
 export function loadVoyageConstraints(voyageId: string): AreaConstraint[] {
   try {
@@ -49,6 +53,7 @@ export function loadVoyageConstraints(voyageId: string): AreaConstraint[] {
 
 export function saveVoyageConstraints(voyageId: string, constraints: AreaConstraint[]): void {
   try { window.localStorage.setItem(VOYAGE_STORAGE_PREFIX + voyageId, JSON.stringify(constraints)); } catch { /* ignore */ }
+  void settingsApi.put(voyageSettingKey(voyageId), constraints).catch(() => { /* local fallback */ });
 }
 
 export function newVoyageConstraintId(): string {
@@ -67,7 +72,23 @@ export function loadDeletedAdminIds(): string[] {
 
 export function saveDeletedAdminIds(ids: string[]): void {
   try { window.localStorage.setItem(ADMIN_DELETED_KEY, JSON.stringify(ids)); } catch { /* ignore */ }
+  void settingsApi.put(ADMIN_DELETED_SETTING_KEY, ids).catch(() => { /* local fallback */ });
 }
+
+async function hydrateAreaConstraintSettings(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(ADMIN_DELETED_SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as unknown;
+    if (Array.isArray(parsed) && parsed.every((id) => typeof id === 'string')) {
+      try { window.localStorage.setItem(ADMIN_DELETED_KEY, JSON.stringify(parsed)); } catch { /* ignore */ }
+    }
+  } catch {
+    const local = loadDeletedAdminIds();
+    if (local.length) void settingsApi.put(ADMIN_DELETED_SETTING_KEY, local).catch(() => { /* unavailable */ });
+  }
+}
+
+void hydrateAreaConstraintSettings();
 
 export const AREA_CONSTRAINTS: AreaConstraint[] = [
   {"id":"ac-1","name":"Mumbai Offshore Basin","rawName":"Mumbai Offshore Basin","zoneType":"limited-passage-zone","geomType":"limited-passage","rpmMin":"","rpmMax":"","speedMin":"","speedMax":"","rings":[[[22.63886,66.86715],[22.5426,66.93357],[22.37981,67.11805],[22.33821,67.32349],[22.04986,67.54316],[21.75388,67.99009],[21.57961,68.02181],[21.50366,68.20563],[21.27216,68.33098],[21.10244,68.41828],[21.05624,68.71999],[20.96999,69.1428],[20.39542,69.34973],[19.24842,69.77969],[18.92745,69.97062],[18.51694,70.25381],[18.23939,70.33573],[17.87299,70.59049],[17.60843,70.77096],[17.42893,71.04481],[17.30967,71.52744],[17.21936,71.56486],[17.15138,71.63555],[16.38959,71.73811],[16.19885,71.71875],[15.82254,72.29431],[16.19309,72.45024],[16.50893,73.55266],[22.55703,72.83286],[21.86825,71.10005],[23.24079,70.48768],[24.38377,67.8881]]]},

@@ -7,6 +7,14 @@ import { useWorldPorts, type WorldPort } from '../data/ports';
 import { generateSeaRoute, type SeaRoutePoint } from '../data/seaRoute';
 import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
 
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
+
 /** Named canals / capes / straits used as routing waypoints and to resolve
  * canal-transit legs that aren't in the world-port list. */
 const LANDMARKS: { match: RegExp; lat: number; lon: number }[] = [
@@ -234,6 +242,8 @@ export function EstimationRouteMap({
         {...(bounds ? { bounds } : { center: [20, 60] as LatLngExpression, zoom: 3 })}
         minZoom={2}
         maxZoom={10}
+        maxBounds={WORLD_PAN_BOUNDS}
+        maxBoundsViscosity={1.0}
         worldCopyJump
         scrollWheelZoom
         style={{ height: '100%', width: '100%' }}

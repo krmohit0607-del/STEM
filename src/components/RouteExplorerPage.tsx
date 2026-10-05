@@ -8,6 +8,7 @@ import { normalizeLongitude } from '../data/antimeridian';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
 import { type OptimizedRoute } from '../data/routeOptimizer';
 import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
+import { getFieldFactor } from '../data/weatherField';
 import {
   setActiveSimRoute,
   setEditCompareRoute,
@@ -28,6 +29,19 @@ import {
   setRouteReportSpeedSelection,
   useRouteReportMarkers,
 } from '../data/routeReportMarkers';
+
+// Map-corner legend for the significant-wave-height colour field — built
+// directly from the same factor definition `WeatherFieldLayer` renders, so
+// the legend's gradient/ticks always match the actual contour colours
+// instead of an independently hand-picked gradient drifting out of sync.
+const WAVE_LEGEND_FACTOR = getFieldFactor('waves');
+const WAVE_LEGEND_GRADIENT = WAVE_LEGEND_FACTOR
+  ? `linear-gradient(90deg, ${WAVE_LEGEND_FACTOR.stops.map(([frac, hex]) => `${hex} ${frac * 100}%`).join(', ')})`
+  : undefined;
+const WAVE_LEGEND_TICKS = (WAVE_LEGEND_FACTOR?.stops ?? []).map(([frac]) => ({
+  left: `${frac * 100}%`,
+  label: Math.round(frac * (WAVE_LEGEND_FACTOR?.max ?? 0) * 10) / 10,
+}));
 
 /**
  * Route Explorer page — `/route-explorer`.
@@ -1509,14 +1523,16 @@ export function RouteExplorerPage() {
                 {t('viewOnMt', 'View on MT')}
               </button>
               <div className="fv-route__weather-legend" role="img" aria-label={t('weatherColorCode', 'Weather color code')}>
-                <span className="fv-route__weather-legend-unit">m</span>
-                <span className="fv-route__weather-legend-bar">
-                  <span className="fv-route__weather-legend-tick" style={{ left: '7%' }}>0.5</span>
-                  <span className="fv-route__weather-legend-tick" style={{ left: '20%' }}>1</span>
-                  <span className="fv-route__weather-legend-tick" style={{ left: '38%' }}>1.5</span>
-                  <span className="fv-route__weather-legend-tick" style={{ left: '56%' }}>2</span>
-                  <span className="fv-route__weather-legend-tick" style={{ left: '73%' }}>6</span>
-                  <span className="fv-route__weather-legend-tick" style={{ left: '90%' }}>9</span>
+                <span className="fv-route__weather-legend-unit">{WAVE_LEGEND_FACTOR?.unit ?? 'm'}</span>
+                <span
+                  className="fv-route__weather-legend-bar"
+                  style={WAVE_LEGEND_GRADIENT ? { backgroundImage: WAVE_LEGEND_GRADIENT } : undefined}
+                >
+                  {WAVE_LEGEND_TICKS.map((tick) => (
+                    <span key={tick.left} className="fv-route__weather-legend-tick" style={{ left: tick.left }}>
+                      {tick.label}
+                    </span>
+                  ))}
                 </span>
               </div>
             </div>

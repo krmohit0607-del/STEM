@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { settingsApi } from '../api/settingsApi';
 
 /**
  * Cargo Master — simple, admin-maintained reference database of cargoes
@@ -570,6 +571,7 @@ function buildSeed(): CargoRecord[] {
 /* -------------------------------------------------- persisted reactive store */
 
 const KEY = 'fv.cargoMaster';
+const SETTING_KEY = 'cargoMaster';
 let items: CargoRecord[] = load();
 const listeners = new Set<() => void>();
 
@@ -625,6 +627,21 @@ function persistList(list: CargoRecord[]): void {
   } catch {
     /* storage unavailable — ignore */
   }
+  void settingsApi.put(SETTING_KEY, list).catch(() => { /* local fallback */ });
+}
+
+async function hydrateCargoMaster(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as unknown;
+    if (Array.isArray(parsed)) {
+      items = parsed as CargoRecord[];
+      persistList(items);
+      listeners.forEach((listener) => listener());
+    }
+  } catch {
+    if (items.length) void settingsApi.put(SETTING_KEY, items).catch(() => { /* unavailable */ });
+  }
 }
 
 function persist(): void {
@@ -649,6 +666,27 @@ export function useCargoMaster(): CargoRecord[] {
 
 export function getCargoById(cargoId: string): CargoRecord | undefined {
   return items.find((c) => c.cargoId === cargoId);
+}
+
+/** Exact (case-insensitive) cargo-name match against the Cargo Master database. */
+export function findCargoByName(name: string): CargoRecord | undefined {
+  const norm = (name || '').trim().toLowerCase();
+  if (!norm) return undefined;
+  return items.find((c) => c.cargoName.trim().toLowerCase() === norm);
+}
+
+/** Stowage factor string (m³/MT, averaged when a min/max range is set) for a Cargo Master
+ * match on `name` — used to auto-fill SF wherever a grade name is sourced from elsewhere
+ * (manual search, pasted recap, or a transferred Chartering estimation). */
+export function cargoStowageFactor(name: string): string {
+  const c = findCargoByName(name);
+  if (!c) return '';
+  const min = Number(c.stowageFactorMin) || 0;
+  const max = Number(c.stowageFactorMax) || 0;
+  if (min > 0 && max > 0) return ((min + max) / 2).toFixed(2);
+  if (min > 0) return min.toFixed(2);
+  if (max > 0) return max.toFixed(2);
+  return '';
 }
 
 export function isDuplicateCargoCode(code: string, ignoreId?: string): boolean {
@@ -713,6 +751,8 @@ export function deleteCargo(cargoId: string): void {
   items = items.filter((c) => c.cargoId !== cargoId);
   persist();
 }
+
+void hydrateCargoMaster();
 
 /* ------------------------------------------------------------- CSV import/export */
 

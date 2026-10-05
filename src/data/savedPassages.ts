@@ -5,6 +5,10 @@ export interface SavedPassage {
   points: [number, number][];
 }
 
+import { settingsApi } from '../api/settingsApi';
+
+const SETTING_KEY = 'savedPassages';
+
 const STORAGE_KEY = 'fv.savedPassages';
 
 function readStored(): SavedPassage[] {
@@ -27,6 +31,25 @@ export function saveSavedPassages(passages: SavedPassage[]): void {
     window.dispatchEvent(new CustomEvent('fv-saved-passages-changed'));
   } catch {
   }
+  void settingsApi.put(SETTING_KEY, passages).catch(() => { /* local fallback */ });
+}
+
+async function hydrateSavedPassages(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as unknown;
+    if (Array.isArray(parsed)) {
+      saveLocal(parsed as SavedPassage[]);
+      window.dispatchEvent(new CustomEvent('fv-saved-passages-changed'));
+    }
+  } catch {
+    const local = readStored();
+    if (local.length) void settingsApi.put(SETTING_KEY, local).catch(() => { /* unavailable */ });
+  }
+}
+
+function saveLocal(passages: SavedPassage[]): void {
+  try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(passages)); } catch { /* ignore */ }
 }
 
 export async function loadBundledSavedPassages(): Promise<SavedPassage[]> {
@@ -47,3 +70,5 @@ export function mergeSavedPassages(bundled: SavedPassage[]): SavedPassage[] {
   saveSavedPassages(next);
   return next;
 }
+
+void hydrateSavedPassages();

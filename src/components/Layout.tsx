@@ -1,7 +1,10 @@
-import type { ReactNode } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useEffect, type ReactNode } from 'react';
+import { useLocation, Navigate } from 'react-router-dom';
 
+import { useAuth } from '../context/AuthContext';
 import { useFleetView } from '../context/FleetViewContext';
+import { syncVesselsFromBackend } from '../data/vessels';
+import { syncClientsFromBackend } from '../data/clients';
 import { FleetMenu } from './FleetMenu';
 import { LeftSidebar } from './LeftSidebar';
 import { MapView } from './MapView';
@@ -10,20 +13,16 @@ import { TopNav } from './TopNav';
 import { BottomPanel } from './BottomPanel';
 import { VoyageTagsStrip } from './VoyageTagsStrip';
 
+// Guards the one-time-per-page-load backend pull below (Layout can mount/unmount across route
+// changes; there's no need to re-fetch on every navigation within the same session).
+let masterDataSynced = false;
+
 /**
  * Top-level layout. Mirrors the structure of the legacy `Index.cshtml`:
  *
  *   #page-wrapper > #main-wrapper >
  *     .sidenav (#menu-sidenav)
  *     .portal-container (#portal)
- *
- * In Phase 1 the sidenav is fully React; the portal area shows a portal
- * selector + the map. Per-portal grids (Voyages, Vessels, Clients...) are
- * not yet ported.
- *
- * Pages can swap the default map view by passing `children`. The shell
- * (TopNav, LeftSidebar, BottomPanel) stays the same so the user can keep
- * navigating between pages without losing their dashboard chrome.
  */
 export function Layout({
   children,
@@ -34,25 +33,37 @@ export function Layout({
    *  bottom panel) — used by other modules like Chartering. */
   showModuleChrome?: boolean;
 }) {
-  const { isLoading, error, user } = useFleetView();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isLoading: fvLoading } = useFleetView();
   const { pathname } = useLocation();
-  const isSettingsPage = pathname === '/settings' || pathname.startsWith('/settings/');
+  const isSettingsPage =
+    pathname === '/settings' ||
+    pathname.startsWith('/settings/') ||
+    pathname === '/admin-management' ||
+    pathname === '/superadmin';
 
-  if (isLoading) {
-    return <div className="fv-loading">Loading FleetView…</div>;
-  }
+  // Pull the tenant's Vessels/Accounts master data as soon as the user is signed in, so name
+  // fields (vessel/owners/charterers/brokers) show the current backend list everywhere — not
+  // just after the user happens to visit Settings first.
+  useEffect(() => {
+    if (!isAuthenticated || masterDataSynced) return;
+    masterDataSynced = true;
+    void syncVesselsFromBackend();
+    void syncClientsFromBackend();
+  }, [isAuthenticated]);
 
-  if (error || !user) {
+  if (authLoading || fvLoading) {
     return (
-      <div className="fv-unauthenticated">
-        <h1>Not signed in</h1>
-        <p>
-          Please <a href="/Account/Login">sign in</a> to continue. The React
-          dev server proxies authentication to the .NET backend.
-        </p>
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', background: '#0f172a', color: '#94a3b8' }}>
+        <i className="fas fa-spinner fa-spin fa-2x" style={{ marginRight: '0.75rem' }} /> Loading...
       </div>
     );
   }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
 
   return (
     <div id="page-wrapper">

@@ -65,6 +65,20 @@ export const SHARED_FIELD_KEYS: (keyof VoyageSharedFields)[] = [
 ];
 
 const key = (voyageId: string) => `fv.voyageShared.${voyageId}`;
+const SHARED_EVENT = 'fv-voyage-shared';
+const SHARED_SETTING = (voyageId: string) => `voyageShared.${voyageId}`;
+
+// Debounced write-through to the tenant database (Settings key-value API).
+const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+async function pushShared(voyageId: string): Promise<void> {
+  const { settingsApi } = await import('../api/settingsApi');
+  const existing = pushTimers.get(voyageId);
+  if (existing) clearTimeout(existing);
+  pushTimers.set(voyageId, setTimeout(() => {
+    pushTimers.delete(voyageId);
+    settingsApi.put(SHARED_SETTING(voyageId), loadVoyageShared(voyageId) ?? {}).catch(() => { /* offline */ });
+  }, 800));
+}
 
 /** Read the saved shared fields for a voyage (partial; undefined when none). */
 export function loadVoyageShared(voyageId: string | undefined): Partial<VoyageSharedFields> | undefined {
@@ -92,4 +106,43 @@ export function mergeVoyageShared(
   } catch {
     /* storage unavailable */
   }
+  void pushShared(voyageId);
+  try {
+    window.dispatchEvent(new CustomEvent(SHARED_EVENT, { detail: { id: voyageId } }));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Pull the server copy of the shared fields into the local cache; fires the change event. */
+export async function hydrateVoyageShared(voyageId: string | undefined): Promise<void> {
+  if (!voyageId) return;
+  try {
+    const { settingsApi } = await import('../api/settingsApi');
+    const res = await settingsApi.get(SHARED_SETTING(voyageId));
+    const valueJson = res?.valueJson;
+    if (!valueJson) return;
+    if (valueJson === window.localStorage.getItem(key(voyageId))) return;
+    window.localStorage.setItem(key(voyageId), valueJson);
+    window.dispatchEvent(new CustomEvent(SHARED_EVENT, { detail: { id: voyageId } }));
+  } catch {
+    /* offline / not found — keep the local cache */
+  }
+}
+
+/** Subscribe to shared-field changes for a voyage (same-tab event + cross-tab storage). */
+export function subscribeVoyageShared(voyageId: string | undefined, cb: () => void): () => void {
+  if (!voyageId) return () => {};
+  const onCustom = (e: Event) => {
+    if ((e as CustomEvent).detail?.id === voyageId) cb();
+  };
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === key(voyageId)) cb();
+  };
+  window.addEventListener(SHARED_EVENT, onCustom as EventListener);
+  window.addEventListener('storage', onStorage);
+  return () => {
+    window.removeEventListener(SHARED_EVENT, onCustom as EventListener);
+    window.removeEventListener('storage', onStorage);
+  };
 }

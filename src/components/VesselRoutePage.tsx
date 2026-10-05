@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { MapContainer, Marker, Polyline, TileLayer, Tooltip } from 'react-leaflet';
 import L, { type LatLngBoundsExpression, type LatLngExpression } from 'leaflet';
@@ -8,14 +8,25 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
 import { PORT_COORDS } from '../data/fleet';
 import type { Voyage } from '../data/voyages';
+
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
 import { LeftSidebar } from './LeftSidebar';
 import { BottomPanel } from './BottomPanel';
-import { MapLayersControl } from './MapLayersControl';
+import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapLayersControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
 /**
  * Vessel Route View — `/vessel-route?voyage=<id>`.
@@ -85,6 +96,7 @@ function pointAlong(coords: Array<[number, number]>, t: number): [number, number
 
 export function VesselRoutePage() {
   const { isLoading, error, user, isStubbed } = useFleetView();
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
   const l = useL();
   const t = (key: string, fallback: string) => {
     const v = l(key);
@@ -209,6 +221,8 @@ export function VesselRoutePage() {
                   : { center: [20, 0] as LatLngExpression, zoom: 3 })}
                 minZoom={2}
                 maxZoom={10}
+                maxBounds={WORLD_PAN_BOUNDS}
+                maxBoundsViscosity={1.0}
                 worldCopyJump
                 scrollWheelZoom
                 style={{ height: '100%', width: '100%' }}
@@ -257,12 +271,15 @@ export function VesselRoutePage() {
                     </Tooltip>
                   </Marker>
                 )}
-                <MapLayersControl position="topright" />
+                <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+                {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
                 <WeatherFieldControl position="topright" />
                 <AreaConstraintsControl position="topright" />
                 <WeatherPointControl position="topright" />
                 <PortsControl position="topright" />
                 <RulerControl position="topright" />
+                <CycloneLayer position="topright" />
+                <WeatherAlertsControl position="topright" />
                 <MapCursorPosition />
               </MapContainer>
             )}

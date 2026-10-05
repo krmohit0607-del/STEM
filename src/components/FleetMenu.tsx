@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
-import { useVoyages, type Voyage } from '../data/voyages';
+import { useVoyages, type Voyage, syncVoyagesFromBackend } from '../data/voyages';
 import {
   writeSelectedVoyageId,
   useSelectedVoyageId,
   clearSelectedVoyageId,
 } from '../data/selectedVoyage';
+import { voyagesApi } from '../api/voyagesApi';
+import { ConfirmationDialog } from './ConfirmationDialog';
 import {
   BUNKER_TABS,
   BUNKER_TYPE_FILTERS,
@@ -18,6 +20,7 @@ import {
   useSelectedBunkerId,
   writeSelectedBunkerId,
   clearSelectedBunkerId,
+  deleteBunkerRequirementLocally,
 } from '../data/bunker';
 import {
   ACCOUNT_TABS,
@@ -30,9 +33,9 @@ import {
   writeSelectedAccountVessel,
   clearSelectedAccountVessel,
 } from '../data/accounts';
-import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, estStatusColor, estStatusLabel, useHandedOver, useModuleLifecycles, moduleLifecycleOf, usePostfixHanded, useFixtureNumbers } from '../data/workflow';
+import { useEstimationStatuses, useEstimationFixTypes, charteringBucket, estStatusColor, estStatusLabel, useHandedOver, useModuleLifecycles, moduleLifecycleOf, usePostfixHanded, useFixtureNumbers, addNotification, useNotifications } from '../data/workflow';
 import { useWorkflowConfig } from '../data/workflowConfig';
-import { useSavedEstimates } from '../data/savedEstimates';
+import { useSavedEstimates, deleteSavedEstimate, syncEstimatesFromBackend } from '../data/savedEstimates';
 import { FIX_TYPE_FILTER_OPTIONS } from './ChateringEstimationPage';
 import { AppFooterControls } from './AppFooterControls';
 
@@ -205,12 +208,37 @@ export function FleetMenu() {
   const workflowConfig = useWorkflowConfig();
   const fixtureNos = useFixtureNumbers();
   const savedEstimates = useSavedEstimates();
+  const notifications = useNotifications();
+  const dwtByVessel = useMemo(() => {
+    const map = new Map<string, string>();
+    voyages.forEach((v) => { if (v.dwt && !map.has(v.vessel)) map.set(v.vessel, v.dwt); });
+    return map;
+  }, [voyages]);
+  /** Best-effort per-vessel notification count — WorkflowNotif has no vessel field, so this
+   * matches on the vessel name appearing in the notification text (every addNotification call
+   * in this app embeds the vessel name in its message). */
+  const notifCountFor = (vessel: string, mod: string) => notifications.filter((n) => n.module === mod && n.text.includes(vessel)).length;
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
   const [module, setModule] = useState<ModuleName>('Performance');
   const [pic, setPic] = useState('All');
   const [voyageType, setVoyageType] = useState('All');
   const [status, setStatus] = useState<string>('active');
   const [query, setQuery] = useState('');
+
+  // Confirmation dialog state
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    isDangerous: boolean;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    isDangerous: false,
+    onConfirm: () => {},
+  });
 
   const isBunker = module === 'Bunker';
   const isAccounts = module === 'Accounts';
@@ -270,13 +298,13 @@ export function FleetMenu() {
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    // Chartering buckets by estimate status; Operations/Postfix honour a manual
-    // override, else derive; handed-over voyages default to Active.
+    // Chartering buckets by estimate status; Operations honours the manual
+    // top-bar Active/Completed/Closed selector, defaulting to Active. Postfix
+    // honours a manual override, else derives.
     const bucketFor = (v: Voyage): Lifecycle => {
       if (module === 'Chartering') return charteringBucket(v.id, estStatuses, lifecycleOf(v));
       if (module === 'Operations') {
-        return moduleLifecycleOf(moduleLifecycles, 'Operations', v.id)
-          ?? (handedOver.includes(v.id) ? 'active' : lifecycleOf(v));
+        return moduleLifecycleOf(moduleLifecycles, 'Operations', v.id) ?? 'active';
       }
       if (module === 'Postfix') {
         return moduleLifecycleOf(moduleLifecycles, 'Postfix', v.id)
@@ -333,8 +361,7 @@ export function FleetMenu() {
   const rowBucket = (v: Voyage): Lifecycle => {
     if (module === 'Chartering') return charteringBucket(v.id, estStatuses, lifecycleOf(v));
     if (module === 'Operations') {
-      return moduleLifecycleOf(moduleLifecycles, 'Operations', v.id)
-        ?? (handedOver.includes(v.id) ? 'active' : lifecycleOf(v));
+      return moduleLifecycleOf(moduleLifecycles, 'Operations', v.id) ?? 'active';
     }
     if (module === 'Postfix') {
       return moduleLifecycleOf(moduleLifecycles, 'Postfix', v.id)
@@ -363,6 +390,26 @@ export function FleetMenu() {
       return true;
     });
   }, [bunkerAll, status, voyageType, query]);
+
+  // Group requirements by vessel (a vessel can have several — one per port call) so the sidebar
+  // shows one vessel header with its requirements nested underneath, instead of repeating the
+  // vessel name on every row. Preserves first-seen order per vessel.
+  const bunkerGroups = useMemo(() => {
+    const order: string[] = [];
+    const map = new Map<string, typeof bunkerRows>();
+    bunkerRows.forEach((r) => {
+      if (!map.has(r.vessel)) { map.set(r.vessel, []); order.push(r.vessel); }
+      map.get(r.vessel)!.push(r);
+    });
+    return order.map((vessel) => ({ vessel, items: map.get(vessel)! }));
+  }, [bunkerRows]);
+  const [collapsedBunkerVessels, setCollapsedBunkerVessels] = useState<Set<string>>(new Set());
+  const toggleBunkerVessel = (vessel: string) =>
+    setCollapsedBunkerVessels((prev) => {
+      const next = new Set(prev);
+      if (next.has(vessel)) next.delete(vessel); else next.add(vessel);
+      return next;
+    });
 
   // Accounts: aggregate the ledger per vessel for the current bucket + type filter.
   const accountRows = useMemo(() => {
@@ -437,6 +484,91 @@ export function FleetMenu() {
     navigate(`/chartering?est=${encodeURIComponent(id)}`);
   };
 
+  const deleteSavedEstimateFromSidebar = (estId: string, estNo: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Estimation',
+      message: `Delete estimation ${estNo}? This action cannot be undone.`,
+      isDangerous: true,
+      onConfirm: () => {
+        setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+        
+        void (async () => {
+          try {
+            await deleteSavedEstimate(estId);
+            await syncEstimatesFromBackend();
+            addNotification(`Estimation ${estNo} deleted.`, 'Chartering');
+            if (activeEstId === estId) {
+              navigate('/chartering');
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            addNotification(`Failed to delete estimation: ${msg}`, 'Chartering');
+          }
+        })();
+      },
+    });
+  };
+
+  const deleteBunkerRequirementFromSidebar = (backendId: string, vessel: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Requirement',
+      message: `Delete bunker requirement for ${vessel}? This action cannot be undone.`,
+      isDangerous: true,
+      onConfirm: () => {
+        setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+        
+        void (async () => {
+          try {
+            await deleteBunkerRequirementLocally(backendId);
+            addNotification(`Bunker requirement for ${vessel} deleted.`, 'Bunker');
+            if (selectedBunkerId === backendId) {
+              clearSelectedBunkerId();
+              navigate('/bunker');
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            addNotification(`Failed to delete requirement: ${msg}`, 'Bunker');
+          }
+        })();
+      },
+    });
+  };
+
+  const deleteVoyageFromSidebar = (voyageId: string, vesselName: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Voyage',
+      message: `Delete voyage for ${vesselName}? This action cannot be undone.`,
+      isDangerous: true,
+      onConfirm: () => {
+        setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+        
+        void (async () => {
+          try {
+            await voyagesApi.delete(voyageId);
+            await syncVoyagesFromBackend();
+            addNotification(`Voyage for ${vesselName} deleted.`, module);
+            if (selectedId === voyageId) {
+              clearSelectedVoyageId();
+              navigate(moduleRoute(module));
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            addNotification(`Failed to delete voyage: ${msg}`, module);
+          }
+        })();
+      },
+    });
+  };
+
   // Switching module clears the active vessel so the details area starts blank;
   // data only reappears once the user picks a vessel from the list.
   const changeModule = (next: ModuleName) => {
@@ -468,7 +600,18 @@ export function FleetMenu() {
   }
 
   return (
-    <aside className="fv-fleetmenu" aria-label={t('fleetMenu', 'Fleet menu')}>
+    <>
+      <ConfirmationDialog
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        isDangerous={confirmDialog.isDangerous}
+        onConfirm={confirmDialog.onConfirm}
+        onCancel={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+        confirmText="Delete"
+        cancelText="Cancel"
+      />
+      <aside className="fv-fleetmenu" aria-label={t('fleetMenu', 'Fleet menu')}>
       <div className="fv-fleetmenu__head">
         <select
           className="fv-fleetmenu__module"
@@ -557,29 +700,55 @@ export function FleetMenu() {
           {bunkerRows.length === 0 && (
             <li className="fv-fleetmenu__empty">{t('noRequirements', 'No requirements')}</li>
           )}
-          {bunkerRows.map((r) => (
-            <li key={r.id}>
-              <button
-                type="button"
-                className={`fv-fleetmenu__item${r.id === selectedBunkerId ? ' fv-fleetmenu__item--active' : ''}`}
-                onClick={() => { writeSelectedBunkerId(r.id); navigate('/bunker'); }}
-              >
-                <div className="fv-fleetmenu__item-top">
-                  <span className="fv-fleetmenu__vessel">{r.vessel}</span>
-                  <span className="fv-fleetmenu__order">{r.id}</span>
-                </div>
-                <div className="fv-fleetmenu__item-route">
-                  {r.route}
-                </div>
-                <div className="fv-fleetmenu__item-meta">
-                  <span className="fv-fleetmenu__charter">{r.leg} · {(r.fuelLines?.length ?? 0) > 1 ? r.fuelLines!.map(f => f.fuel).join(' + ') : r.fuelType}</span>
-                  <span className={`fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--${STATUS_TONE[r.status]}`}>
-                    {r.status}
-                  </span>
-                </div>
-              </button>
-            </li>
-          ))}
+          {bunkerGroups.map((g) => {
+            const collapsed = collapsedBunkerVessels.has(g.vessel);
+            const notifCount = notifCountFor(g.vessel, 'Bunker');
+            return (
+              <li key={g.vessel} className="fv-fleetmenu__vgroup">
+                <button type="button" className="fv-fleetmenu__vgroup-head" onClick={() => toggleBunkerVessel(g.vessel)}>
+                  <i className={`fas fa-chevron-${collapsed ? 'right' : 'down'} fv-fleetmenu__vgroup-chevron`} aria-hidden="true" />
+                  <span className="fv-fleetmenu__vessel">{g.vessel}</span>
+                  {dwtByVessel.get(g.vessel) && <span className="fv-fleetmenu__dwt" title="Vessel size (DWT)">{dwtByVessel.get(g.vessel)}</span>}
+                  {notifCount > 0 && <span className="fv-fleetmenu__notif-badge" title={`${notifCount} notification${notifCount > 1 ? 's' : ''}`}><i className="fas fa-bell" aria-hidden="true" /> {notifCount}</span>}
+                  <span className="fv-fleetmenu__vgroup-count">{g.items.length}</span>
+                </button>
+                {!collapsed && (
+                  <ul className="fv-fleetmenu__list fv-fleetmenu__vgroup-items">
+                    {g.items.map((r) => (
+                      <li key={r.id}>
+                        <button
+                          type="button"
+                          className={`fv-fleetmenu__item fv-fleetmenu__item--sub${r.id === selectedBunkerId ? ' fv-fleetmenu__item--active' : ''}`}
+                          onClick={() => { writeSelectedBunkerId(r.id); navigate('/bunker'); }}
+                        >
+                          <div className="fv-fleetmenu__item-top">
+                            <span className="fv-fleetmenu__order">{r.id}</span>
+                          </div>
+                          <div className="fv-fleetmenu__item-route">
+                            {r.route}
+                          </div>
+                          <div className="fv-fleetmenu__item-meta">
+                            <span className="fv-fleetmenu__charter">{r.leg} · {(r.fuelLines?.length ?? 0) > 1 ? r.fuelLines!.map(f => f.fuel).join(' + ') : r.fuelType}</span>
+                            <span className={`fv-fleetmenu__bkbadge fv-fleetmenu__bkbadge--${STATUS_TONE[r.status]}`}>
+                              {r.status}
+                            </span>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          className="fv-fleetmenu__delete-btn"
+                          onClick={(e) => deleteBunkerRequirementFromSidebar(r.backendId, r.vessel, e)}
+                          title="Delete this requirement"
+                        >
+                          <i className="fas fa-trash" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : isAccounts ? (
         <div className="fv-fleetmenu__acct-panel">
@@ -604,6 +773,7 @@ export function FleetMenu() {
                     <div className="fv-fleetmenu__acct-row1">
                       <span className="fv-fleetmenu__acct-dot" style={{background: dotColor}} />
                       <span className="fv-fleetmenu__vessel">{r.vessel}</span>
+                      {dwtByVessel.get(r.vessel) && <span className="fv-fleetmenu__dwt" title="Vessel size (DWT)">{dwtByVessel.get(r.vessel)}</span>}
                       <span className={r.net < 0 ? 'fv-fleetmenu__neg' : r.net > 0 ? 'fv-fleetmenu__pos' : 'fv-fleetmenu__muted'}>
                         {r.net > 0 ? '+' : ''}{usdAbbr(r.net)}
                       </span>
@@ -663,9 +833,20 @@ export function FleetMenu() {
                   </span>
                 </div>
               </button>
+              <button
+                type="button"
+                className="fv-fleetmenu__delete-btn"
+                title="Delete this estimation"
+                onClick={(e) => deleteSavedEstimateFromSidebar(s.id, s.estNo, e)}
+                aria-label={`Delete ${s.estNo}`}
+              >
+                <i className="fas fa-trash" aria-hidden="true" />
+              </button>
             </li>
           ))}
-          {rows.map((v) => (
+          {rows.map((v) => {
+            const notifCount = notifCountFor(v.vessel, module);
+            return (
             <li key={v.id}>
               <button
                 type="button"
@@ -674,6 +855,8 @@ export function FleetMenu() {
               >
                 <div className="fv-fleetmenu__item-top">
                   <span className="fv-fleetmenu__vessel">{v.vessel}</span>
+                  {v.dwt && <span className="fv-fleetmenu__dwt" title="Vessel size (DWT)">{v.dwt}</span>}
+                  {notifCount > 0 && <span className="fv-fleetmenu__notif-badge" title={`${notifCount} notification${notifCount > 1 ? 's' : ''}`}><i className="fas fa-bell" aria-hidden="true" /> {notifCount}</span>}
                   <span className="fv-fleetmenu__order">{fixtureNos[v.id] ?? v.id}</span>
                 </div>
                 <div className="fv-fleetmenu__item-route">
@@ -689,8 +872,18 @@ export function FleetMenu() {
                   </span>
                 </div>
               </button>
+              <button
+                type="button"
+                className="fv-fleetmenu__delete-btn"
+                title="Delete this voyage"
+                onClick={(e) => deleteVoyageFromSidebar(v.id, v.vessel, e)}
+                aria-label={`Delete voyage for ${v.vessel}`}
+              >
+                <i className="fas fa-trash" aria-hidden="true" />
+              </button>
             </li>
-          ))}
+            );
+          })}
         </ul>
       ))}
 
@@ -698,5 +891,6 @@ export function FleetMenu() {
         <AppFooterControls />
       </div>
     </aside>
+    </>
   );
 }

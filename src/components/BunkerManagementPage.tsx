@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { FUEL_TYPE_OPTIONS } from './voyage/types';
 import { ModuleVesselSearch } from './ModuleVesselSearch';
+import { VoyageTagsStrip } from './VoyageTagsStrip';
 
 import {
   useBunkerRequirements,
@@ -27,6 +28,11 @@ import {
   clearSelectedBunkerId,
   sumAdditionalCharges,
   sumBunkerClaims,
+  nominalFuelQty,
+  actualFuelQty,
+  quantityVariance,
+  hasQuantityDiscrepancy,
+  computeInvoiceTotal,
   ADDITIONAL_CHARGE_PRESETS,
   BUNKER_CLAIM_TYPES,
   BUNKER_CLAIM_STATUSES,
@@ -45,6 +51,8 @@ import { addNotification } from '../data/workflow';
 import { useFleetView } from '../context/FleetViewContext';
 import { getWorkflowConfig } from '../data/workflowConfig';
 import { loadClients } from '../data/clients';
+import { queueCommsDraft } from '../data/commsStore';
+import { plainToHtml } from '../data/emailTemplates';
 
 /**
  * Bunker Management module — the central collaboration hub between Operations,
@@ -71,8 +79,6 @@ interface TimelineEvent {
 
 /* ---------------------------------------------------------------- helpers */
 
-const NOW = new Date('2026-06-16T00:00:00');
-
 function money(n: number | undefined, dp = 0): string {
   if (n == null) return '—';
   return `USD ${n.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
@@ -89,7 +95,7 @@ function daysUntil(iso?: string): number | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
-  return Math.round((d.getTime() - NOW.getTime()) / 86_400_000);
+  return Math.round((d.getTime() - Date.now()) / 86_400_000);
 }
 function dueInLabel(iso?: string, paid?: boolean): string {
   if (paid) return 'Paid';
@@ -570,7 +576,7 @@ function exportBunkerInvoicePdf(r: BunkerRequirement): void {
     </tbody></table>
     `}
   </div>` : '';
-  const fuelCost = r.pricePerMt != null ? Math.round(r.pricePerMt * r.quantity) : (r.invoiceAmount ?? 0) - sumAdditionalCharges(r.additionalCharges);
+  const fuelCost = r.pricePerMt != null ? Math.round(r.pricePerMt * actualFuelQty(r)) : (r.invoiceAmount ?? 0) - sumAdditionalCharges(r.additionalCharges);
   const chargesTotal = sumAdditionalCharges(r.additionalCharges);
   const claimsTotal = sumBunkerClaims(r.claims);
   const total = fuelCost + chargesTotal - claimsTotal;
@@ -596,7 +602,7 @@ function exportBunkerInvoicePdf(r: BunkerRequirement): void {
       <div><span>Supplier</span><b>${r.supplier ?? '—'}</b></div>
       <div><span>Bunker Port</span><b>${r.bunkerPort}</b></div>
       <div><span>Fuel Type / Grade</span><b>${r.fuelType} · ${r.grade}</b></div>
-      <div><span>Quantity Supplied</span><b>${num(r.deliveredQty ?? r.quantity)} MT</b></div>
+      <div><span>Quantity Supplied</span><b>${num(actualFuelQty(r))} MT</b></div>
       <div><span>Invoice Date</span><b>${r.invoiceDate ?? '—'}</b></div>
       <div><span>Payment Terms</span><b>${r.paymentTerms ?? '—'}</b></div>
       <div><span>Due Date</span><b>${r.dueDate ?? '—'}</b></div>
@@ -606,7 +612,7 @@ function exportBunkerInvoicePdf(r: BunkerRequirement): void {
     <table>
       <thead><tr><th>Line Item</th><th class="r">Amount</th></tr></thead>
       <tbody>
-        <tr><td>Fuel Cost (${num(r.quantity)} MT @ USD ${r.pricePerMt ?? '—'}/MT)</td><td class="r">${money(fuelCost)}</td></tr>
+        <tr><td>Fuel Cost (${num(actualFuelQty(r))} MT @ USD ${r.pricePerMt ?? '—'}/MT)</td><td class="r">${money(fuelCost)}</td></tr>
         ${chargeRows}
         ${claimRow}
       </tbody>
@@ -631,7 +637,7 @@ function exportBunkerInvoicePdf(r: BunkerRequirement): void {
 function addInvoice(r: BunkerRequirement): void {
   const now = new Date();
   const due = new Date(now.getTime() + 30 * 86_400_000);
-  const amount = r.totalCost ?? Math.round((r.pricePerMt ?? 0) * r.quantity);
+  const amount = computeInvoiceTotal(r);
   updateBunkerRequirement(
     r.id,
     {
@@ -807,6 +813,157 @@ function PaymentWorkflowActions({ r }: { r: BunkerRequirement }) {
   );
 }
 
+/* --------- send RFQ to suppliers --------- */
+
+/** Plain-text RFQ enquiry body — full requirement details for the supplier(s). */
+function buildRfqEmailBody(r: BunkerRequirement, message: string): string {
+  const lines = r.fuelLines?.length ? r.fuelLines : [{ fuel: r.fuelType, quantity: r.quantity, grade: r.grade }];
+  const fuelRows = lines.map((l) => `  - ${l.fuel}: ${num(l.quantity)} MT, Grade: ${l.grade}${l.specs ? `, Specs: ${l.specs}` : ''}`).join('\n');
+  return [
+    'Dear Supplier,',
+    '',
+    'Please find below our bunker requirement for the subject vessel. Kindly submit your best quotation (price/MT, additional charges, delivery method, credit terms) at your earliest.',
+    '',
+    `Vessel: ${r.vessel} (IMO ${r.imo})`,
+    `Reference: ${r.reference}`,
+    `Bunkering Port: ${r.bunkerPort}`,
+    `ETA: ${r.eta}`,
+    `Laycan: ${r.laycanStart || '—'} to ${r.laycanEnd || '—'}`,
+    `Required On: ${r.requiredOn}`,
+    '',
+    'Fuel Requirement:',
+    fuelRows,
+    '',
+    `Charterer Instructions: ${r.chartererInstructions}`,
+    `Owner Instructions: ${r.ownerInstructions}`,
+    message.trim() ? `\nAdditional Note:\n${message.trim()}` : '',
+    '',
+    'Kind regards,',
+    'Bunker Team',
+  ].filter((l) => l !== '').join('\n');
+}
+
+/** Transition to RFQ Sent, log the suppliers contacted, and record an RFQ document for the audit trail. */
+function sendBunkerRfq(r: BunkerRequirement, recipients: string[]): void {
+  updateBunkerRequirement(
+    r.id,
+    {
+      status: r.status === 'Pending RFQ' ? 'RFQ Sent' : r.status,
+      suppliersInvited: Math.max(r.suppliersInvited, recipients.length),
+      documents: [{ id: uid('doc'), name: `RFQ-${r.id}.eml`, type: 'RFQ', date: fmtDate(new Date()) }, ...r.documents],
+    },
+    { user: 'Bunker Team', role: 'Bunker Team', action: `RFQ sent to ${recipients.length} supplier${recipients.length === 1 ? '' : 's'} (${recipients.join(', ')})` },
+  );
+  addNotification(`Bunker RFQ ${r.id} (${r.vessel} @ ${r.bunkerPort}) sent to ${recipients.length} supplier${recipients.length === 1 ? '' : 's'}.`, 'Bunker');
+}
+
+function SendRfqModal({ r, onClose }: { r: BunkerRequirement; onClose: () => void }) {
+  const suppliers = useMemo(
+    () => loadClients().filter((c) => c.kind === 'Service Provider' && c.category === 'Bunker Supplier / Trader' && c.email.trim()),
+    [],
+  );
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(suppliers.map((s) => s.email.trim())));
+  const [extraEmails, setExtraEmails] = useState<string[]>([]);
+  const [extraInput, setExtraInput] = useState('');
+  const [message, setMessage] = useState('');
+
+  const toggle = (email: string) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(email)) next.delete(email); else next.add(email);
+    return next;
+  });
+  const addExtra = () => {
+    const email = extraInput.trim();
+    if (!email || extraEmails.includes(email)) return;
+    setExtraEmails((prev) => [...prev, email]);
+    setSelected((prev) => new Set(prev).add(email));
+    setExtraInput('');
+  };
+  const removeExtra = (email: string) => {
+    setExtraEmails((prev) => prev.filter((e) => e !== email));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(email);
+      return next;
+    });
+  };
+
+  const recipients = Array.from(selected);
+  const lines = r.fuelLines?.length ? r.fuelLines : [{ fuel: r.fuelType, quantity: r.quantity, grade: r.grade }];
+  const subject = `Bunker Enquiry — ${r.vessel} — ${r.bunkerPort} — ${r.id}`;
+  const body = buildRfqEmailBody(r, message);
+
+  // Hands off to the app's own "Generate Comms" popup (same one opened from the header envelope
+  // icon) instead of redirecting straight to the OS mail client — queues the drafted RFQ content,
+  // which TopNav picks up and opens automatically.
+  const send = () => {
+    if (!recipients.length) return;
+    sendBunkerRfq(r, recipients);
+    queueCommsDraft({ to: recipients.join(', '), subject, body: plainToHtml(body) });
+    onClose();
+  };
+
+  return (
+    <div className="fv-bk__modal-backdrop" onClick={onClose}>
+      <div className="fv-bk__modal" onClick={(e) => e.stopPropagation()}>
+        <div className="fv-bk__modal-head">
+          <span><i className="fas fa-paper-plane" aria-hidden="true" /> Send RFQ — {r.id}</span>
+          <button type="button" className="fv-bk__icon-btn" onClick={onClose}><i className="fas fa-xmark" /></button>
+        </div>
+        <div className="fv-bk__modal-body">
+          <div className="fv-bk__grid4">
+            <Field label="Vessel / IMO" value={`${r.vessel} · ${r.imo}`} tone="accent" />
+            <Field label="Bunker Port" value={r.bunkerPort} />
+            <Field label="ETA" value={r.eta} />
+            <Field label="Laycan" value={`${r.laycanStart || '—'} to ${r.laycanEnd || '—'}`} />
+          </div>
+          <div className="fv-bk__tablewrap">
+            <table className="fv-bk__table fv-bk__table--center">
+              <thead><tr><th>Fuel</th><th>Grade</th><th className="fv-bk__r">Qty (MT)</th><th>Specs</th></tr></thead>
+              <tbody>
+                {lines.map((l, i) => (
+                  <tr key={i}><td>{l.fuel}</td><td>{l.grade}</td><td className="fv-bk__r">{num(l.quantity)}</td><td>{l.specs || '—'}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="fv-bk__charges-head"><span>Send enquiry to</span></div>
+          {suppliers.length === 0 && <p className="fv-bk__muted">No bunker suppliers with an email on file yet (Settings → Service Providers → Bunker Supplier / Trader). Add a recipient below.</p>}
+          <div className="fv-bk__rfq-suppliers">
+            {suppliers.map((s) => (
+              <label key={s.id} className="fv-bk__rfq-supplier-row">
+                <input type="checkbox" checked={selected.has(s.email.trim())} onChange={() => toggle(s.email.trim())} />
+                <span>{s.name}</span>
+                <span className="fv-bk__muted">{s.email}</span>
+              </label>
+            ))}
+            {extraEmails.map((email) => (
+              <label key={email} className="fv-bk__rfq-supplier-row">
+                <input type="checkbox" checked={selected.has(email)} onChange={() => toggle(email)} />
+                <span>{email}</span>
+                <button type="button" className="fv-bk__icon-btn" title="Remove" onClick={() => removeExtra(email)}><i className="fas fa-trash" /></button>
+              </label>
+            ))}
+          </div>
+          <div className="fv-bk__rfq-add-row">
+            <input value={extraInput} onChange={(e) => setExtraInput(e.target.value)} placeholder="Add another supplier email" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addExtra(); } }} />
+            <button type="button" className="fv-bk__btn fv-bk__btn--sm" onClick={addExtra}><i className="fas fa-plus" /> Add</button>
+          </div>
+          <label className="fv-bk__ffield fv-bk__ffield--grow">
+            <span>Message / Instructions (optional)</span>
+            <textarea rows={3} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Any additional instructions for suppliers" />
+          </label>
+          <p className="fv-bk__hint"><i className="fas fa-envelope" aria-hidden="true" /> Opens the application's Generate Comms popup (same one as the header envelope icon), prefilled with this RFQ, and moves this requirement to RFQ Sent.</p>
+        </div>
+        <div className="fv-bk__modal-foot">
+          <button type="button" className="fv-bk__btn" onClick={onClose}>Cancel</button>
+          <button type="button" className={`fv-bk__btn fv-bk__btn--primary${recipients.length ? '' : ' fv-bk__btn--disabled'}`} disabled={!recipients.length} onClick={send}><i className="fas fa-paper-plane" /> Send RFQ ({recipients.length})</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* --------- add quote modal --------- */
 
 function AddQuoteModal({ r, onClose }: { r: BunkerRequirement; onClose: () => void }) {
@@ -820,7 +977,7 @@ function AddQuoteModal({ r, onClose }: { r: BunkerRequirement; onClose: () => vo
   const [charges, setCharges] = useState<AdditionalCharge[]>([]);
 
   const price = parseFloat(pricePerMt) || 0;
-  const fuelCost = Math.round(price * r.quantity);
+  const fuelCost = Math.round(price * nominalFuelQty(r));
   const chargesTotal = sumAdditionalCharges(charges);
   const total = fuelCost + chargesTotal;
   const canSave = supplier.trim() !== '' && price > 0;
@@ -860,7 +1017,7 @@ function AddQuoteModal({ r, onClose }: { r: BunkerRequirement; onClose: () => vo
           <div className="fv-bk__form">
             <label className="fv-bk__ffield"><span>Supplier</span><input value={supplier} onChange={(e) => setSupplier(e.target.value)} placeholder="e.g. Ocean Bunkers" /></label>
             <label className="fv-bk__ffield"><span>Price / MT (USD)</span><input type="number" value={pricePerMt} onChange={(e) => setPricePerMt(e.target.value)} placeholder="0" /></label>
-            <label className="fv-bk__ffield"><span>Quantity (MT)</span><input value={num(r.quantity)} disabled /></label>
+            <label className="fv-bk__ffield"><span>Quantity (MT)</span><input value={num(nominalFuelQty(r))} disabled /></label>
             <label className="fv-bk__ffield"><span>Fuel Cost (USD)</span><input value={fuelCost ? num(fuelCost) : ''} disabled /></label>
             <label className="fv-bk__ffield"><span>Total Cost incl. Charges (USD)</span><input value={total ? num(total) : ''} disabled /></label>
             <label className="fv-bk__ffield"><span>Credit (days)</span><input type="number" value={creditDays} onChange={(e) => setCreditDays(e.target.value)} /></label>
@@ -909,6 +1066,7 @@ function AddQuoteModal({ r, onClose }: { r: BunkerRequirement; onClose: () => vo
 
 function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; onCompare: () => void }) {
   const [addQuoteOpen, setAddQuoteOpen] = useState(false);
+  const [sendRfqOpen, setSendRfqOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<string | null>(null);
   const [draft, setDraft] = useState<Quote | null>(null);
   const dueDays = daysUntil(r.dueIso);
@@ -923,7 +1081,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
   };
   const saveEditQuote = () => {
     if (!editingSupplier || !draft) return;
-    const fuelCost = Math.round((draft.pricePerMt || 0) * r.quantity);
+    const fuelCost = Math.round((draft.pricePerMt || 0) * nominalFuelQty(r));
     const total = fuelCost + sumAdditionalCharges(draft.additionalCharges);
     updateBunkerQuote(r.id, editingSupplier, { ...draft, totalCost: total });
     setEditingSupplier(null);
@@ -1017,9 +1175,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
   const removeInvoiceCharge = (id: string) => setInvoiceDraft((d) => ({ ...d, additionalCharges: d.additionalCharges.filter((c) => c.id !== id) }));
   const saveEditInvoice = () => {
     const pricePerMt = parseFloat(invoiceDraft.pricePerMt) || 0;
-    const fuelCost = Math.round(pricePerMt * r.quantity);
-    const claimsTotal = sumBunkerClaims(r.claims);
-    const invoiceAmount = fuelCost + sumAdditionalCharges(invoiceDraft.additionalCharges) - claimsTotal;
+    const invoiceAmount = computeInvoiceTotal(r, pricePerMt, invoiceDraft.additionalCharges);
     updateBunkerRequirement(
       r.id,
       {
@@ -1051,24 +1207,25 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
             <Field label="Required On" value={r.requiredOn} tone="accent" />
           </div>
         </PanelSection>
-        <PanelSection title="Voyage Information">
+        <PanelSection title="Voyage &amp; Fuel Requirement">
           <div className="fv-bk__grid4">
             <Field label="Loading Port" value={r.loadPort} />
             <Field label="Discharge Port" value={r.dischargePort} />
             <Field label="Bunkering Port" value={r.bunkerPort} />
             <Field label="ETA" value={r.eta} />
+            <Field label="Laycan Start" value={r.laycanStart || '—'} tone="accent" />
+            <Field label="Laycan End" value={r.laycanEnd || '—'} tone="accent" />
           </div>
-        </PanelSection>
-        <PanelSection title="Fuel Requirement">
+          <div className="fv-bk__divider" />
           {(r.fuelLines?.length ?? 0) > 1 ? (
             <table className="fv-bk__table" style={{ marginBottom: 8 }}>
-              <thead><tr><th>Fuel Type</th><th>Grade</th><th className="fv-bk__r">Required (MT)</th><th className="fv-bk__r">Supplied (MT)</th><th className="fv-bk__r">Delivered (MT)</th></tr></thead>
+              <thead><tr><th>Fuel Type</th><th className="fv-bk__r">Required (MT)</th><th>Specs</th><th className="fv-bk__r">Supplied (MT)</th><th className="fv-bk__r">Delivered (MT)</th></tr></thead>
               <tbody>
                 {(r.fuelLines ?? [{ fuel: r.fuelType, quantity: r.quantity, grade: r.grade }]).map((fl, i) => (
                   <tr key={i}>
                     <td><span className="fv-bk__fuel-chip">{fl.fuel}</span></td>
-                    <td>{fl.grade}</td>
                     <td className="fv-bk__r">{num(fl.quantity)}</td>
+                    <td>{fl.specs || '—'}</td>
                     <td className="fv-bk__r">{fl.suppliedQty != null ? num(fl.suppliedQty) : '—'}</td>
                     <td className="fv-bk__r">{fl.deliveredQty != null ? num(fl.deliveredQty) : '—'}</td>
                   </tr>
@@ -1076,9 +1233,9 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
               </tbody>
               <tfoot>
                 <tr className="fv-bk__row-sub">
-                  <td colSpan={2}>Total</td>
+                  <td>Total</td>
                   <td className="fv-bk__r">{num((r.fuelLines ?? []).reduce((s, l) => s + l.quantity, 0))} MT</td>
-                  <td colSpan={2} />
+                  <td colSpan={3} />
                 </tr>
               </tfoot>
             </table>
@@ -1086,7 +1243,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
             <div className="fv-bk__grid4">
               <Field label="Fuel Type" value={r.fuelType} tone="accent" />
               <Field label="Quantity" value={`${num(r.quantity)} MT`} />
-              <Field label="Grade" value={r.grade} />
+              <Field label="Specs" value={r.fuelLines?.[0]?.specs || '—'} />
               <Field label="Delivery Mode" value={r.deliveryMethod ?? '—'} />
             </div>
           )}
@@ -1095,8 +1252,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
             <Field label="Expected Cons." value={`${num(r.expectedCons)} MT/day`} />
             <Field label="Delivery Mode" value={r.deliveryMethod ?? '—'} />
           </div>
-          <div className="fv-bk__note"><i className="fas fa-user-tie" aria-hidden="true" /> Charterer: {r.chartererInstructions}</div>
-          <div className="fv-bk__note"><i className="fas fa-anchor" aria-hidden="true" /> Owner: {r.ownerInstructions}</div>
+          <div className="fv-bk__note"><i className="fas fa-note-sticky" aria-hidden="true" /> Instructions / Note: {r.ownerInstructions && r.ownerInstructions !== '—' ? r.ownerInstructions : 'No additional instructions provided.'}</div>
         </PanelSection>
       </div>
     );
@@ -1108,7 +1264,12 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
         <div className="fv-bk__stage">
           <PanelSection
             title="Sourcing Summary"
-            action={r.quotes.length > 1 ? <button type="button" className="fv-bk__link-btn" onClick={onCompare}><i className="fas fa-scale-balanced" /> Compare {r.quotes.length}</button> : undefined}
+            action={(
+              <div className="fv-bk__row-actions">
+                <button type="button" className="fv-bk__btn fv-bk__btn--sm fv-bk__btn--primary" onClick={() => setSendRfqOpen(true)}><i className="fas fa-paper-plane" /> {reached(r.status, 'RFQ Sent') ? 'Resend RFQ' : 'Send RFQ'}</button>
+                {r.quotes.length > 1 && <button type="button" className="fv-bk__link-btn" onClick={onCompare}><i className="fas fa-scale-balanced" /> Compare {r.quotes.length}</button>}
+              </div>
+            )}
           >
             <div className="fv-bk__grid4">
               <Field label="Suppliers Invited" value={r.suppliersInvited} />
@@ -1147,7 +1308,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
                     {[...r.quotes].sort((a, b) => b.score - a.score).map((qt) => {
                       const isEditing = editingSupplier === qt.supplier && draft;
                       if (isEditing && draft) {
-                        const fuelCost = Math.round((draft.pricePerMt || 0) * r.quantity);
+                        const fuelCost = Math.round((draft.pricePerMt || 0) * nominalFuelQty(r));
                         const total = fuelCost + sumAdditionalCharges(draft.additionalCharges);
                         return (
                           <tr key={qt.supplier} className="fv-bk__row-editing">
@@ -1218,13 +1379,14 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
           <PanelSection title="RFQ Documents"><DocsList docs={r.documents} filter={(d) => ['RFQ', 'Supplier Quote', 'Email Attachment'].includes(d.type)} /></PanelSection>
         </div>
         {addQuoteOpen && <AddQuoteModal r={r} onClose={() => setAddQuoteOpen(false)} />}
+        {sendRfqOpen && <SendRfqModal r={r} onClose={() => setSendRfqOpen(false)} />}
       </>
     );
   }
 
   if (tab === 'booking') {
     if (!reached(r.status, 'Booked')) return <EmptyState icon="fa-handshake" text="Not booked yet. Select a supplier and generate the purchase order to book." />;
-    const fuelCost = r.pricePerMt != null ? Math.round(r.pricePerMt * r.quantity) : undefined;
+    const fuelCost = r.pricePerMt != null ? Math.round(r.pricePerMt * nominalFuelQty(r)) : undefined;
     return (
       <div className="fv-bk__stage">
         <PanelSection title="Booking Details">
@@ -1294,7 +1456,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
           {editingSupply ? (
             <div className="fv-bk__grid4">
               <label className="fv-bk__ffield"><span>Supply Date / Time</span><input type="datetime-local" value={supplyDraft.supplyDateTime} onChange={(e) => setSupplyDraft((d) => ({ ...d, supplyDateTime: e.target.value }))} /></label>
-              <Field label="Nominated Qty" value={`${num(r.quantity)} MT`} />
+              <Field label="Nominated Qty" value={`${num(nominalFuelQty(r))} MT`} />
               <label className="fv-bk__ffield"><span>Supplied Qty (MT)</span><input type="number" value={supplyDraft.suppliedQty} onChange={(e) => setSupplyDraft((d) => ({ ...d, suppliedQty: e.target.value }))} /></label>
               <label className="fv-bk__ffield"><span>Delivered — BDN (MT)</span><input type="number" value={supplyDraft.deliveredQty} onChange={(e) => setSupplyDraft((d) => ({ ...d, deliveredQty: e.target.value }))} /></label>
               <label className="fv-bk__ffield"><span>Delivery Mode</span>
@@ -1307,9 +1469,17 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
           ) : (
             <div className="fv-bk__grid4">
               <Field label="Supply Date / Time" value={r.supplyDateTime} tone="accent" />
-              <Field label="Nominated Qty" value={`${num(r.quantity)} MT`} />
+              <Field label="Nominated Qty" value={`${num(nominalFuelQty(r))} MT`} />
               <Field label="Supplied Qty" value={r.suppliedQty != null ? `${num(r.suppliedQty)} MT` : '—'} />
-              <Field label="Delivered (BDN)" value={r.deliveredQty != null ? `${num(r.deliveredQty)} MT` : '—'} tone="good" />
+              <Field
+                label="Delivered (BDN)"
+                value={r.deliveredQty != null ? (
+                  <span title={hasQuantityDiscrepancy(r) ? `Differs from nominated qty by ${num(Math.abs(quantityVariance(r) ?? 0))} MT — reconcile with Operations` : undefined}>
+                    {num(r.deliveredQty)} MT{hasQuantityDiscrepancy(r) && <i className="fas fa-triangle-exclamation fv-bk__qty-flag" aria-hidden="true" />}
+                  </span>
+                ) : '—'}
+                tone={hasQuantityDiscrepancy(r) ? 'bad' : 'good'}
+              />
               <Field label="Delivery Mode" value={r.deliveryMethod} />
               <Field label="Bunker Port" value={r.bunkerPort} />
             </div>
@@ -1415,7 +1585,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
         </div>
       );
     }
-    const fuelCost = r.pricePerMt != null ? Math.round(r.pricePerMt * r.quantity) : (r.invoiceAmount ?? 0) - sumAdditionalCharges(r.additionalCharges);
+    const fuelCost = r.pricePerMt != null ? Math.round(r.pricePerMt * actualFuelQty(r)) : (r.invoiceAmount ?? 0) - sumAdditionalCharges(r.additionalCharges);
     const chargesTotal = sumAdditionalCharges(r.additionalCharges);
     const claimsTotal = sumBunkerClaims(r.claims);
     const liveInvoiceAmount = fuelCost + chargesTotal - claimsTotal;
@@ -1471,7 +1641,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
                   </td>
                   <td>{r.invoiceNo}</td>
                   <td>{r.supplier}</td>
-                  <td>{num(r.deliveredQty ?? r.quantity)} MT @ USD {r.pricePerMt ?? '—'}</td>
+                  <td>{num(actualFuelQty(r))} MT @ USD {r.pricePerMt ?? '—'}</td>
                   <td>{money(liveInvoiceAmount)}</td>
                   <td>{r.dueDate}<br /><small className="fv-bk__muted">{dueInLabel(r.dueIso, r.paymentStatus === 'Paid')}</small></td>
                   <td><ApprovalBadge status={r.approvalStatus} /></td>
@@ -1507,7 +1677,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
                             <Field label="Supplier" value={r.supplier} tone="accent" />
                             <Field label="Bunker Port" value={r.bunkerPort} />
                             <Field label="Fuel Type / Grade" value={`${r.fuelType} · ${r.grade}`} />
-                            <Field label="Quantity Supplied" value={`${num(r.deliveredQty ?? r.quantity)} MT`} />
+                            <Field label="Quantity Supplied" value={`${num(actualFuelQty(r))} MT`} />
                           </div>
                         </div>
 
@@ -1519,9 +1689,9 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
                               <tbody>
                                 <tr>
                                   <td className="fv-bk__charge-line">
-                                    <span className="fv-bk__nowrap">Fuel Cost ({num(r.quantity)} MT @ USD <input className="fv-bk__inline-input" type="number" value={invoiceDraft.pricePerMt} onChange={(e) => setInvoiceDraft((d) => ({ ...d, pricePerMt: e.target.value }))} />/MT)</span>
+                                    <span className="fv-bk__nowrap">Fuel Cost ({num(actualFuelQty(r))} MT @ USD <input className="fv-bk__inline-input" type="number" value={invoiceDraft.pricePerMt} onChange={(e) => setInvoiceDraft((d) => ({ ...d, pricePerMt: e.target.value }))} />/MT)</span>
                                   </td>
-                                  <td>{money(Math.round((parseFloat(invoiceDraft.pricePerMt) || 0) * r.quantity))}</td>
+                                  <td>{money(Math.round((parseFloat(invoiceDraft.pricePerMt) || 0) * actualFuelQty(r)))}</td>
                                 </tr>
                                 {invoiceDraft.additionalCharges.map((c) => (
                                   <tr key={c.id}>
@@ -1546,7 +1716,7 @@ function TabContent({ tab, r, onCompare }: { tab: WsTab; r: BunkerRequirement; o
                               <tfoot>
                                 <tr className="fv-bk__row-sub">
                                   <td>Total Invoice Amount</td>
-                                  <td>{money(Math.round((parseFloat(invoiceDraft.pricePerMt) || 0) * r.quantity) + sumAdditionalCharges(invoiceDraft.additionalCharges) - claimsTotal)}</td>
+                                  <td>{money(Math.round((parseFloat(invoiceDraft.pricePerMt) || 0) * actualFuelQty(r)) + sumAdditionalCharges(invoiceDraft.additionalCharges) - claimsTotal)}</td>
                                 </tr>
                               </tfoot>
                             </table>
@@ -1758,6 +1928,7 @@ export function BunkerManagementPage({ mode }: { mode?: 'create' } = {}) {
             <button type="button" className="fv-bk__btn fv-bk__btn--primary" onClick={() => setNewOpen(true)}><i className="fas fa-plus" /> New Bunker RFQ</button>
           </div>
         </header>
+        <VoyageTagsStrip />
 
         {!selected ? (
           <div className="fv-bk__placeholder">

@@ -10,11 +10,15 @@ import {
   newVesselId,
   resetVessels,
   saveVessels,
+  syncVesselsFromBackend,
   type Vessel,
   type VesselChange,
   type VesselFieldKey,
   type VesselGroup,
 } from '../data/vessels';
+import { vesselsApi } from '../api/vesselsApi';
+import { useAuth } from '../context/AuthContext';
+import { addNotification } from '../data/workflow';
 import {
   hitToVessel,
   loadImoDatabase,
@@ -32,6 +36,8 @@ import {
  */
 export function VesselsPanel() {
   const l = useL();
+  const { role } = useAuth();
+  const canManageVessels = role === 'SuperAdmin';
   const t = (key: string, fallback: string) => {
     const v = l(key);
     return v === key ? fallback : v;
@@ -52,6 +58,12 @@ export function VesselsPanel() {
   useEffect(() => {
     saveVessels(vessels);
   }, [vessels]);
+
+  useEffect(() => {
+    void syncVesselsFromBackend().then((list) => {
+      if (list && list.length > 0) setVessels(list);
+    });
+  }, []);
 
   // Debounced search against the (lazily-loaded) IMO reference database.
   useEffect(() => {
@@ -123,9 +135,27 @@ export function VesselsPanel() {
 
   const deleteVessel = (id: string) => {
     if (!window.confirm(t('confirmDeleteVessel', 'Delete this vessel?'))) return;
+    
+    // Store the vessel in case we need to restore it
+    const vesselToDelete = vessels.find((v) => v.id === id);
+    if (!vesselToDelete) return;
+    
     setVessels((prev) => prev.filter((x) => x.id !== id));
     setEditing((e) => (e && e.id === id ? null : e));
     setHistoryId((h) => (h === id ? null : h));
+
+    // Delete from backend
+    void (async () => {
+      try {
+        await vesselsApi.delete(id);
+        addNotification(t('vesselDeleted', `Vessel "${vesselToDelete.name}" deleted successfully.`), 'Settings');
+      } catch (error) {
+        // Restore the vessel if deletion fails
+        setVessels((prev) => [...prev, vesselToDelete].sort((a, b) => a.name.localeCompare(b.name)));
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+        addNotification(t('vesselDeleteFailed', `Failed to delete vessel: ${errorMsg}`), 'Settings');
+      }
+    })();
   };
 
   const saveEditing = () => {
@@ -141,6 +171,8 @@ export function VesselsPanel() {
       const val = cleaned[key];
       if (typeof val === 'string') rec[key] = val.trim();
     }
+
+    const isExisting = Boolean(editing.id && !editing.id.startsWith('ves-'));
 
     setVessels((prev) => {
       if (editing.id) {
@@ -161,6 +193,25 @@ export function VesselsPanel() {
       };
       return [created, ...prev];
     });
+
+    // Push to backend
+    void (async () => {
+      try {
+        if (isExisting && editing.id) {
+          await vesselsApi.update(editing.id, cleaned);
+        } else {
+          const res = await vesselsApi.create(cleaned);
+          if (res && res.id) {
+            setVessels((prev) =>
+              prev.map((x) => (x.imo === res.imo ? { ...x, id: res.id } : x)),
+            );
+          }
+        }
+      } catch {
+        /* local state fallback */
+      }
+    })();
+
     setEditing(null);
   };
 
@@ -190,21 +241,25 @@ export function VesselsPanel() {
           />
         </div>
         <div className="fv-email-templates__bar-actions">
-          <button
-            type="button"
-            className="fv-email-template__btn"
-            onClick={restoreDefaults}
-            title={t('restoreDefaults', 'Restore defaults')}
-          >
-            <i className="fas fa-rotate-left" aria-hidden="true" /> {t('restoreDefaults', 'Restore defaults')}
-          </button>
-          <button type="button" className="fv-email-template__btn" onClick={openLookup}>
-            <i className="fas fa-magnifying-glass-location" aria-hidden="true" />{' '}
-            {t('addFromImoDb', 'Add from IMO database')}
-          </button>
-          <button type="button" className="fv-email-templates__new" onClick={startNew}>
-            <i className="fas fa-plus" aria-hidden="true" /> {t('newVessel', 'New vessel')}
-          </button>
+          {canManageVessels && (
+            <>
+              <button
+                type="button"
+                className="fv-email-template__btn"
+                onClick={restoreDefaults}
+                title={t('restoreDefaults', 'Restore defaults')}
+              >
+                <i className="fas fa-rotate-left" aria-hidden="true" /> {t('restoreDefaults', 'Restore defaults')}
+              </button>
+              <button type="button" className="fv-email-template__btn" onClick={openLookup}>
+                <i className="fas fa-magnifying-glass-location" aria-hidden="true" />{' '}
+                {t('addFromImoDb', 'Add from IMO database')}
+              </button>
+              <button type="button" className="fv-email-templates__new" onClick={startNew}>
+                <i className="fas fa-plus" aria-hidden="true" /> {t('newVessel', 'New vessel')}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -318,24 +373,28 @@ export function VesselsPanel() {
                     <i className="fas fa-clock-rotate-left" aria-hidden="true" /> {t('history', 'History')}
                     {v.history.length > 0 && <span className="fv-vessel-hist__count">{v.history.length}</span>}
                   </button>
-                  <button
-                    type="button"
-                    className="fv-email-template__btn"
-                    onClick={() => startEdit(v)}
-                    aria-label={t('edit', 'Edit')}
-                    title={t('edit', 'Edit')}
-                  >
-                    <i className="fas fa-pen" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="fv-email-template__btn fv-email-template__btn--danger"
-                    onClick={() => deleteVessel(v.id)}
-                    aria-label={t('delete', 'Delete')}
-                    title={t('delete', 'Delete')}
-                  >
-                    <i className="fas fa-trash" aria-hidden="true" />
-                  </button>
+                  {canManageVessels && (
+                    <>
+                      <button
+                        type="button"
+                        className="fv-email-template__btn"
+                        onClick={() => startEdit(v)}
+                        aria-label={t('edit', 'Edit')}
+                        title={t('edit', 'Edit')}
+                      >
+                        <i className="fas fa-pen" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        className="fv-email-template__btn fv-email-template__btn--danger"
+                        onClick={() => deleteVessel(v.id)}
+                        aria-label={t('delete', 'Delete')}
+                        title={t('delete', 'Delete')}
+                      >
+                        <i className="fas fa-trash" aria-hidden="true" />
+                      </button>
+                    </>
+                  )}
                 </div>
               </header>
 
@@ -430,7 +489,48 @@ const GROUP_LABELS: Record<VesselGroup, string> = {
   Dimensions: 'Ship Dimensions',
   Engine: 'Ship Engine',
   Commercial: 'Commercial / Other',
+  Performance: 'Performance Profile (Vessel Profile tab)',
 };
+
+/** Engine Limits & Constraints table rows — [label, min key, max key | null]. */
+const ENGINE_LIMIT_ROWS: [string, VesselFieldKey, VesselFieldKey | null][] = [
+  ['RPM', 'minRpm', 'maxRpm'],
+  ['MCR (kW)', 'minMcr', 'maxMcr'],
+  ['Speed (kt)', 'minSpeed', 'maxSpeed'],
+  ['Power Fraction', 'minPowerFraction', 'maxPowerFraction'],
+  ['Nominal Power Fraction', 'nominalPowerFraction', null],
+  ['Blower On/Off — Ballast (RPM)', 'blowerBallastMin', 'blowerBallastMax'],
+  ['Blower On/Off — Laden (RPM)', 'blowerLadenMin', 'blowerLadenMax'],
+  ['Critical RPM (RPM)', 'criticalRpmMin', 'criticalRpmMax'],
+];
+
+/** Telegraph Table rows — [order label, RPM key, ballast speed key, laden speed key]. */
+const TELEGRAPH_ROWS: [string, VesselFieldKey, VesselFieldKey, VesselFieldKey][] = [
+  ['Dead Slow Ahead', 'deadSlowRpm', 'deadSlowSpeedBallast', 'deadSlowSpeedLaden'],
+  ['Slow Ahead', 'slowAheadRpm', 'slowAheadSpeedBallast', 'slowAheadSpeedLaden'],
+  ['Half Ahead', 'halfAheadRpm', 'halfAheadSpeedBallast', 'halfAheadSpeedLaden'],
+  ['Full Ahead', 'fullAheadRpm', 'fullAheadSpeedBallast', 'fullAheadSpeedLaden'],
+];
+
+/** Weather Safety Limits rows — [condition label, ballast key, laden key]. */
+const WEATHER_LIMIT_ROWS: [string, VesselFieldKey, VesselFieldKey][] = [
+  ['Max SWH (m)', 'wslMaxSwhBallast', 'wslMaxSwhLaden'],
+  ['Max Winds (BF)', 'wslMaxWindsBallast', 'wslMaxWindsLaden'],
+  ['Max Sea State (DSS)', 'wslMaxSeaStateBallast', 'wslMaxSeaStateLaden'],
+];
+
+/** Every key rendered by the three tables above — excluded from the Performance
+ *  group's plain label/input grid so each field only appears once. */
+const PERFORMANCE_TABLE_KEYS = new Set<VesselFieldKey>([
+  ...ENGINE_LIMIT_ROWS.flatMap(([, min, max]) => (max ? [min, max] : [min])),
+  ...TELEGRAPH_ROWS.flatMap(([, rpm, ballast, laden]) => [rpm, ballast, laden]),
+  ...WEATHER_LIMIT_ROWS.flatMap(([, ballast, laden]) => [ballast, laden]),
+]);
+
+/** A single editable numeric cell shared by the three Performance tables below. */
+function TableCell({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return <input className="fv-voyage__cell-input" type="number" value={value} onChange={(e) => onChange(e.target.value)} />;
+}
 
 function VesselEditor({
   t,
@@ -460,21 +560,106 @@ function VesselEditor({
         <fieldset key={group} className="fv-vessel-group">
           <legend>{t(`vesselGroup_${group}`, GROUP_LABELS[group])}</legend>
           <div className="fv-vessel-group__grid">
-            {VESSEL_FIELDS.filter((f) => f.group === group).map((f) => (
+            {VESSEL_FIELDS.filter((f) => f.group === group && !(group === 'Performance' && PERFORMANCE_TABLE_KEYS.has(f.key))).map((f) => (
               <label key={f.key} className="fv-email-template__field">
                 <span>
                   {f.label}
                   {f.required && <em className="fv-vessel-req"> *</em>}
                 </span>
-                <input
-                  type={f.type ?? 'text'}
-                  value={value[f.key]}
-                  placeholder={f.placeholder}
-                  onChange={(e) => set(f.key, e.target.value)}
-                />
+                {f.type === 'boolean' ? (
+                  <select value={value[f.key]} onChange={(e) => set(f.key, e.target.value)}>
+                    <option value="false">No</option>
+                    <option value="true">Yes</option>
+                  </select>
+                ) : (
+                  <input
+                    type={f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : 'text'}
+                    value={value[f.key]}
+                    placeholder={f.placeholder}
+                    onChange={(e) => set(f.key, e.target.value)}
+                  />
+                )}
               </label>
             ))}
           </div>
+
+          {group === 'Performance' && (
+            <div className="fv-vessel-group__tables">
+              <div className="fv-voyage__col">
+                <span className="fv-voyage__info-label">Engine Limits &amp; Constraints</span>
+                <div className="fv-voyage__table-scroll">
+                  <table className="fv-voyage__dtable">
+                    <thead>
+                      <tr>
+                        <th>Parameter</th>
+                        <th>Min</th>
+                        <th>Max</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ENGINE_LIMIT_ROWS.map(([label, minKey, maxKey]) => (
+                        <tr key={label}>
+                          <td>{label}</td>
+                          <td><TableCell value={value[minKey]} onChange={(v) => set(minKey, v)} /></td>
+                          <td>{maxKey ? <TableCell value={value[maxKey]} onChange={(v) => set(maxKey, v)} /> : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="fv-voyage__col">
+                <span className="fv-voyage__info-label">Telegraph Table</span>
+                <div className="fv-voyage__table-scroll">
+                  <table className="fv-voyage__dtable">
+                    <thead>
+                      <tr>
+                        <th>Order</th>
+                        <th>RPM</th>
+                        <th>Speed, Ballast (kt)</th>
+                        <th>Speed, Laden (kt)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {TELEGRAPH_ROWS.map(([label, rpmKey, ballastKey, ladenKey]) => (
+                        <tr key={label}>
+                          <td>{label}</td>
+                          <td><TableCell value={value[rpmKey]} onChange={(v) => set(rpmKey, v)} /></td>
+                          <td><TableCell value={value[ballastKey]} onChange={(v) => set(ballastKey, v)} /></td>
+                          <td><TableCell value={value[ladenKey]} onChange={(v) => set(ladenKey, v)} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="fv-voyage__col">
+                <span className="fv-voyage__info-label">Weather Safety Limits</span>
+                <div className="fv-voyage__table-scroll">
+                  <table className="fv-voyage__dtable">
+                    <thead>
+                      <tr>
+                        <th>Condition</th>
+                        <th>Ballast</th>
+                        <th>Laden</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {WEATHER_LIMIT_ROWS.map(([label, ballastKey, ladenKey]) => (
+                        <tr key={label}>
+                          <td>{label}</td>
+                          <td><TableCell value={value[ballastKey]} onChange={(v) => set(ballastKey, v)} /></td>
+                          <td><TableCell value={value[ladenKey]} onChange={(v) => set(ladenKey, v)} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
         </fieldset>
       ))}
 

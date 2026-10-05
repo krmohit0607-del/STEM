@@ -4,8 +4,12 @@
  * RTA constraint and speed / consumption constraints for the voyage, plus a
  * change log (who / when) so operators can audit edits.
  *
- * Persisted to localStorage; replace with the real API when exposed.
+ * localStorage is the instant offline cache; every save is also written
+ * through to the tenant database via the Settings key-value API
+ * (`settingsApi`), and `hydrateLimitsFor`/`hydrateLimitsHistory` pull the
+ * server copy down (e.g. on voyage switch) the same way `opsRecap` does.
  */
+import { settingsApi } from '../api/settingsApi';
 
 export interface MarketFactors {
   foPrice: string;
@@ -137,6 +141,8 @@ export const DEFAULT_LIMITS: VoyageLimits = {
 
 const STORAGE_KEY = 'fv.voyageLimits';
 const HISTORY_KEY = 'fv.voyageLimits.history';
+const SETTING_KEY = (voyageId?: string) => (voyageId ? `voyageLimits.${voyageId}` : 'voyageLimits');
+const HISTORY_SETTING_KEY = 'voyageLimits.history';
 
 /** Merge a parsed snapshot with the defaults so old saves stay valid. */
 function mergeWithDefaults(parsed: Partial<VoyageLimits> | undefined): VoyageLimits {
@@ -184,6 +190,19 @@ export function saveLimits(limits: VoyageLimits): void {
   } catch {
     /* storage unavailable */
   }
+  void settingsApi.put(SETTING_KEY(), limits).catch(() => { /* offline — localStorage keeps it */ });
+}
+
+/** Pull the server copy of the global limits into the local cache. */
+export async function hydrateLimits(): Promise<VoyageLimits> {
+  try {
+    const res = await settingsApi.get(SETTING_KEY());
+    const parsed = mergeWithDefaults(JSON.parse(res.valueJson));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+    return parsed;
+  } catch {
+    return loadLimits(); // offline / not found — keep the local cache
+  }
 }
 
 /** Per-voyage variant of {@link loadLimits} (falls back to the global store). */
@@ -206,6 +225,20 @@ export function saveLimitsFor(voyageId: string | undefined, limits: VoyageLimits
   } catch {
     /* storage unavailable */
   }
+  void settingsApi.put(SETTING_KEY(voyageId), limits).catch(() => { /* offline — localStorage keeps it */ });
+}
+
+/** Pull the server copy of a voyage's limits into the local cache; returns the merged result. */
+export async function hydrateLimitsFor(voyageId: string | undefined): Promise<VoyageLimits> {
+  if (!voyageId) return hydrateLimits();
+  try {
+    const res = await settingsApi.get(SETTING_KEY(voyageId));
+    const parsed = mergeWithDefaults(JSON.parse(res.valueJson));
+    window.localStorage.setItem(`${STORAGE_KEY}.${voyageId}`, JSON.stringify(parsed));
+    return parsed;
+  } catch {
+    return loadLimitsFor(voyageId); // offline / not found — keep the local cache
+  }
 }
 
 export function loadLimitsHistory(): LimitsHistoryEntry[] {
@@ -227,7 +260,23 @@ export function appendLimitsHistory(entry: LimitsHistoryEntry): LimitsHistoryEnt
   } catch {
     /* ignore */
   }
+  void settingsApi.put(HISTORY_SETTING_KEY, next).catch(() => { /* offline — localStorage keeps it */ });
   return next;
+}
+
+/** Pull the server copy of the audit history into the local cache; returns the merged result. */
+export async function hydrateLimitsHistory(): Promise<LimitsHistoryEntry[]> {
+  try {
+    const res = await settingsApi.get(HISTORY_SETTING_KEY);
+    const parsed = JSON.parse(res.valueJson);
+    if (Array.isArray(parsed)) {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(parsed));
+      return parsed as LimitsHistoryEntry[];
+    }
+  } catch {
+    /* offline / not found — keep the local cache */
+  }
+  return loadLimitsHistory();
 }
 
 export function newHistoryId(): string {

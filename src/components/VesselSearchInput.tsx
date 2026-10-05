@@ -7,6 +7,7 @@ import {
   type ImoSearchHit,
 } from '../data/imoShipDatabase';
 import { loadVessels, newVesselId, saveVessels, type Vessel } from '../data/vessels';
+import { vesselsApi } from '../api/vesselsApi';
 
 interface Props {
   value: string;
@@ -119,6 +120,12 @@ export function VesselSearchInput({ value, onChange, onPick, disabled, placehold
       setFleet(next);
       onChange(imported.name);
       onPick?.(imported);
+      void vesselsApi.create(imported).then((res) => {
+        if (!res?.id) return;
+        const withBackendId = loadVessels().map((v) => (v.id === imported.id ? { ...v, id: res.id } : v));
+        saveVessels(withBackendId);
+        setFleet(withBackendId);
+      }).catch(() => { /* local fallback */ });
     }
     setOpen(false);
   };

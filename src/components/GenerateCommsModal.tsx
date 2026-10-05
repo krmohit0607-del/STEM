@@ -12,6 +12,7 @@ import {
   type EmailTemplate,
 } from '../data/emailTemplates';
 import { consumeCommsDraft } from '../data/commsStore';
+import { useFloatingDialog } from '../hooks/useFloatingDialog';
 import { RichTextEditor } from './RichTextEditor';
 
 /**
@@ -30,6 +31,13 @@ export function GenerateCommsModal({
   voyage: Voyage | undefined;
   onClose: () => void;
 }) {
+  const { style: floatStyle, onDragStart, onResizeStart, resetPosition } = useFloatingDialog({
+    defaultWidth: 760,
+    defaultHeight: 680,
+    minWidth: 420,
+    minHeight: 320,
+  });
+
   const templates = useMemo(() => loadEmailTemplates(), []);
 
   // Folders = the distinct main template categories.
@@ -220,13 +228,19 @@ export function GenerateCommsModal({
         role="dialog"
         aria-modal="true"
         aria-label="Generate Comms"
+        style={floatStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="fv-comms__head">
+        <header className="fv-comms__head" onMouseDown={onDragStart}>
           <h4><i className="fas fa-envelope-open-text" aria-hidden="true" /> Generate Comms</h4>
-          <button type="button" className="fv-comms__close" onClick={onClose} aria-label="Close">
-            <i className="fas fa-xmark" aria-hidden="true" />
-          </button>
+          <div className="fv-comms__head-actions">
+            <button type="button" className="fv-comms__close" onClick={resetPosition} title="Reset size &amp; position" aria-label="Reset size and position">
+              <i className="fas fa-compress" aria-hidden="true" />
+            </button>
+            <button type="button" className="fv-comms__close" onClick={onClose} aria-label="Close">
+              <i className="fas fa-xmark" aria-hidden="true" />
+            </button>
+          </div>
         </header>
 
         <div className="fv-comms__body">
@@ -334,6 +348,13 @@ export function GenerateCommsModal({
             <i className="fas fa-paper-plane" aria-hidden="true" /> {sent ? 'Drafted' : 'Draft Message'}
           </button>
         </footer>
+
+        <div
+          className="fv-comms__resize-handle"
+          onMouseDown={onResizeStart}
+          title="Drag to resize"
+          aria-hidden="true"
+        />
       </div>
     </div>
   );

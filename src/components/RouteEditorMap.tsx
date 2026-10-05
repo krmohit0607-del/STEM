@@ -9,18 +9,29 @@ import {
   useMap,
   useMapEvents,
 } from 'react-leaflet';
-import L, { type LatLngExpression } from 'leaflet';
+import L, { type LatLngExpression, type LatLngBoundsExpression } from 'leaflet';
 import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
 
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { MapCursorPosition } from './MapCursorPosition';
-import { MapLayersControl, readMapLayerId, type MapLayerId } from './MapLayersControl';
+import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
 const toRad = (d: number) => (d * Math.PI) / 180;
 const toDeg = (r: number) => (r * 180) / Math.PI;
+
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
 
 /**
  * Positions for one leg between two waypoints. A rhumb-line leg is a single
@@ -385,6 +396,7 @@ export function RouteEditorMap({
   onDeletePoint,
 }: RouteEditorMapProps) {
   const [baseLayer, setBaseLayer] = useState<MapLayerId>(() => readMapLayerId());
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
   const dragFrameByIdRef = useRef(new Map<string, number>());
   const [editingReportId, setEditingReportId] = useState<string | null>(null);
   const [editingSpeedId, setEditingSpeedId] = useState<string>('');
@@ -453,6 +465,8 @@ export function RouteEditorMap({
       center={[20, 80]}
       zoom={3}
       minZoom={2}
+      maxBounds={WORLD_PAN_BOUNDS}
+      maxBoundsViscosity={1.0}
       worldCopyJump
       scrollWheelZoom
       doubleClickZoom={false}
@@ -751,12 +765,15 @@ export function RouteEditorMap({
         );
       })}
 
-      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} />
-      <AreaConstraintsControl position="topright" />
+      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+      {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
       <WeatherFieldControl position="topright" />
+      <AreaConstraintsControl position="topright" />
       <WeatherPointControl position="topright" />
       <PortsControl position="topright" />
       <RulerControl position="topright" />
+      <CycloneLayer position="topright" />
+      <WeatherAlertsControl position="topright" />
       <MapCursorPosition />
     </MapContainer>
   );

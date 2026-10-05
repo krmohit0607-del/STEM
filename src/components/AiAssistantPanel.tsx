@@ -197,7 +197,7 @@ export function AiAssistantPanel({ onClose }: Props) {
     const vessel = loadVessels().find(v => v.name.trim().toLowerCase() === (recap.vesselName ?? voyage.vessel).trim().toLowerCase());
     return {
       vesselName: recap.vesselName || voyage.vessel || '',
-      imo: voyage.imo || '',
+      imo: recap.vesselImo || voyage.imo || '',
       vesselType: vessel?.vesselType || voyage.vesselType || '',
       dwt: parseFloat(vessel?.deadweight || '0') || 0,
       loadPort: recap.loadPort || voyage.portFrom || '',

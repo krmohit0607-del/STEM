@@ -1,11 +1,16 @@
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { FleetViewProvider } from './context/FleetViewContext';
 import { LocalizationProvider } from './i18n/LocalizationProvider';
 import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { LoginPage } from './components/LoginPage';
+import { SuperAdminPage } from './components/SuperAdminPage';
+import { AdminManagementPage } from './components/AdminManagementPage';
+import { EmployeeModulesPage } from './components/EmployeeModulesPage';
+import { VesselMasterPerformancePage } from './components/VesselMasterPerformancePage';
 import { FleetListPage } from './components/FleetListPage';
 import { InterimDashboardPage } from './components/InterimDashboardPage';
 import { OptimizationDetailsPage } from './components/OptimizationDetailsPage';
@@ -42,17 +47,7 @@ import { OfflineVesselReportsPage } from './components/OfflineVesselReportsPage'
 
 import { VoyageOverviewMap } from './components/VoyageOverviewMap';
 import { PageShell } from './components/PageShell';
-
-/** True once the user has signed in on the login screen. */
-function isAuthenticated(): boolean {
-  try {
-    return Boolean(
-      window.localStorage.getItem('odas.auth') || window.sessionStorage.getItem('odas.auth'),
-    );
-  } catch {
-    return false;
-  }
-}
+import type { UserRole } from './types/auth';
 
 /**
  * Home route. When opened with `?voyage=<id>` (e.g. from the Fleet
@@ -62,8 +57,10 @@ function isAuthenticated(): boolean {
  * they are signed in.
  */
 function HomeRoute() {
+  const { isAuthenticated, isLoading, role } = useAuth();
   const [params] = useSearchParams();
   const voyageId = params.get('voyage');
+
   if (voyageId) {
     return (
       <Layout>
@@ -71,7 +68,63 @@ function HomeRoute() {
       </Layout>
     );
   }
-  return <Navigate to={isAuthenticated() ? '/main' : '/login'} replace />;
+
+  if (isLoading) {
+    return <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', background: '#0f172a', color: '#94a3b8' }}>Loading...</div>;
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (role === 'SuperAdmin') {
+    return <Navigate to="/superadmin" replace />;
+  }
+
+  if (role === 'Admin') {
+    return <Navigate to="/main" replace />;
+  }
+
+  if (role === 'VesselMaster') {
+    return <Navigate to="/vessel-master" replace />;
+  }
+
+  if (role === 'Employee') {
+    return <Navigate to="/my-modules" replace />;
+  }
+
+  return <Navigate to="/main" replace />;
+}
+
+function ProtectedRoute({
+  children,
+  allowedRoles,
+}: {
+  children: ReactNode;
+  allowedRoles?: UserRole[];
+}) {
+  const { isAuthenticated, isLoading, role } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', background: '#0f172a', color: '#94a3b8' }}>
+        <i className="fas fa-spinner fa-spin fa-2x" style={{ marginRight: '0.75rem' }} /> Loading user session...
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (allowedRoles && role && !allowedRoles.includes(role)) {
+    if (role === 'SuperAdmin') return <Navigate to="/superadmin" replace />;
+    if (role === 'Admin') return <Navigate to="/main" replace />;
+    if (role === 'VesselMaster') return <Navigate to="/vessel-master" replace />;
+    return <Navigate to="/my-modules" replace />;
+  }
+
+  return <>{children}</>;
 }
 
 function CharteringRoute() {
@@ -83,259 +136,366 @@ function CharteringRoute() {
 
 export function App() {
   return (
-    <FleetViewProvider>
-      <LocalizationProvider>
+    <AuthProvider>
+      <FleetViewProvider>
+        <LocalizationProvider>
           <BrowserRouter>
             <RoutedErrorBoundary>
             <Routes>
               <Route path="/" element={<HomeRoute />} />
               <Route path="/login" element={<LoginPage />} />
+
+              {/* Multi-Tenant SaaS Specific Control Panels */}
+              <Route
+                path="/superadmin"
+                element={
+                  <ProtectedRoute allowedRoles={['SuperAdmin']}>
+                    <Layout showModuleChrome={false}>
+                      <SuperAdminPage />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/admin-management"
+                element={
+                  <ProtectedRoute allowedRoles={['SuperAdmin']}>
+                    <Layout showModuleChrome={false}>
+                      <AdminManagementPage />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/my-modules"
+                element={
+                  <ProtectedRoute>
+                    <Layout showModuleChrome={false}>
+                      <EmployeeModulesPage />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/vessel-master"
+                element={
+                  <ProtectedRoute allowedRoles={['VesselMaster', 'Admin', 'SuperAdmin']}>
+                    <Layout showModuleChrome={false}>
+                      <VesselMasterPerformancePage />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+
+              {/* Main Routing & Fleet Operation Modules */}
               <Route
               path="/main"
               element={
-                <PageShell>
-                  <FleetListPage />
-                </PageShell>
+                <ProtectedRoute>
+                  <PageShell>
+                    <FleetListPage />
+                  </PageShell>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/interim"
               element={
-                <Layout>
-                  <InterimDashboardPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <InterimDashboardPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/optimization"
               element={
-                <Layout>
-                  <OptimizationDetailsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <OptimizationDetailsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/rob-calculation"
               element={
-                <Layout>
-                  <RobCalculationPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <RobCalculationPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/voyage-estimation"
               element={
-                <Layout>
-                  <VoyageEstimationPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <VoyageEstimationPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/chartering"
               element={
-                <Layout showModuleChrome={false}>
-                  <CharteringRoute />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <CharteringRoute />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/operations"
               element={
-                <Layout showModuleChrome={false}>
-                  <OperationsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <OperationsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/bunker"
               element={
-                <Layout showModuleChrome={false}>
-                  <BunkerManagementPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <BunkerManagementPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/accounts"
               element={
-                <Layout showModuleChrome={false}>
-                  <AccountsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <AccountsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/settings"
               element={
-                <Layout showModuleChrome={false}>
-                  <SettingsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <SettingsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/postfix"
               element={
-                <Layout showModuleChrome={false}>
-                  <PostfixPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <PostfixPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/emissions"
               element={
-                <Layout showModuleChrome={false}>
-                  <EmissionsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false}>
+                    <EmissionsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/weather-margins"
               element={
-                <Layout>
-                  <WeatherMarginsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <WeatherMarginsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/voyage/new"
               element={
-                <Layout>
-                  <CreateVoyagePage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <CreateVoyagePage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/voyage"
               element={
-                <Layout>
-                  <VoyageDetailsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <VoyageDetailsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/configuration-history"
               element={
-                <Layout>
-                  <ConfigHistoryPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <ConfigHistoryPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/area-constraints"
               element={
-                <Layout>
-                  <AreaConstraintsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <AreaConstraintsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/vessel"
               element={
-                <Layout>
-                  <VesselDetailsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <VesselDetailsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/client"
               element={
-                <Layout>
-                  <ClientDetailsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <ClientDetailsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/email"
               element={
-                <Layout>
-                  <EmailDetailsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <EmailDetailsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/passage"
               element={
-                <Layout>
-                  <PassageDetailsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <PassageDetailsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/route-explorer"
               element={
-                <Layout>
-                  <RouteExplorerSearchPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <RouteExplorerSearchPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/route-simulator"
               element={
-                <Layout>
-                  <RouteExplorerPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <RouteExplorerPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/limits"
               element={
-                <Layout>
-                  <LimitsConstraintsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <LimitsConstraintsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/reports/order-confirmation"
               element={
-                <Layout>
-                  <OrderConfirmationPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <OrderConfirmationPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/reports/instructions"
               element={
-                <Layout>
-                  <ReportingInstructionsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <ReportingInstructionsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/reports/route-recommendation"
               element={
-                <Layout>
-                  <RouteRecommendationPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <RouteRecommendationPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/reports/voyage-plan"
               element={
-                <Layout>
-                  <VoyagePlanPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <VoyagePlanPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/reports/forecast"
               element={
-                <Layout>
-                  <ForecastPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <ForecastPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/reports/performance"
               element={
-                <Layout>
-                  <PerformanceReportPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <PerformanceReportPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
               path="/vessel-reports"
               element={
-                <Layout>
-                  <VesselReportsPage />
-                </Layout>
+                <ProtectedRoute>
+                  <Layout>
+                    <VesselReportsPage />
+                  </Layout>
+                </ProtectedRoute>
               }
             />
             <Route
@@ -344,13 +504,14 @@ export function App() {
                 <OfflineVesselReportsPage />
               }
             />
-            {/* Unknown paths fall back to the Fleet List View. */}
-            <Route path="*" element={<Navigate to="/main" replace />} />
+            {/* Unknown paths fall back to HomeRoute */}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
             </RoutedErrorBoundary>
         </BrowserRouter>
       </LocalizationProvider>
-    </FleetViewProvider>
+      </FleetViewProvider>
+    </AuthProvider>
   );
 }
 

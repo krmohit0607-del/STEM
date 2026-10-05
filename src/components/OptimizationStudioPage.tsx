@@ -7,10 +7,12 @@ import {
   Tooltip,
   useMap,
 } from 'react-leaflet';
-import L from 'leaflet';
+import L, { type LatLngBoundsExpression } from 'leaflet';
 
 import { useTheme } from '../theme';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
 import {
@@ -19,6 +21,14 @@ import {
   type RouteOption,
   type SpeedFuelPoint,
 } from '../data/optimization';
+
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
 
 /**
  * Voyage Optimization Studio — `/optimization-studio`.
@@ -346,6 +356,8 @@ export function OptimizationStudioPage() {
             zoom={3}
             minZoom={2}
             maxZoom={12}
+            maxBounds={WORLD_PAN_BOUNDS}
+            maxBoundsViscosity={1.0}
             worldCopyJump
             style={{ height: '100%', width: '100%' }}
           >
@@ -357,6 +369,8 @@ export function OptimizationStudioPage() {
             />
             <WeatherFieldControl position="topright" />
             <WeatherPointControl position="topright" />
+            <CycloneLayer position="topright" />
+            <WeatherAlertsControl position="topright" />
             <MapCursorPosition />
             {data.routeOptions.map((r) => {
               const isSel = r.id === selectedRouteId;

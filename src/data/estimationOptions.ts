@@ -61,9 +61,8 @@ export const CURRENCY_OPTIONS = ['USD', 'EUR', 'GBP', 'SGD', 'AED', 'INR', 'JPY'
 
 /** Port rotation → Type. */
 export const PORT_TYPE_OPTIONS = [
-  'Delivery', 'Loading', 'Part Loading', 'Bunkering', 'Canal Transit',
-  'Waiting', 'Anchorage', 'STS', 'Discharging', 'Part Discharging',
-  'Dry Dock', 'Redelivery', 'Other',
+  'Delivery', 'Loading', 'Bunker', 'Discharging', 'ReDelivery',
+  'Canal Transit', 'STS', 'DryDock', 'Anchorage', 'Idle / Waiting', 'Pilotage',
 ];
 
 export const DISTANCE_UNIT_OPTIONS = ['Nautical Miles', 'Kilometers'];
@@ -136,6 +135,7 @@ export function defaultFreightUnit(qtyUnit: string): string {
 /* ----------------------------------------------- admin-editable option store */
 
 import { useSyncExternalStore } from 'react';
+import { settingsApi } from '../api/settingsApi';
 
 /** Every editable option category. */
 export type EstOptionKey =
@@ -210,6 +210,7 @@ export const DEFAULT_ESTIMATION_OPTIONS: EstimationOptions = {
 };
 
 const STORAGE_KEY = 'fv.estimationOptions';
+const SETTING_KEY = 'estimationOptions';
 
 function cloneDefaults(): EstimationOptions {
   return Object.fromEntries(
@@ -248,7 +249,23 @@ export function saveEstimationOptions(next: EstimationOptions): void {
   } catch {
     /* storage unavailable — ignore */
   }
+  void settingsApi.put(SETTING_KEY, next).catch(() => { /* local fallback */ });
   listeners.forEach((l) => l());
+}
+
+async function hydrateEstimationOptions(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as Partial<EstimationOptions>;
+    const next = cloneDefaults();
+    for (const key of Object.keys(next) as EstOptionKey[]) {
+      if (Array.isArray(parsed[key]) && parsed[key]!.every((value) => typeof value === 'string')) next[key] = parsed[key]!;
+    }
+    current = next;
+    listeners.forEach((listener) => listener());
+  } catch {
+    if (window.localStorage.getItem(STORAGE_KEY)) void settingsApi.put(SETTING_KEY, current).catch(() => { /* unavailable */ });
+  }
 }
 
 export function setEstimationOptionList(key: EstOptionKey, values: string[]): void {
@@ -265,6 +282,8 @@ export function resetEstimationOptions(): EstimationOptions {
   listeners.forEach((l) => l());
   return current;
 }
+
+void hydrateEstimationOptions();
 
 export function useEstimationOptions(): EstimationOptions {
   return useSyncExternalStore(

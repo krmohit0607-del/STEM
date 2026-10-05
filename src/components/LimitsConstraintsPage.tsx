@@ -9,6 +9,8 @@ import {
   appendLimitsHistory,
   diffLimits,
   diffLimitsDetailed,
+  hydrateLimitsFor,
+  hydrateLimitsHistory,
   loadLimitsFor,
   loadLimitsHistory,
   newHistoryId,
@@ -137,6 +139,26 @@ export function LimitsConstraintsPage() {
     setSaved(next);
     setDraft(structuredClone(next));
     setEditingCard(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voyageId]);
+
+  // Pull the backend copy of this voyage's limits/history down, so edits made
+  // from another device/session are reflected (same write-through pattern as
+  // the Operations recap).
+  useEffect(() => {
+    let cancelled = false;
+    void hydrateLimitsFor(voyageId).then(() => {
+      if (cancelled) return;
+      const next = composeLimits(voyage);
+      setSaved(next);
+      setDraft(structuredClone(next));
+    });
+    void hydrateLimitsHistory().then((h) => {
+      if (!cancelled) setHistory(h);
+    });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voyageId]);
 

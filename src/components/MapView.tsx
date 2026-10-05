@@ -4,6 +4,8 @@ import type { LatLngBoundsLiteral, Map as LeafletMap } from 'leaflet';
 
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
 
@@ -113,7 +115,6 @@ const OVERLAYS: ToggleOption[] = [
   { id: 'timezones', name: 'Time zones' },
   { id: 'bathymetry', name: 'Bathymetry contours' },
   { id: 'pirate', name: 'High-risk areas (piracy)' },
-  { id: 'load-lines', name: 'Load-line zones' },
 ];
 
 const WEATHER: ToggleOption[] = [
@@ -251,9 +252,11 @@ export function MapView() {
             maxZoom={18}
           />
         ))}
-        <AreaConstraintsControl position="topright" />
         <WeatherFieldControl position="topright" />
+        <AreaConstraintsControl position="topright" />
         <WeatherPointControl position="topright" />
+        <CycloneLayer position="topright" />
+        <WeatherAlertsControl position="topright" />
         <MapCursorPosition />
       </MapContainer>
 

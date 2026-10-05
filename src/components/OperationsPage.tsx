@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, Fragment } from 'react';
+import { extractInvoiceDocument, type InvoiceDocumentKind, type InvoiceDocumentFields } from '../data/invoiceDocuments';
 import type { ReactNode, Dispatch, SetStateAction } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -7,12 +8,18 @@ import type { Voyage } from '../data/voyages';
 import { makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { addNotification, copyLaytimeToPostfix, useCpdds, useFixtureNumbers } from '../data/workflow';
 import { getWorkflowConfig } from '../data/workflowConfig';
-import { loadClients, saveClients, SERVICE_PROVIDER_TYPES } from '../data/clients';
-import { addBunkerRequirement } from '../data/bunker';
+import { loadClients, saveClients, useClients, SERVICE_PROVIDER_TYPES, clientToUpdateDto } from '../data/clients';
+import { addBunkerRequirement, updateBunkerRequirement, useBunkerRequirements, type BunkerRequirement } from '../data/bunker';
 import { addPayable, useAccountTxns } from '../data/accounts';
-import { useWorldPorts, type WorldPort } from '../data/ports';
-import { loadVessels, saveVessels } from '../data/vessels';
-import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap } from '../data/opsRecap';
+import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
+import { classifyLoadLineZone } from '../data/loadLineZones';
+import { loadVessels, saveVessels, useVessels } from '../data/vessels';
+import { vesselsApi } from '../api/vesselsApi';
+import { clientsApi } from '../api/clientsApi';
+import { useCargoMaster, cargoStowageFactor } from '../data/cargoMaster';
+import { loadOpsRecap, readOpsRecapRaw, writeOpsRecapRaw, subscribeOpsRecap, loadOpsEstBaseline, hydrateOpsRecap, hydrateOpsEstBaseline } from '../data/opsRecap';
+import { diffRecap, appendConfigHistory, loadConfigHistory, hydrateConfigHistory, subscribeConfigHistory, type ConfigHistoryEntry } from '../data/opsConfigHistory';
+import { loadVoyageShared, mergeVoyageShared, subscribeVoyageShared, hydrateVoyageShared, type VoyageSharedFields } from '../data/voyageOverrides';
 import { NoVesselSelected } from './NoVesselSelected';
 import { WorkflowStatusSelect } from './WorkflowStatusSelect';
 import { LAYTIME_TERMS_OPTIONS, PORT_TYPE_OPTIONS } from '../data/estimationOptions';
@@ -44,8 +51,11 @@ type TabId = 'details' | 'pnl' | 'etarob' | 'stowage' | 'hire' | 'freight' | 're
 export interface Recap {
   vesselName: string;
   vesselEmail: string;
+  vesselImo?: string;
   vesselLoa?: string;
   vesselBeam?: string;
+  /** No. of cargo holds — drives the Cargo & Stowage hold-wise distribution/capacity rows. */
+  holdCount?: string;
   draftBallast?: string;
   draftLaden?: string;
   engineRpmMin?: string;
@@ -81,6 +91,9 @@ export interface Recap {
   redeliveryPort: string;
   redeliveryTerm: string;
   redeliveryDateTime: string;
+  // True once the user has directly typed a redelivery date in Voyage Details — stops the
+  // ETA & ROB itinerary's computed final arrival from overwriting it on every itinerary edit.
+  redeliveryDateManual?: boolean;
   deliveryNotices: string;
   wxClause: string;
   ilohc: string;
@@ -96,6 +109,10 @@ export interface Recap {
   hullCleaningClause: string;
   cargoName: string;
   cpQuantity: string;
+  cpQuantityOption: string; // 'OO' | 'CHOPT' | 'MIN' | 'MAX' | 'RANGE' | 'PERCENT'
+  cpQuantityMin?: string; // For MIN/MAX range
+  cpQuantityMax?: string; // For MIN/MAX range
+  cpQuantityTolerancePct?: string; // For +/- percentage tolerance (e.g. '5', '10')
   holdCleaning: string;
   finalQtyLoaded: string;
   blIssueDate: string;
@@ -163,12 +180,22 @@ export interface Recap {
   // --- Independent duplicated hire installments (kept out of the live schedule) --
   hireDuplicates?: HireDuplicate[];
   charterHireDuplicates?: HireDuplicate[];
+  // --- Persisted snapshot of the live hire schedule (dates/amounts/due per installment) —
+  // refreshed on every save for non-locked rows, frozen for locked rows; feeds backend reporting.
+  hireScheduleSnapshot?: HireScheduleRow[];
+  charterHireScheduleSnapshot?: HireScheduleRow[];
   // --- Estimated voyage cash flow (Voyage Details tab) --------------------
   cashflow?: CashflowData;
   // --- Vessel reports (Vessel Reports tab) -------------------------------
   vesselReports?: VesselReport[];
   notes?: string;
   additionalVoyageLegs?: { id: string; type: string; port: string; term: string; rate: string; pda: string; dateTime: string; notice: string; loi: string; loiStatus: string }[];
+  portRotationTypes?: Record<string, string>;
+  portRotationDeleted?: Record<string, boolean>;
+  // Generic field storage used when a port-rotation row's Type is switched away
+  // from its native role (e.g. a Discharge row set to ReDelivery) — keyed the
+  // same as portRotationTypes so the row's own fields don't get overwritten.
+  portRotationOverrides?: Record<string, { term?: string; dateTime?: string; rate?: string; pda?: string; notice?: string; loi?: string; loiStatus?: string; qty?: string; qtyUnit?: string; blDate?: string }>;
   dischargePortDetails?: { loiObl: string; loiStatus: string }[];
   // --- EU ETS allowance records (Freight & Laytime tab) ------------------
   eua?: EuaData;
@@ -178,6 +205,8 @@ export interface Recap {
 interface StowagePoint {
   name: string;
   displacement: string;
+  /** True while Displacement is still auto-derived from Max Draft × TPC (unset by a manual edit). */
+  displacementAuto?: boolean;
   density: string;
   vlsfo: string;
   mgo: string;
@@ -197,6 +226,15 @@ interface StowagePlan {
   summerDraft: string;
   winterDraft: string;
   tropicalDraft: string;
+  // Single voyage-wide Constants & Fresh Water (MT) — applied to every zone/port column in
+  // the DWT & Cargo Intake table instead of entering them per column.
+  constants: string;
+  freshWater: string;
+  ballastWater: string;
+  /** Reference displacement (MT) — used with TPC & reference draft (density-correction card)
+   *  to derive each zone/port's Displacement (Max) from its Max Draft. Falls back to the
+   *  density-correction card's "Displacement @ SW Density" if left blank. */
+  refDisplacement: string;
 }
 
 /** A cargo hold for the hold-wise distribution diagram + capacity limits. */
@@ -216,6 +254,8 @@ interface StowageGrade {
   grade: string;
   sf: string;
   qty: string;
+  /** True while SF is still auto-filled from the Cargo Master database match (unset by a manual SF edit). */
+  sfAuto?: boolean;
 }
 
 /** A port with its draft restriction and water density. */
@@ -240,10 +280,12 @@ interface StowageDraft {
   constants: string;
   shipSurveyQty: string;
   shoreScaleQty: string;
+  /** Ship/shore qty mismatch threshold (%) that flags an LOI — editable, defaults to 0.5. */
+  loiTolerancePct: string;
 }
 
 /** One itinerary leg (a sea passage or a port stay) in the ETA & ROB plan. */
-interface EtaLeg {
+export interface EtaLeg {
   from: string;
   to: string;
   kind: 'sea' | 'port';
@@ -253,37 +295,74 @@ interface EtaLeg {
   speed: string;
   wf: string;
   portDays: string;
+  /** True when a port-kind leg's port is within an ECA zone (switches its idle Cons to the ECA rate). */
+  ecaPort?: boolean;
   consVlsfo: string;
   consMgo: string;
   supVlsfo: string;
   supMgo: string;
   tz: string;
+  /** True while TZ is still auto-derived from the To port (unset by a manual TZ edit; reset to true when To changes). */
+  tzAuto?: boolean;
+  /** True while Cons (MT/day) is still auto-blended from the Normal/ECA rates by this leg's ECA distance fraction
+   *  (unset by a manual Cons edit; reset to true when distNonEca/distEca changes). */
+  consAuto?: boolean;
+  /** Extra fuel-type daily consumption / supply for this leg, keyed by EtaExtraFuel.id. */
+  extraCons?: Record<string, string>;
+  extraSup?: Record<string, string>;
 }
 
 /** ETA & ROB plan header (instructed figures) + the leg list. */
-interface EtaPlan {
+export interface EtaPlan {
   startDep: string;
   startRobVlsfo: string;
   startRobMgo: string;
+  /** Starting (bunkers-on-delivery) ROB for each extra fuel type, keyed by EtaExtraFuel.id. */
+  startRobExtra?: Record<string, string>;
   weatherMargin: string;
   perf: EtaPerf;
   legs: EtaLeg[];
 }
 
 /** Speed & consumption profile — mirrors the Chartering estimation vessel details. */
-interface EtaMainCons { type: string; ballast: string; laden: string; idle: string; work: string }
-interface EtaSubCons { type: string; sea: string; idle: string; work: string }
-interface EtaSpeedSet { ballast: string; laden: string }
-interface EtaCustomSpeed extends EtaSpeedSet { id: string; name: string }
-interface EtaPerf {
+export interface EtaMainCons { type: string; ballast: string; laden: string; idle: string; work: string }
+export interface EtaSubCons { type: string; sea: string; idle: string; work: string }
+export interface EtaSpeedSet { ballast: string; laden: string }
+export interface EtaCustomSpeed extends EtaSpeedSet { id: string; name: string }
+/** A user-added extra fuel type (beyond the default FO/DO) — Normal + ECA consumption per speed mode. */
+interface EtaExtraFuel {
+  id: string;
+  grade: string;
+  fullNormal: EtaMainCons;
+  fullEca: EtaMainCons;
+  ecoNormal: EtaMainCons;
+  ecoEca: EtaMainCons;
+  customNormal: EtaMainCons;
+  customEca: EtaMainCons;
+}
+export interface EtaPerf {
   speedMode: string;
   full: EtaSpeedSet;
   eco: EtaSpeedSet;
   customs: EtaCustomSpeed[];
+  fullMainNormal?: EtaMainCons;
+  fullMainEca?: EtaMainCons;
+  fullSubNormal?: EtaSubCons;
+  fullSubEca?: EtaSubCons;
+  ecoMainNormal?: EtaMainCons;
+  ecoMainEca?: EtaMainCons;
+  ecoSubNormal?: EtaSubCons;
+  ecoSubEca?: EtaSubCons;
+  customMainNormal?: EtaMainCons;
+  customMainEca?: EtaMainCons;
+  customSubNormal?: EtaSubCons;
+  customSubEca?: EtaSubCons;
   mainNormal: EtaMainCons;
   mainEca: EtaMainCons;
   subNormal: EtaSubCons;
   subEca: EtaSubCons;
+  /** Additional fuel types the user has added (e.g. a 3rd fuel grade). */
+  extraFuels?: EtaExtraFuel[];
 }
 
 /** Per-fuel bunkering figures shown in the Voyage Details Bunkers card. */
@@ -296,6 +375,7 @@ interface BunkerFuel {
   masterReq: string;
   actualSupply: string;
   actualBor: string;
+  specs: string;
 }
 
 /** One “statement of facts” line in a port laytime calculation. */
@@ -327,6 +407,8 @@ interface LaytimePort {
   onceOnDemurrage?: boolean;             // once on demurrage, always on demurrage (all time counts)
   demurrageRate: string;   // USD / day
   despatchRate: string;    // USD / day
+  demurrageStarts?: string;
+  voyageFieldOverrides?: string[];
   events: LaytimeEvent[];
   status?: HireStatus;
 }
@@ -349,14 +431,22 @@ interface FreightInvoice {
   freightDifferential: string; // extra freight rate per MT (final invoice)
   pctFreightDue: string;       // % of total freight due (e.g. 90 or 100)
   initialFreightReceived: string;
-  loadPortDA: string;
-  dischPortDA: string;
   includeDemurrage: boolean;   // fold demurrage/despatch into a final freight invoice
+  adjustments?: FreightInvoiceAdjustment[];
+  includedPortOps?: ('Load' | 'Discharge')[];
   // Manual overrides (blank = fall back to the voyage recap figure).
   blQtyOverride?: string;      // cargo / B-L quantity (MT)
   freightRateOverride?: string; // freight rate per MT
   adcomOverride?: string;      // address commission (%)
   claimIds?: string[];
+  attachments?: SettlementAttachment[];
+}
+
+interface FreightInvoiceAdjustment {
+  id: string;
+  description: string;
+  amount: string;
+  direction: 'Add' | 'Deduct';
 }
 
 interface FreightLaytimeData {
@@ -376,8 +466,9 @@ const SETTLEMENT_STATUS_OPTIONS = ['Requested', 'Received', 'Under Review', 'App
 const PAYMENT_STATUS_OPTIONS = ['Pending', 'Paid', 'Partially Paid'];
 const STATUS_OPTIONS_PDA = SETTLEMENT_STATUS_OPTIONS;
 const STATUS_OPTIONS_AGENT_SERVICE = SETTLEMENT_STATUS_OPTIONS;
-const STATUS_OPTIONS_CLAIMS = SETTLEMENT_STATUS_OPTIONS;
+const STATUS_OPTIONS_CLAIMS = ['Raised', 'Received', 'Under Review', 'Approved', 'Settled'];
 const settlementStatusValue = (value: string | undefined, fallback = 'Requested') => value && SETTLEMENT_STATUS_OPTIONS.includes(value) ? value : fallback;
+const claimStatusValue = (value: string | undefined): string => value && STATUS_OPTIONS_CLAIMS.includes(value) ? value : 'Raised';
 const settlementPaymentValue = (value: string | undefined) => value && PAYMENT_STATUS_OPTIONS.includes(value) ? value : 'Pending';
 const CLAIM_CHARGE_TO_OPTIONS = ['Owners', 'Charterers', 'Agents', 'Surveyor', 'Receiver', 'Shipper', 'P&I Club', 'Terminal'];
 
@@ -489,7 +580,7 @@ interface VesselReport {
 }
 
 /** Recap keys whose value is a plain string (everything except arrays). */
-type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'cashflow' | 'vesselReports' | 'notes' | 'eua' | 'additionalVoyageLegs' | 'dischargePortDetails' | 'cpConsByFuel'>;
+type RecapTextKey = Exclude<keyof Recap, 'serviceProviders' | 'bunkers' | 'pnlNotes' | 'etaPlan' | 'stowage' | 'hirePayState' | 'charterHirePayState' | 'freightLaytime' | 'hireDuplicates' | 'charterHireDuplicates' | 'hireScheduleSnapshot' | 'charterHireScheduleSnapshot' | 'cashflow' | 'vesselReports' | 'notes' | 'eua' | 'additionalVoyageLegs' | 'portRotationTypes' | 'portRotationDeleted' | 'portRotationOverrides' | 'dischargePortDetails' | 'cpConsByFuel' | 'redeliveryDateManual'>;
 
 interface DocItem {
   id: string;
@@ -520,7 +611,7 @@ const OPS_DUE_POPUP_SNOOZE_MS = 3 * 60 * 60 * 1000;
 
 /* ---------------------------------------------------------------- helpers */
 
-function num(v: string): number {
+function num(v: string | null | undefined): number {
   const n = parseFloat(String(v).replace(/[,$%]/g, '').replace(/[^\d.-]/g, ''));
   return Number.isFinite(n) ? n : 0;
 }
@@ -534,7 +625,7 @@ function uid(p: string): string {
   return `${p}-${Math.random().toString(36).slice(2, 8)}`;
 }
 /** Parse "dd-mm-yyyy hh:mm" (recap format) into a Date. */
-function parseDMY(s: string): Date | null {
+export function parseDMY(s: string): Date | null {
   const m = s.match(/(\d{1,2})-(\d{1,2})-(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/);
   if (!m) return null;
   return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4] ?? 0), Number(m[5] ?? 0));
@@ -700,7 +791,7 @@ function buildDuePopupItems(recap: Recap, pnl: Pnl, voyage: Voyage, now: Date): 
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
   const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
-  const settlement = fl.settlement ?? seedFreightSettlement(voyage);
+  const settlement = fl.settlement ?? seedFreightSettlement(voyage, recap);
 
   fl.invoices.forEach((inv) => {
     if (!inv.dueDate || inv.status === 'Paid') return;
@@ -769,32 +860,215 @@ function buildItineraryLegs(
   return legs;
 }
 
+/** Strip a "Delivery — "/"Redelivery — " prefix and any trailing "<Country>"/"(Country)" tag off a leg's from/to label. */
+function bareportName(v: string): string {
+  const idx = v.indexOf('—');
+  const rest = idx >= 0 ? v.slice(idx + 1) : v;
+  return rest.replace(/[<(][^<>()]*[>)]\s*$/, '').trim();
+}
+
+/** Resolve a leg's To/From label to a world port — exact match first, then a loose substring match. */
+function matchWorldPort(value: string, ports: WorldPort[]): WorldPort | null {
+  const bare = bareportName(value);
+  const exact = resolveWorldPort(bare, ports);
+  if (exact) return exact;
+  const q = bare.toLowerCase();
+  if (q.length < 3) return null;
+  return ports.find((p) => { const n = p.name.toLowerCase(); return n === q || n.includes(q) || q.includes(n); }) ?? null;
+}
+
+/** Derive a signed UTC-offset string (e.g. "+5.5", "-3", "+0") from a port's longitude. */
+function tzFromLon(lon: number): string {
+  const off = Math.round((lon / 15) * 2) / 2;
+  if (off === 0) return '+0';
+  return off > 0 ? `+${off}` : `${off}`;
+}
+
 /** Resolve the active speed set from the selected speed mode (Full / Eco / custom). */
-function resolveEtaSpeed(perf: EtaPerf): EtaSpeedSet {
+export function resolveEtaSpeed(perf: EtaPerf): EtaSpeedSet {
   if (perf.speedMode === 'Full') return perf.full;
   if (perf.speedMode === 'Eco') return perf.eco;
   return perf.customs.find((c) => c.id === perf.speedMode) ?? perf.full;
 }
 
-/** Per-leg defaults derived from the instructed speed & consumption profile. */
-function legDefaults(perf: EtaPerf): { speed: string; seaV: string; seaM: string; portV: string; portM: string } {
-  const spd = resolveEtaSpeed(perf);
+/** Resolve the selected Full, Eco, or Custom consumption profile — including any extra fuel types added. */
+export function resolveEtaConsumption(perf: EtaPerf): { mainNormal: EtaMainCons; mainEca: EtaMainCons; subNormal: EtaSubCons; subEca: EtaSubCons; extraFuels: { id: string; grade: string; normal: EtaMainCons; eca: EtaMainCons }[] } {
+  const extraFuels = (perf.extraFuels ?? []).map((f) => ({
+    id: f.id,
+    grade: f.grade,
+    normal: perf.speedMode === 'Eco' ? f.ecoNormal : perf.speedMode === 'Full' ? f.fullNormal : f.customNormal,
+    eca: perf.speedMode === 'Eco' ? f.ecoEca : perf.speedMode === 'Full' ? f.fullEca : f.customEca,
+  }));
+  if (perf.speedMode === 'Eco') {
+    return {
+      mainNormal: perf.ecoMainNormal ?? perf.mainNormal,
+      mainEca: perf.ecoMainEca ?? perf.mainEca,
+      subNormal: perf.ecoSubNormal ?? perf.subNormal,
+      subEca: perf.ecoSubEca ?? perf.subEca,
+      extraFuels,
+    };
+  }
+  if (perf.speedMode !== 'Full') {
+    return {
+      mainNormal: perf.customMainNormal ?? perf.mainNormal,
+      mainEca: perf.customMainEca ?? perf.mainEca,
+      subNormal: perf.customSubNormal ?? perf.subNormal,
+      subEca: perf.customSubEca ?? perf.subEca,
+      extraFuels,
+    };
+  }
   return {
-    speed: spd.laden || spd.ballast || '12',
-    seaV: perf.mainNormal.laden || '0',
-    seaM: perf.subNormal.sea || '0',
-    portV: perf.mainNormal.idle || '0',
-    portM: perf.subNormal.idle || '0',
+    mainNormal: perf.fullMainNormal ?? perf.mainNormal,
+    mainEca: perf.fullMainEca ?? perf.mainEca,
+    subNormal: perf.fullSubNormal ?? perf.subNormal,
+    subEca: perf.fullSubEca ?? perf.subEca,
+    extraFuels,
   };
 }
 
-interface EtaComputedLeg { dep: Date | null; arr: Date | null; arrLt: Date | null; dist: number; avgSpeed: number; days: number; usedV: number; usedM: number; robV: number; robM: number }
+
+/** Per-leg defaults derived from the instructed speed & consumption profile. */
+function legDefaults(perf: EtaPerf): { speed: string; seaV: string; seaM: string; portV: string; portM: string; extra: Record<string, { sea: string; port: string }> } {
+  const spd = resolveEtaSpeed(perf);
+  const cons = resolveEtaConsumption(perf);
+  const extra: Record<string, { sea: string; port: string }> = {};
+  cons.extraFuels.forEach((f) => { extra[f.id] = { sea: f.normal.laden || '0', port: f.normal.idle || '0' }; });
+  return {
+    speed: spd.laden || spd.ballast || '12',
+    seaV: cons.mainNormal.laden || '0',
+    seaM: cons.subNormal.sea || '0',
+    // Main/FO does not apply at port (only DO/auxiliary generators run) — see blendedLegCons.
+    portV: '0',
+    portM: cons.subNormal.idle || '0',
+    extra,
+  };
+}
+
+/** A leg's ECA fraction (0 = all Non-ECA, 1 = all ECA). Sea legs: distEca share of the leg's
+ *  distance. Port legs: 1 when the port itself is flagged as being inside an ECA zone, else 0. */
+function legEcaFrac(l: EtaLeg): number {
+  if (l.kind !== 'sea') return l.ecaPort ? 1 : 0;
+  const total = num(l.distNonEca) + num(l.distEca);
+  return total > 0 ? Math.min(1, num(l.distEca) / total) : 0;
+}
+
+/** Where the ECA-zone "orphan" consumption shares (Main-ECA when its type differs from Main-Normal,
+ *  Sub-ECA when its type differs from Sub-Normal) physically belong: if an orphan's grade matches the
+ *  OTHER slot's own Normal type, it's the SAME tank as that built-in column and folds straight into it
+ *  (e.g. Main-ECA = MDO and Sub-Normal is already MDO ⇒ fold into the Sub/DO column, no extra column);
+ *  if both orphans share a grade (and neither folds into a built-in column), they're merged into one
+ *  `auto-eca-main` entry; otherwise each orphan gets its own dedicated auto column. */
+function ecaFuelRouting(cons: { mainNormal: EtaMainCons; mainEca: EtaMainCons; subNormal: EtaSubCons; subEca: EtaSubCons }) {
+  const eq = (a: string, b: string) => a.trim().toUpperCase() === b.trim().toUpperCase();
+  const mainSplit = cons.mainNormal.type !== cons.mainEca.type;
+  const subSplit = cons.subNormal.type !== cons.subEca.type;
+  const mainEcaFoldsIntoSub = mainSplit && eq(cons.mainEca.type, cons.subNormal.type);
+  const subEcaFoldsIntoMain = subSplit && !mainEcaFoldsIntoSub && eq(cons.subEca.type, cons.mainNormal.type);
+  const mergeEca = mainSplit && subSplit && !mainEcaFoldsIntoSub && !subEcaFoldsIntoMain && eq(cons.mainEca.type, cons.subEca.type);
+  const needsAutoMain = mainSplit && !mainEcaFoldsIntoSub && !mergeEca;
+  const needsAutoSub = subSplit && !subEcaFoldsIntoMain && !mergeEca;
+  return { mainSplit, subSplit, mainEcaFoldsIntoSub, subEcaFoldsIntoMain, mergeEca, needsAutoMain, needsAutoSub };
+}
+
+/** Which ETA & ROB Itinerary "starting ROB" field a fuel grade corresponds to (Main/Sub/extra) — used
+ *  to keep the Bunkers card's "Bunkers on Delivery" and the Itinerary's own BOD fields for the same
+ *  fuel always in sync, in either direction. */
+function startRobFieldFor(perf: EtaPerf, grade: string): { kind: 'main' | 'sub' | 'extra'; extraId?: string } | null {
+  const cons = resolveEtaConsumption(perf);
+  const g = grade.trim().toUpperCase();
+  if (g === cons.mainNormal.type.trim().toUpperCase()) return { kind: 'main' };
+  if (g === cons.subNormal.type.trim().toUpperCase()) return { kind: 'sub' };
+  const match = cons.extraFuels.find((f) => f.grade.trim().toUpperCase() === g);
+  if (match) return { kind: 'extra', extraId: match.id };
+  return null;
+}
+
+/** CP Price for a fuel grade — Main/Sub fuels mirror the single recap.foPrice/doPrice field (the
+ *  same single source of truth shared by the Bunkers card, the Owners "Bunker Settlement" table and
+ *  the Hire SOA popup's Bunker on Delivery price); other (extra) fuels use their own per-row cpPrice. */
+function cpPriceFor(recap: Recap, fuel: string): string {
+  const field = startRobFieldFor(recap.etaPlan.perf, fuel);
+  if (field?.kind === 'main') return recap.foPrice;
+  if (field?.kind === 'sub') return recap.doPrice;
+  return recap.bunkers.find((b) => b.fuel === fuel)?.cpPrice ?? '';
+}
+
+/** Apply a CP Price edit made on a bunkers-row: always updates that row's own `cpPrice`, and
+ *  additionally mirrors into recap.foPrice/doPrice when the grade is the Main/Sub fuel. */
+function applyCpPriceEdit(r: Recap, index: number, value: string): Recap {
+  const bunkers = r.bunkers.map((b, i) => (i === index ? { ...b, cpPrice: value } : b));
+  const field = startRobFieldFor(r.etaPlan.perf, r.bunkers[index]?.fuel ?? '');
+  if (field?.kind === 'main') return { ...r, bunkers, foPrice: value };
+  if (field?.kind === 'sub') return { ...r, bunkers, doPrice: value };
+  return { ...r, bunkers };
+}
+
+/** Apply a recap.foPrice/doPrice edit (e.g. from the Hire SOA popup) back onto the matching
+ *  Main/Sub bunkers rows, by fuel-grade match rather than a hardcoded "VLSFO"/"MGO" name. */
+function applyGlobalBunkerPrices(r: Recap, foPrice: string, doPrice: string): Recap {
+  const bunkers = r.bunkers.map((b) => {
+    const field = startRobFieldFor(r.etaPlan.perf, b.fuel);
+    if (field?.kind === 'main') return { ...b, cpPrice: foPrice };
+    if (field?.kind === 'sub') return { ...b, cpPrice: doPrice };
+    return b;
+  });
+  return { ...r, bunkers };
+}
+
+/** Daily Cons (MT/day) for a leg, blending the Normal and ECA rates by its ECA distance fraction
+ *  (sea legs use the ballast/laden rate — whichever matches the leg's own Type — or the idle rate at
+ *  port). At port, only DO (Sub fuel, via auxiliary generators) is consumed — Main/FO does not apply
+ *  at all in port, ECA or not — so the Main column is always 0 there. When the Normal and ECA fuel
+ *  TYPE differ (e.g. VLSFO outside ECA, MDO inside), the main/sub column only carries the Non-ECA-rate
+ *  share — the ECA-zone share is routed per `ecaFuelRouting` (folded into the Main/Sub column if it's
+ *  really the same tank, merged with the other slot's ECA share if they match each other, or tracked
+ *  under its own `auto-eca-main`/`auto-eca-sub` extra-fuel entry) — see the ECA-fuel-split sync
+ *  effect. */
+export function blendedLegCons(perf: EtaPerf, l: EtaLeg): { v: string; m: string; extra: Record<string, string> } {
+  const cons = resolveEtaConsumption(perf);
+  const frac = legEcaFrac(l);
+  const isBallast = l.type === 'Ballast';
+  const seaRate = (m: EtaMainCons) => (isBallast ? m.ballast : m.laden);
+  const blendSea = (normal: EtaMainCons, eca: EtaMainCons) => String(num(seaRate(normal)) * (1 - frac) + num(seaRate(eca)) * frac);
+  const blendIdle = (normal: string, eca: string) => String(num(normal) * (1 - frac) + num(eca) * frac);
+  const route = ecaFuelRouting(cons);
+  const isPort = l.kind !== 'sea';
+  const mainEcaShare = (!route.mainSplit || isPort) ? 0 : num(seaRate(cons.mainEca)) * frac;
+  const subEcaShare = !route.subSplit ? 0 : (isPort ? num(cons.subEca.idle) * frac : num(cons.subEca.sea) * frac);
+  let v = isPort
+    ? 0
+    : (route.mainSplit ? num(seaRate(cons.mainNormal)) * (1 - frac) : num(seaRate(cons.mainNormal)) * (1 - frac) + num(seaRate(cons.mainEca)) * frac);
+  let m = isPort
+    ? (route.subSplit ? num(cons.subNormal.idle) * (1 - frac) : num(cons.subNormal.idle) * (1 - frac) + num(cons.subEca.idle) * frac)
+    : (route.subSplit ? num(cons.subNormal.sea) * (1 - frac) : num(cons.subNormal.sea) * (1 - frac) + num(cons.subEca.sea) * frac);
+  if (route.mainEcaFoldsIntoSub) m += mainEcaShare;
+  if (route.subEcaFoldsIntoMain) v += subEcaShare;
+  const extra: Record<string, string> = {};
+  if (route.mergeEca) extra['auto-eca-main'] = String(mainEcaShare + subEcaShare);
+  else if (route.needsAutoMain) extra['auto-eca-main'] = String(mainEcaShare);
+  else if (route.needsAutoSub) extra['auto-eca-sub'] = String(subEcaShare);
+  cons.extraFuels.forEach((f) => {
+    if (f.id === 'auto-eca-main' || f.id === 'auto-eca-sub') return;
+    extra[f.id] = l.kind === 'sea' ? blendSea(f.normal, f.eca) : blendIdle(f.normal.idle, f.eca.idle);
+  });
+  return { v: String(v), m: String(m), extra };
+}
+
+/** Itinerary column header for an extra fuel — plain grade name, no "ECA-" prefix. */
+function extraFuelLabel(f: { id: string; grade: string }): string {
+  return f.grade;
+}
+
+interface EtaComputedLeg { dep: Date | null; arr: Date | null; arrLt: Date | null; dist: number; avgSpeed: number; days: number; usedV: number; usedM: number; robV: number; robM: number; extraUsed: Record<string, number>; extraRob: Record<string, number> }
 
 /** Sequential ETA/ROB projection: DEP = previous ARR; ROB carried forward per leg. */
 function projectEtaLegs(plan: EtaPlan): EtaComputedLeg[] {
   let cursor = parseDMY(plan.startDep);
   let robV = num(plan.startRobVlsfo);
   let robM = num(plan.startRobMgo);
+  const extraIds = (plan.perf?.extraFuels ?? []).map((f) => f.id);
+  const robExtra: Record<string, number> = {};
+  extraIds.forEach((id) => { robExtra[id] = num(plan.startRobExtra?.[id]); });
   return plan.legs.map((l) => {
     const dep = cursor;
     const dist = num(l.distNonEca) + num(l.distEca);
@@ -814,16 +1088,26 @@ function projectEtaLegs(plan: EtaPlan): EtaComputedLeg[] {
     const usedM = num(l.consMgo) * days;
     robV = robV - usedV + num(l.supVlsfo);
     robM = robM - usedM + num(l.supMgo);
+    const extraUsed: Record<string, number> = {};
+    const extraRob: Record<string, number> = {};
+    extraIds.forEach((id) => {
+      const used = num(l.extraCons?.[id]) * days;
+      extraUsed[id] = used;
+      robExtra[id] = robExtra[id] - used + num(l.extraSup?.[id]);
+      extraRob[id] = robExtra[id];
+    });
     cursor = arr;
-    return { dep, arr, arrLt, dist, avgSpeed, days, usedV, usedM, robV, robM };
+    return { dep, arr, arrLt, dist, avgSpeed, days, usedV, usedM, robV, robM, extraUsed, extraRob };
   });
 }
 
-/** Final projected ROB at the end of the itinerary (VLSFO / LSMGO). */
-function etaEndRob(plan: EtaPlan): { v: number; m: number } {
+/** Final projected ROB at the end of the itinerary (VLSFO / LSMGO / extra fuel types). */
+function etaEndRob(plan: EtaPlan): { v: number; m: number; extra: Record<string, number> } {
   const rows = projectEtaLegs(plan);
   const last = rows[rows.length - 1];
-  return { v: last ? last.robV : num(plan.startRobVlsfo), m: last ? last.robM : num(plan.startRobMgo) };
+  const extra: Record<string, number> = {};
+  (plan.perf?.extraFuels ?? []).forEach((f) => { extra[f.id] = last ? last.extraRob[f.id] : num(plan.startRobExtra?.[f.id]); });
+  return { v: last ? last.robV : num(plan.startRobVlsfo), m: last ? last.robM : num(plan.startRobMgo), extra };
 }
 
 export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
@@ -844,7 +1128,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
     charterersBroker: 'ATPI',
     freightPerMt: '6.65',
     demDespatch: '13,500.00',
-    despatchTerm: 'Half Despatch WTS',
+    despatchTerm: 'Half Despatch',
     deliveryPort: 'SALALAH',
     deliveryTerm: 'AFSPS',
     deliveryDateTime: '11-07-2025 15:00',
@@ -865,7 +1149,11 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
     redeliveryNotices: '30-15-10-7-5-3-2-1',
     hullCleaningClause: '20 DAYS',
     cargoName: 'GYPSUM / LIMESTONE',
-    cpQuantity: '75000 / 10%',
+    cpQuantity: '75000',
+    cpQuantityOption: 'CHOPT',
+    cpQuantityMin: '',
+    cpQuantityMax: '',
+    cpQuantityTolerancePct: '5',
     holdCleaning: 'Owners',
     finalQtyLoaded: '76214',
     blIssueDate: '',
@@ -914,9 +1202,9 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
     serviceProviders: [],
     bunkerSpecs: 'VLSFO max 0.50% S · MGO max 0.10% S',
     bunkers: [
-      { fuel: 'VLSFO', bod: '351.00', expBor: '351.00', cpPrice: '550.00', bookedPrice: '0.00', masterReq: '895.00', actualSupply: '478.75', actualBor: '' },
-      { fuel: 'ULSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
-      { fuel: 'MGO', bod: '220.00', expBor: '220.00', cpPrice: '750.00', bookedPrice: '0.00', masterReq: '130.00', actualSupply: '5.91', actualBor: '' },
+      { fuel: 'VLSFO', bod: '351.00', expBor: '351.00', cpPrice: '560.00', bookedPrice: '0.00', masterReq: '895.00', actualSupply: '478.75', actualBor: '', specs: 'Max 0.50% S' },
+      { fuel: 'ULSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: 'Max 0.10% S' },
+      { fuel: 'MGO', bod: '220.00', expBor: '220.00', cpPrice: '800.00', bookedPrice: '0.00', masterReq: '130.00', actualSupply: '5.91', actualBor: '', specs: 'Max 0.10% S' },
     ],
     additionalVoyageLegs: [],
     pnlNotes: {},
@@ -930,6 +1218,18 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
         full: { ballast: '14', laden: '14' },
         eco: { ballast: '12', laden: '11.5' },
         customs: [],
+        fullMainNormal: { type: 'VLSFO', ballast: '29', laden: '33', idle: '2.5', work: '5' },
+        fullMainEca: { type: 'ULSFO', ballast: '29', laden: '33', idle: '2.5', work: '5' },
+        fullSubNormal: { type: 'MGO', sea: '0.1', idle: '0', work: '0' },
+        fullSubEca: { type: 'MGO', sea: '0.1', idle: '0', work: '0' },
+        ecoMainNormal: { type: 'VLSFO', ballast: '23', laden: '26', idle: '2', work: '4' },
+        ecoMainEca: { type: 'ULSFO', ballast: '23', laden: '26', idle: '2', work: '4' },
+        ecoSubNormal: { type: 'MGO', sea: '0.08', idle: '0', work: '0' },
+        ecoSubEca: { type: 'MGO', sea: '0.08', idle: '0', work: '0' },
+        customMainNormal: { type: 'VLSFO', ballast: '29', laden: '33', idle: '2.5', work: '5' },
+        customMainEca: { type: 'ULSFO', ballast: '29', laden: '33', idle: '2.5', work: '5' },
+        customSubNormal: { type: 'MGO', sea: '0.1', idle: '0', work: '0' },
+        customSubEca: { type: 'MGO', sea: '0.1', idle: '0', work: '0' },
         mainNormal: { type: 'VLSFO', ballast: '29', laden: '33', idle: '2.5', work: '5' },
         mainEca: { type: 'ULSFO', ballast: '29', laden: '33', idle: '2.5', work: '5' },
         subNormal: { type: 'MGO', sea: '0.1', idle: '0', work: '0' },
@@ -940,6 +1240,10 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
     stowage: {
       lightship: '11236',
       autoBunker: true,
+      constants: '500',
+      freshWater: '150',
+      ballastWater: '200',
+      refDisplacement: '69946',
       points: [
         { name: 'SALALAH', displacement: '93288', density: '1.025', vlsfo: '475', mgo: '30', bw: '200', fw: '150', constants: '500' },
         { name: 'COLOMBO', displacement: '93288', density: '1.025', vlsfo: '715', mgo: '30', bw: '200', fw: '150', constants: '500' },
@@ -961,6 +1265,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
         dispSW: '69946',
         vlsfo: '360', mgo: '215', bw: '300', fw: '200', constants: '360',
         shipSurveyQty: '65279', shoreScaleQty: '65563.11',
+        loiTolerancePct: '0.5',
       },
       grades: [
         { grade: 'Gypsum', sf: '0.85', qty: '30500' },
@@ -992,6 +1297,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
   blankRecap.freightCurrency = 'USD';
   blankRecap.cargoQtyUnit = 'MT';
   blankRecap.charterHireCurrency = 'USD';
+  blankRecap.cpQuantityOption = 'OO';
   blankRecap.firstHirePeriodDays = '15';
   blankRecap.firstHireInclude = 'None';
   blankRecap.firstHireDays = '3';
@@ -1005,9 +1311,9 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
   blankRecap.freightPaymentDays = '3';
   blankRecap.freightPaymentBasis = 'Banking Days';
   blankRecap.bunkers = [
-    { fuel: 'VLSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
-    { fuel: 'ULSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
-    { fuel: 'MGO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+    { fuel: 'VLSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: '' },
+    { fuel: 'ULSFO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: '' },
+    { fuel: 'MGO', bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: '' },
   ];
   blankRecap.etaPlan = {
     startDep: '',
@@ -1019,6 +1325,18 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
       full: { ballast: '', laden: '' },
       eco: { ballast: '', laden: '' },
       customs: [],
+      fullMainNormal: { type: 'VLSFO', ballast: '', laden: '', idle: '', work: '' },
+      fullMainEca: { type: 'ULSFO', ballast: '', laden: '', idle: '', work: '' },
+      fullSubNormal: { type: 'MGO', sea: '', idle: '', work: '' },
+      fullSubEca: { type: 'MGO', sea: '', idle: '', work: '' },
+      ecoMainNormal: { type: 'VLSFO', ballast: '', laden: '', idle: '', work: '' },
+      ecoMainEca: { type: 'ULSFO', ballast: '', laden: '', idle: '', work: '' },
+      ecoSubNormal: { type: 'MGO', sea: '', idle: '', work: '' },
+      ecoSubEca: { type: 'MGO', sea: '', idle: '', work: '' },
+      customMainNormal: { type: 'VLSFO', ballast: '', laden: '', idle: '', work: '' },
+      customMainEca: { type: 'ULSFO', ballast: '', laden: '', idle: '', work: '' },
+      customSubNormal: { type: 'MGO', sea: '', idle: '', work: '' },
+      customSubEca: { type: 'MGO', sea: '', idle: '', work: '' },
       mainNormal: { type: 'VLSFO', ballast: '', laden: '', idle: '', work: '' },
       mainEca: { type: 'ULSFO', ballast: '', laden: '', idle: '', work: '' },
       subNormal: { type: 'MGO', sea: '', idle: '', work: '' },
@@ -1029,6 +1347,10 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
   blankRecap.stowage = {
     lightship: '',
     autoBunker: true,
+    constants: '',
+    freshWater: '',
+    ballastWater: '',
+    refDisplacement: '',
     points: [],
     holds: [],
     draft: {
@@ -1044,6 +1366,7 @@ export function seedRecap(voyage: Voyage | undefined, blank = false): Recap {
       constants: '',
       shipSurveyQty: '',
       shoreScaleQty: '',
+      loiTolerancePct: '0.5',
     },
     grades: [],
     ports: [],
@@ -1061,6 +1384,7 @@ export interface Pnl {
   days: number;
   qty: number;
   freight: number;
+  hireOutIncome: number;
   demDespatch: number;
   miscIncome: number;
   revenue: number;
@@ -1069,6 +1393,7 @@ export interface Pnl {
   foExp: number;
   doCons: number;
   doExp: number;
+  extraFuelCost: number;
   bunkerCost: number;
   // operation expense (excl. hire)
   portLoad: number;
@@ -1077,6 +1402,7 @@ export interface Pnl {
   cveTotal: number;
   ilohc: number;
   otherCost: number;
+  carbonCost: number;
   opExpense: number;
   opProfit: number;
   // hire
@@ -1087,6 +1413,7 @@ export interface Pnl {
   netHirePerDay: number;
   netHire: number; // total net hire over the voyage
   totalHire: number;
+  ballastBonus: number;
   // result
   totalExpense: number;
   profit: number;
@@ -1095,14 +1422,81 @@ export interface Pnl {
 }
 
 /** Total sea distance (nm) and port days from the itinerary legs. */
-function itineraryTotals(plan: EtaPlan): { distance: number; portDays: number } {
+function itineraryTotals(plan: EtaPlan): { distance: number; ecaDistance: number; portDays: number } {
   let distance = 0;
+  let ecaDistance = 0;
   let portDays = 0;
   plan.legs.forEach((l) => {
-    if (l.kind === 'sea') distance += num(l.distNonEca) + num(l.distEca);
+    if (l.kind === 'sea') { distance += num(l.distNonEca) + num(l.distEca); ecaDistance += num(l.distEca); }
     else portDays += num(l.portDays);
   });
-  return { distance, portDays };
+  return { distance, ecaDistance, portDays };
+}
+
+/**
+ * Net laytime settlement (demurrage income − despatch cost) from the actual
+ * statement-of-facts. Returns null until SOF events are entered, so the flat
+ * `demDespatch` rate is used until a real laytime calc exists. Mirrors the
+ * Freight & Laytime tab total.
+ */
+function laytimeSettlementNet(r: Recap): number | null {
+  const fl = r.freightLaytime;
+  if (!fl || !Array.isArray(fl.laytimes) || fl.laytimes.length === 0) return null;
+  const hasFacts = fl.laytimes.some((p) => Array.isArray(p.events) && p.events.length > 0 && (p.commenced || p.completed));
+  if (!hasFacts) return null;
+  return fl.laytimes.reduce((s, p) => { const res = calcLaytime(p); return s + res.demurrageAmt - res.despatchAmt; }, 0);
+}
+
+/**
+ * Actual port disbursements from the Freight & Laytime PDA/FDA settlement, keyed
+ * by port. Amount per port = FDA final, else estimated, else advance. This is the
+ * single source of truth for port DA: it feeds the Voyage Details PDA fields and
+ * the Live P&L port cost.
+ */
+function settlementPortDa(r: Recap): { byPort: Map<string, number>; loadTotal: number; dischTotal: number; total: number; hasData: boolean } {
+  const byPort = new Map<string, number>();
+  let total = 0;
+  const rows = r.freightLaytime?.settlement?.pda;
+  if (Array.isArray(rows)) {
+    rows.forEach((p) => {
+      if (!p.port) return;
+      const amt = p.fdaFinal > 0 ? p.fdaFinal : (p.estimated > 0 ? p.estimated : p.advance);
+      if (amt <= 0) return;
+      const key = p.port.trim().toUpperCase();
+      byPort.set(key, (byPort.get(key) ?? 0) + amt);
+      total += amt;
+    });
+  }
+  const loadTotal = splitPorts(r.loadPort).reduce((s, p) => s + (byPort.get(p.trim().toUpperCase()) ?? 0), 0);
+  const dischTotal = splitPorts(r.dischargePort).reduce((s, p) => s + (byPort.get(p.trim().toUpperCase()) ?? 0), 0);
+  return { byPort, loadTotal, dischTotal, total, hasData: total > 0 };
+}
+
+/** Total off-hire days entered across the owners hire installments (Hire tab). */
+function totalOffHireDays(r: Recap): number {
+  let total = 0;
+  Object.values(r.hirePayState ?? {}).forEach((e) => {
+    (e?.offHire ?? []).forEach((o) => { total += offHireDays(o); });
+  });
+  return total;
+}
+
+/**
+ * EU ETS carbon cost = phased EUAs required × the latest EUA price entered in the
+ * Emissions ledger. Zero until the user records emission legs and a purchase rate,
+ * so it never injects a guessed price.
+ */
+function euaCost(r: Recap): number {
+  const eua = r.eua;
+  if (!eua || !Array.isArray(eua.legs) || eua.legs.length === 0) return 0;
+  const phaseIn = num(eua.phaseInPct) / 100;
+  const totalEuas = eua.legs.reduce((s, l) => {
+    const factor = num(l.emissionFactor) || euaFactor(l.fuel);
+    return s + num(l.cons) * factor * (num(l.phasePct) / 100) * phaseIn;
+  }, 0);
+  const rates = (eua.ledger ?? []).filter((x) => /buy|bought/i.test(x.type) && num(x.rate) > 0).map((x) => num(x.rate));
+  const rate = rates.length ? rates[rates.length - 1] : 0;
+  return totalEuas * rate;
 }
 
 function actualReportTotals(reports: VesselReport[] | undefined): { speed: number; foCons: number; doCons: number } | null {
@@ -1133,46 +1527,87 @@ export function computePnl(r: Recap): Pnl {
   // Actual vessel reports drive actual duration and bunker consumption.
   const actuals = actualReportTotals(r.vesselReports);
   const spd = actuals?.speed ?? num(r.cpSpeed);
-  let days: number;
-  if (spd > 0) {
-    const { distance, portDays } = itineraryTotals(r.etaPlan);
-    days = (distance > 0 ? distance / (spd * 24) : 0) + portDays;
-  } else {
-    days = daysBetween(parseDMY(r.deliveryDateTime), parseDMY(r.redeliveryDateTime));
-  }
+  const { distance, ecaDistance, portDays } = itineraryTotals(r.etaPlan);
+  // Days from the itinerary when it has distance; otherwise the delivery→redelivery span.
+  const days = spd > 0 && distance > 0
+    ? distance / (spd * 24) + portDays
+    : daysBetween(parseDMY(r.deliveryDateTime), parseDMY(r.redeliveryDateTime));
   const qty = num(r.finalQtyLoaded);
-  const freight = num(r.freightPerMt) * qty;
-  const demDespatch = num(r.demDespatch);
+  // Fix type drives who hire belongs to: charter-in = expense, charter-out = income.
+  const [inType = '', outType = ''] = (r.voyageFixType || '').toUpperCase().split('-');
+  const chartersIn = inType === 'TCIN' || inType === 'TCTIN';
+  const chartersOut = outType === 'TCOUT' || outType === 'TCTOUT';
+  const performsVoyage = outType === 'VOUT';
+  const addCommPct = num(r.adcom) + num(r.brokerage);
+  // Hire is charged only for on-hire days — off-hire entered in the Hire tab is excluded.
+  const onHireDays = Math.max(0, days - totalOffHireDays(r));
+
+  // Freight income only when we perform the voyage out; shown net of address commission.
+  const freightCommPct = num(r.adcom);
+  const grossFreight = num(r.freightPerMt) * qty;
+  const freight = performsVoyage ? grossFreight * (1 - freightCommPct / 100) : 0;
+  // Hire OUT income — when we charter the vessel out. For a relet (also chartered in)
+  // the sub-hire is in charterHirePerDay; for an owned vessel it's the main hirePerDay.
+  const hireOutPerDay = chartersOut ? (chartersIn ? num(r.charterHirePerDay) : num(r.hirePerDay)) : 0;
+  const hireOutIncome = hireOutPerDay * onHireDays * (1 - addCommPct / 100);
+  // Actual laytime settlement overrides the flat demurrage rate once SOF facts exist.
+  const laytimeNet = laytimeSettlementNet(r);
+  const demDespatch = laytimeNet != null ? laytimeNet : num(r.demDespatch);
   const miscIncome = num(r.miscIncome);
-  const revenue = freight + demDespatch + miscIncome;
+  const revenue = freight + hireOutIncome + demDespatch + miscIncome;
 
   // Reported consumption is the actual; Voyage Details totals are the fallback.
   const foCons = actuals?.foCons || num(r.foCons);
   const foPrice = num(r.foPrice);
-  const foExp = foCons * foPrice;
+  // Split FO consumption by ECA distance fraction and price the ECA portion at ULSFO.
+  const ulsfoPrice = num(r.bunkers?.find((b) => b.fuel === 'ULSFO')?.cpPrice) || foPrice;
+  const ecaFrac = distance > 0 ? Math.min(1, ecaDistance / distance) : 0;
+  const foExp = foCons * (1 - ecaFrac) * foPrice + foCons * ecaFrac * ulsfoPrice;
   const doCons = actuals?.doCons || num(r.doCons);
   const doPrice = num(r.doPrice);
   const doExp = doCons * doPrice;
-  const bunkerCost = foExp + doExp;
+  // Extra fuel types added in Instructed Speed & Consumption — voyage consumption
+  // (Normal/ECA-split laden rate × on-hire days) priced from the matching Bunkers row.
+  const extraFuelCost = (r.etaPlan?.perf.extraFuels ?? []).reduce((sum, f) => {
+    const mode = r.etaPlan.perf.speedMode;
+    const normal = mode === 'Eco' ? f.ecoNormal : mode === 'Full' ? f.fullNormal : f.customNormal;
+    const eca = mode === 'Eco' ? f.ecoEca : mode === 'Full' ? f.fullEca : f.customEca;
+    const rate = num(normal.laden) * (1 - ecaFrac) + num(eca.laden) * ecaFrac;
+    const price = num(r.bunkers?.find((b) => b.fuel === f.grade)?.cpPrice);
+    return sum + rate * onHireDays * price;
+  }, 0);
+  const bunkerCost = foExp + doExp + extraFuelCost;
 
-  const portLoad = num(r.portDaLoad);
-  const portDisch = num(r.portDaDisch);
-  const portCost = portLoad + portDisch;
+  // Port DA: the Freight & Laytime PDA/FDA settlement is authoritative once any
+  // figure is entered there; otherwise fall back to the Voyage Details PDA fields.
+  const settlementDa = settlementPortDa(r);
+  const portLoad = settlementDa.hasData ? settlementDa.loadTotal : num(r.portDaLoad);
+  const portDisch = settlementDa.hasData ? settlementDa.dischTotal : num(r.portDaDisch);
+  // DA for extra ports/bunker calls added in Operations (skip any already in the settlement).
+  const legPda = (r.additionalVoyageLegs ?? []).reduce((s, l) => {
+    const key = (l.port || '').trim().toUpperCase();
+    if (settlementDa.hasData && key && settlementDa.byPort.has(key)) return s;
+    return s + num(l.pda);
+  }, 0);
+  const portCost = (settlementDa.hasData ? settlementDa.total : portLoad + portDisch) + legPda;
   const cveTotal = num(r.cve);
   const ilohc = num(r.ilohc);
   const otherCost = num(r.otherCost);
-  const opExpense = bunkerCost + portCost + cveTotal + ilohc + otherCost;
+  const carbonCost = euaCost(r);
+  const opExpense = bunkerCost + portCost + cveTotal + ilohc + otherCost + carbonCost;
   const opProfit = revenue - opExpense;
 
   const hirePerDay = num(r.hirePerDay);
-  const addCommPct = num(r.adcom) + num(r.brokerage);
-  const grossHire = hirePerDay * days;
+  // Hire IN — an expense only when we charter the vessel in (TCIN/TCTIN); zero when we own.
+  const grossHire = chartersIn ? hirePerDay * onHireDays : 0;
   const hireDeductions = (grossHire * addCommPct) / 100;
   const netHirePerDay = hirePerDay * (1 - addCommPct / 100);
   const totalHire = grossHire - hireDeductions;
   const netHire = totalHire;
 
-  const totalExpense = opExpense + totalHire;
+  // Ballast bonus is a lump sum paid to owners alongside hire — a charter cost.
+  const ballastBonus = num(r.ballastBonus);
+  const totalExpense = opExpense + totalHire + ballastBonus;
   const profit = revenue - totalExpense;
   const dailyProfit = days > 0 ? profit / days : 0;
   const tce = days > 0 ? opProfit / days : 0;
@@ -1181,6 +1616,7 @@ export function computePnl(r: Recap): Pnl {
     days,
     qty,
     freight,
+    hireOutIncome,
     demDespatch,
     miscIncome,
     revenue,
@@ -1188,6 +1624,7 @@ export function computePnl(r: Recap): Pnl {
     foExp,
     doCons,
     doExp,
+    extraFuelCost,
     bunkerCost,
     portLoad,
     portDisch,
@@ -1195,6 +1632,7 @@ export function computePnl(r: Recap): Pnl {
     cveTotal,
     ilohc,
     otherCost,
+    carbonCost,
     opExpense,
     opProfit,
     hirePerDay,
@@ -1204,6 +1642,7 @@ export function computePnl(r: Recap): Pnl {
     netHirePerDay,
     netHire,
     totalHire,
+    ballastBonus,
     totalExpense,
     profit,
     dailyProfit,
@@ -1277,6 +1716,13 @@ function extractRecapFromPaste(text: string): Partial<Recap> {
   const vesselName = src.match(/\n\s*([A-Z][A-Z0-9 .'-]{2,})\s*\n\s*BUILT\b/i)?.[1]?.trim();
   if (vesselName) out.vesselName = vesselName;
 
+  const holdMatch =
+    src.match(/\bNO\.?\s*OF\s*HOLDS?(?:\s*\/\s*HATCHES?)?\s*[:\-]?\s*(\d+)/i) ??
+    src.match(/\b(\d+)\s*HOLDS?\s*\/\s*\d+\s*HATCHES?\b/i) ??
+    src.match(/\bHOLDS?\s*\/\s*HATCHES?\s*[:\-]\s*(\d+)/i) ??
+    src.match(/\bHOLDS?\s*[:\-]\s*(\d+)\b/i);
+  if (holdMatch?.[1]) out.holdCount = holdMatch[1];
+
   const cargoLine = src.match(/CARGO\s*&\s*QTY\s*:\s*([^\n]+)/i)?.[1]?.trim();
   if (cargoLine) out.cargoName = cargoLine.replace(/\s+/g, ' ');
   const qty = src.match(/\b(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*\+\/-\s*\d+(?:\.\d+)?%/i)?.[1];
@@ -1341,6 +1787,7 @@ function extractRecapFields(text: string): Partial<Recap> {
   };
   const map: [RecapTextKey, RegExp[]][] = [
     ['vesselName', [/vessel\s*name\s*[:\-|]\s*(.+)/i]],
+    ['holdCount', [/no\.?\s*of\s*holds?(?:\s*\/\s*hatches?)?\s*[:\-|]\s*(\d+)/i, /holds?\s*\/\s*hatches?\s*[:\-|]\s*(\d+)/i, /^holds?\s*[:\-|]\s*(\d+)/im]],
     ['voyageFixType', [/voyage\s*\/?\s*fix\s*type\s*[:\-|]\s*(.+)/i, /\bfix\s*type\s*[:\-|]\s*(.+)/i]],
     ['owners', [/^owners\s*[:\-|]\s*(.+)/im]],
     ['ownersBroker', [/owners?\s*broker\s*[:\-|]\s*(.+)/i]],
@@ -1413,7 +1860,7 @@ const SAMPLE_RECAP_EXTRACT: Partial<Recap> = {
   charterersLaycanEnd: '12-07-2025',
   freightPerMt: '6.65',
   demDespatch: '13,500.00',
-  despatchTerm: 'Half Despatch WTS',
+  despatchTerm: 'Half Despatch',
   deliveryPort: 'SALALAH',
   deliveryTerm: 'AFSPS',
   deliveryDateTime: '11-07-2025 15:00',
@@ -1428,7 +1875,11 @@ const SAMPLE_RECAP_EXTRACT: Partial<Recap> = {
   redeliveryNotices: '30-15-10-7-5-3-2-1',
   hullCleaningClause: '20 DAYS',
   cargoName: 'GYPSUM / LIMESTONE',
-  cpQuantity: '75000 / 10%',
+  cpQuantity: '75000',
+  cpQuantityOption: 'CHOPT',
+  cpQuantityMin: '',
+  cpQuantityMax: '',
+  cpQuantityTolerancePct: '5',
   holdCleaning: 'OWNERS - AP',
   finalQtyLoaded: '76214',
   loadPort: 'SALALAH',
@@ -1593,13 +2044,17 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'costs', label: 'Tool', icon: 'fa-scale-balanced' },
 ];
 
-type RailPanel = 'docs' | 'tasks' | 'alerts' | 'upload' | null;
+type RailPanel = 'docs' | 'tasks' | 'alerts' | 'upload' | 'confighistory' | null;
+/** How long after a voyage switch automatic reconciliation (backend hydrate, shared market
+ *  factor sync, itinerary recompute) is still expected, so it's not logged as a user edit. */
+const SWITCH_GRACE_MS = 3000;
 
 /* ------------------------------------------------------------ main component */
 
 export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { user } = useFleetView();
   const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   // "create" mode (prop or ?new=1) opens a blank operations workspace.
   const createMode = mode === 'create' || searchParams.get('new') === '1';
@@ -1625,13 +2080,70 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
   const freightTabLabel = includesVoyageType ? 'Freight & Laytime' : 'Services';
   const duePopupStorageKey = `fv.ops.duePopupSnooze.v1:${voyage?.id ?? 'none'}`;
   const [duePopupSnooze, setDuePopupSnooze] = useState<Record<string, number>>(() => readDuePopupSnoozeMap(duePopupStorageKey));
+  const [configHistory, setConfigHistory] = useState<ConfigHistoryEntry[]>(() => loadConfigHistory(voyage?.id));
   // Guards the shared-store sync loop: the raw JSON we last read/wrote.
   const lastSavedRef = useRef<string>(readOpsRecapRaw(voyage?.id) ?? '');
+  // Timestamp of the most recent voyage switch/reseed — recap changes within `SWITCH_GRACE_MS`
+  // of it are reconciliation noise (hydrate from backend, shared market-factor sync, itinerary
+  // recompute, StrictMode's double-invoked mount effects), not a user edit, so they're never
+  // logged to Configuration History.
+  const voyageSwitchedAtRef = useRef<number>(Date.now());
+  // Configuration History is logged on a quiet-period debounce, not per keystroke: `historyBaseRef`
+  // holds the recap snapshot from before the CURRENT burst of edits started, and the timer fires
+  // once typing pauses, diffing that base against the latest recap so a field shows one entry with
+  // its final value (e.g. typing "101" logs once as — → 101, not —ₒ1→1 0→1 01).
+  const historyBaseRef = useRef<string | null>(null);
+  const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The last FULL recap JSON this effect itself observed — kept separate from `lastSavedRef`
+  // (which external syncs below also write a PARTIAL payload into) so the history diff always
+  // compares full-recap-to-full-recap and never flags an external sync's extra/missing keys as
+  // a spurious "user" change.
+  const historyLastFullRef = useRef<string>(JSON.stringify(recap));
+  const recapRef = useRef(recap);
+  recapRef.current = recap;
+
+  // The ETA & ROB itinerary's final computed port arrival (UTC) is the single source of truth for
+  // the vessel's expected redelivery once an itinerary exists — keep Voyage Details' "Redelivery
+  // Date & Time UTC" field in sync with it (every consumer that reads `recap.redeliveryDateTime` —
+  // the hire schedule's BOR settlement date, voyage duration, notices, PDFs — then stays correct
+  // without separately re-deriving it) UNLESS the user has directly typed their own value there.
+  // Runs regardless of which tab is active since `recap` lives here at the top level.
+  useEffect(() => {
+    if (recap.redeliveryDateManual) return;
+    const legs = recap.etaPlan?.legs ?? [];
+    if (!legs.length) return;
+    const etaRows = projectEtaLegs(recap.etaPlan);
+    const lastArr = etaRows.length ? etaRows[etaRows.length - 1].arr : null;
+    if (!lastArr) return;
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    const dmy = `${p2(lastArr.getDate())}-${p2(lastArr.getMonth() + 1)}-${lastArr.getFullYear()} ${p2(lastArr.getHours())}:${p2(lastArr.getMinutes())}`;
+    if (dmy !== recap.redeliveryDateTime) setRecap((r) => ({ ...r, redeliveryDateTime: dmy }));
+  }, [recap.etaPlan, recap.redeliveryDateTime, recap.redeliveryDateManual]);
+
+  // The itinerary's own timeline must be anchored to the SAME delivery date/time as Voyage
+  // Details — otherwise its final computed arrival (used above) is on an unrelated timeline and
+  // can't ever validly serve as the hire schedule's redelivery date. Voyage Details' Delivery
+  // Date & Time is the single source of truth; the itinerary's DEP-UTC start always mirrors it.
+  useEffect(() => {
+    if (!recap.deliveryDateTime) return;
+    if (recap.etaPlan.startDep !== recap.deliveryDateTime) {
+      setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, startDep: recap.deliveryDateTime } }));
+    }
+  }, [recap.deliveryDateTime, recap.etaPlan.startDep]);
 
   useEffect(() => {
     const loaded = loadOpsRecap(voyage?.id);
-    setRecap(loaded ? { ...seedRecap(voyage, createMode), ...(loaded as Partial<Recap>) } : seedRecap(voyage, createMode));
+    const base = loaded ? { ...seedRecap(voyage, createMode), ...(loaded as Partial<Recap>) } : seedRecap(voyage, createMode);
+    // Adopt shared Market Factors (hire / FO / GO) so Performance & Limits edits carry in.
+    const shared = loadVoyageShared(voyage?.id);
+    if (shared) {
+      if (shared.hireRate) base.hirePerDay = shared.hireRate;
+      if (shared.foPrice) base.foPrice = shared.foPrice;
+      if (shared.goPrice) base.doPrice = shared.goPrice;
+    }
+    setRecap(base);
     lastSavedRef.current = readOpsRecapRaw(voyage?.id) ?? '';
+    voyageSwitchedAtRef.current = Date.now();
     setTab('details');
     setDocs(seedDocs());
     setTasks(seedTasks());
@@ -1640,6 +2152,12 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
     setCpPasteMsg(null);
     setOpsStatus(voyage?.status || 'At Sea');
     setDuePopupSnooze(readDuePopupSnoozeMap(`fv.ops.duePopupSnooze.v1:${voyage?.id ?? 'none'}`));
+    setConfigHistory(loadConfigHistory(voyage?.id));
+    // Pull the server copies into the local cache; the recap subscribe effect applies them.
+    void hydrateOpsRecap(voyage?.id);
+    void hydrateOpsEstBaseline(voyage?.id);
+    void hydrateVoyageShared(voyage?.id);
+    void hydrateConfigHistory(voyage?.id).then(setConfigHistory);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voyage?.id]);
 
@@ -1648,15 +2166,72 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
     return () => window.clearInterval(t);
   }, []);
 
-  // Persist recap edits to the shared per-voyage store (skips no-op writes).
+  // Persist recap edits to the shared per-voyage store (skips no-op writes) immediately — data
+  // safety shouldn't wait on a debounce. Configuration History logging is debounced separately
+  // (see `historyTimerRef`) so a burst of keystrokes collapses into one entry per field.
   useEffect(() => {
     if (!voyage) return;
     const raw = JSON.stringify(recap);
-    if (raw === lastSavedRef.current) return;
-    lastSavedRef.current = raw;
-    writeOpsRecapRaw(voyage.id, raw);
+    const skipLog = Date.now() - voyageSwitchedAtRef.current < SWITCH_GRACE_MS;
+    const previousFull = historyLastFullRef.current;
+    historyLastFullRef.current = raw;
+    if (raw !== lastSavedRef.current) {
+      lastSavedRef.current = raw;
+      writeOpsRecapRaw(voyage.id, raw);
+    }
+    if (previousFull && previousFull !== raw && !skipLog) {
+      if (historyBaseRef.current == null) historyBaseRef.current = previousFull;
+      if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+      const voyageId = voyage.id;
+      const by = user?.fullName || user?.name || 'Unknown user';
+      historyTimerRef.current = setTimeout(() => {
+        historyTimerRef.current = null;
+        const base = historyBaseRef.current;
+        historyBaseRef.current = null;
+        if (!base) return;
+        try {
+          const before = JSON.parse(base) as Record<string, unknown>;
+          const after = recapRef.current as unknown as Record<string, unknown>;
+          const entries = diffRecap(before, after, by);
+          if (entries.length) appendConfigHistory(voyageId, entries);
+        } catch {
+          /* malformed snapshot — skip logging this save */
+        }
+      }, 1200);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recap, voyage?.id]);
+
+  // Flush any pending (debounced) Configuration History entry for the OUTGOING voyage before
+  // switching to a new one, or on unmount, so a typed edit is never silently dropped.
+  useEffect(() => {
+    return () => {
+      if (!historyTimerRef.current) return;
+      clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+      const base = historyBaseRef.current;
+      historyBaseRef.current = null;
+      if (base && voyage) {
+        try {
+          const before = JSON.parse(base) as Record<string, unknown>;
+          const after = recapRef.current as unknown as Record<string, unknown>;
+          const by = user?.fullName || user?.name || 'Unknown user';
+          const entries = diffRecap(before, after, by);
+          if (entries.length) appendConfigHistory(voyage.id, entries);
+        } catch {
+          /* malformed snapshot — skip logging this save */
+        }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voyage?.id]);
+
+  // Live-update the Configuration History panel when another tab/page changes it.
+  useEffect(() => {
+    if (!voyage) return;
+    return subscribeConfigHistory(voyage.id, () => setConfigHistory(loadConfigHistory(voyage.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voyage?.id]);
 
   // Reflect external edits (other tabs / other pages) into the recap live.
   useEffect(() => {
@@ -1676,6 +2251,36 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voyage?.id]);
 
+  // Push hire / fuel prices to the shared Market Factors store (Performance, Limits, Optimization).
+  useEffect(() => {
+    if (!voyage?.id) return;
+    const shared = loadVoyageShared(voyage.id) ?? {};
+    const patch: Partial<VoyageSharedFields> = {};
+    if (recap.hirePerDay !== (shared.hireRate ?? '')) patch.hireRate = recap.hirePerDay;
+    if (recap.foPrice !== (shared.foPrice ?? '')) patch.foPrice = recap.foPrice;
+    if (recap.doPrice !== (shared.goPrice ?? '')) patch.goPrice = recap.doPrice;
+    if (Object.keys(patch).length > 0) mergeVoyageShared(voyage.id, patch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recap.hirePerDay, recap.foPrice, recap.doPrice, voyage?.id]);
+
+  // Reflect external Market Factor edits (Performance / Limits) into the recap live.
+  useEffect(() => {
+    if (!voyage?.id) return;
+    return subscribeVoyageShared(voyage.id, () => {
+      const shared = loadVoyageShared(voyage.id);
+      if (!shared) return;
+      setRecap((r) => {
+        let changed = false;
+        const next = { ...r };
+        if (shared.hireRate != null && shared.hireRate !== r.hirePerDay) { next.hirePerDay = shared.hireRate; changed = true; }
+        if (shared.foPrice != null && shared.foPrice !== r.foPrice) { next.foPrice = shared.foPrice; changed = true; }
+        if (shared.goPrice != null && shared.goPrice !== r.doPrice) { next.doPrice = shared.goPrice; changed = true; }
+        return changed ? next : r;
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voyage?.id]);
+
   const pnl = useMemo(() => computePnl(recap), [recap]);
   const alerts = useMemo(() => seedAlerts(recap, pnl), [recap, pnl]);
   const duePopupItems = useMemo(
@@ -1686,8 +2291,16 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
     () => duePopupItems.filter((x) => (duePopupSnooze[x.id] ?? 0) <= duePopupClock),
     [duePopupItems, duePopupSnooze, duePopupClock],
   );
-  // Estimate baseline = the fixed recap from Chartering (independent of live edits).
-  const estPnl = useMemo(() => computePnl(seedRecap(voyage, createMode)), [voyage?.id, createMode]);
+  // Estimate baseline = the fixed recap snapshotted from Chartering at handover,
+  // independent of live Operations/Postfix edits. Falls back to seedRecap when no
+  // handover snapshot exists (e.g. sample or manually created voyages).
+  const estPnl = useMemo(() => {
+    const baseline = loadOpsEstBaseline(voyage?.id);
+    const baseRecap = baseline
+      ? { ...seedRecap(voyage, createMode), ...(baseline as Partial<Recap>) }
+      : seedRecap(voyage, createMode);
+    return computePnl(baseRecap);
+  }, [voyage?.id, createMode]);
 
   if (!voyage) return <NoVesselSelected />;
 
@@ -1707,7 +2320,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
     const dischPort = recap.dischargePort || recap.redeliveryPort || voyage.portTo || '';
     const saved = upsertCreatedVoyage({
       vessel: recap.vesselName.trim(),
-      imo: voyage.imo || '',
+      imo: recap.vesselImo || voyage.imo || '',
       vesselType: voyage.vesselType || '',
       dwt: recap.cpQuantity || voyage.dwt || '',
       built: voyage.built || 0,
@@ -1793,7 +2406,19 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
       setCpPasteMsg('No matching recap fields found in the pasted text.');
       return;
     }
-    setRecap((prev) => ({ ...prev, ...extracted }));
+    setRecap((prev) => {
+      const next = { ...prev, ...extracted };
+      // Seed the Cargo & Stowage grade rows from the pasted cargo name (Cargo Master SF
+      // auto-filled where a match exists) — only when no grade rows have been entered yet.
+      if (extracted.cargoName && prev.stowage.grades.every((g) => !g.grade.trim())) {
+        const names = extracted.cargoName.split(/\s*\/\s*|\s*,\s*/).map((n) => n.trim()).filter(Boolean);
+        if (names.length) {
+          const soleQty = names.length === 1 ? (extracted.cpQuantity || '') : '';
+          next.stowage = { ...prev.stowage, grades: names.map((n) => ({ grade: n, sf: cargoStowageFactor(n), qty: soleQty, sfAuto: true })) };
+        }
+      }
+      return next;
+    });
     setCpPasteMsg(`Applied ${appliedEntries.length} field(s) from pasted CP details.`);
   };
 
@@ -1910,6 +2535,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
                 {rail === 'tasks' && 'Tasks & Reminders'}
                 {rail === 'alerts' && 'Alerts'}
                 {rail === 'upload' && 'Upload Documents'}
+                {rail === 'confighistory' && 'Configuration History'}
               </span>
               <button type="button" className="fv-ops__icon-btn" onClick={() => setRail(null)} title="Close">
                 <i className="fas fa-xmark" />
@@ -1920,6 +2546,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
               {rail === 'tasks' && <TasksPanel tasks={tasks} onToggle={toggleTask} />}
               {rail === 'alerts' && <AlertsPanel alerts={alerts} />}
               {rail === 'upload' && <UploadPanel onIngest={ingest} fetchNote={fetchNote} />}
+              {rail === 'confighistory' && <ConfigHistoryPanel entries={configHistory} />}
             </div>
           </div>
         )}
@@ -1928,6 +2555,7 @@ export function OperationsPage({ mode }: { mode?: 'create' } = {}) {
           <RailIcon icon="fa-list-check" label="Tasks" active={rail === 'tasks'} badge={openTasks} onClick={() => setRail(rail === 'tasks' ? null : 'tasks')} />
           <RailIcon icon="fa-bell" label="Alerts" active={rail === 'alerts'} badge={alerts.length} onClick={() => setRail(rail === 'alerts' ? null : 'alerts')} />
           <RailIcon icon="fa-cloud-arrow-up" label="Upload" active={rail === 'upload'} onClick={() => setRail(rail === 'upload' ? null : 'upload')} />
+          <RailIcon icon="fa-clock-rotate-left" label="Config History" active={rail === 'confighistory'} onClick={() => setRail(rail === 'confighistory' ? null : 'confighistory')} />
         </div>
       </aside>
     </div>
@@ -1983,11 +2611,12 @@ const OPS_NOR_TENDER_TERMS = [
   'Upon Customs Clearance', 'Upon Completion of Formalities',
 ];
 // Despatch treatment options.
-const OPS_DESPATCH_TERMS = ['Same as Demurrage', 'Half Despatch WTS', 'HDWTS', 'HDATS', 'Free Despatch', 'No Despatch'];
+const OPS_DESPATCH_TERMS = ['Dem = Des', 'Half Despatch', 'HDWTS', 'HDATS', 'Free Despatch', 'No Despatch'];
 // Voyage operational status (editable in the Voyage Details summary strip).
 const OPS_VOYAGE_STATUSES = ['At Sea', 'At Port', 'At Berth', 'At Anchorage', 'Loading', 'Discharging', 'On Voyage', 'Ballast', 'Idle', 'Completed'];
 // Bunker fuel grades (defaults mirror the Chartering estimation fuels).
 const OPS_FUEL_GRADES = ['VLSFO', 'ULSFO', 'HSFO', 'LSMGO', 'MGO', 'MDO', 'LNG', 'Methanol'];
+const OPS_PORT_ROTATION_TYPES = ['Delivery', 'Loading', 'Bunker', 'Discharging', 'ReDelivery', 'Canal Transit', 'STS', 'DryDock', 'Anchorage', 'Idle / Waiting', 'Pilotage'];
 // Itinerary leg types (mirrors the Chartering port-rotation Type column).
 const OPS_LEG_TYPES = ['Ballast', 'Laden', 'LoadLine Change', ...PORT_TYPE_OPTIONS];
 // Vessel report types (Vessel Reports tab).
@@ -2028,9 +2657,9 @@ function dateTimeInputToDmy(iso: string): string {
 }
 
 /** Labelled date + time picker bound to a recap `dd-mm-yyyy HH:mm` string. */
-function VdDateTime({ label, value, onChange, accent }: { label: string; value: string; onChange: (v: string) => void; accent?: boolean }) {
+function VdDateTime({ label, value, onChange, accent, readOnly, title }: { label: string; value: string; onChange: (v: string) => void; accent?: boolean; readOnly?: boolean; title?: string }) {
   return (
-    <label className="fv-ops__vd-field">
+    <label className="fv-ops__vd-field" title={title}>
       <span>{label}</span>
       <input
         type="datetime-local"
@@ -2038,6 +2667,8 @@ function VdDateTime({ label, value, onChange, accent }: { label: string; value: 
         className={`fv-ops__vd-in fv-ops__vd-in--dt${accent ? ' fv-ops__vd-in--accent' : ''}`}
         value={dmyToDateTimeInput(value)}
         onChange={(e) => onChange(dateTimeInputToDmy(e.target.value))}
+        readOnly={readOnly}
+        disabled={readOnly}
       />
     </label>
   );
@@ -2069,7 +2700,7 @@ function VdSelect({ label, value, onChange, options }: { label: string; value: s
 }
 
 /** Shared themed autocomplete popup: free-text input over a filtered saved list. */
-function VdAutocomplete({ value, onChange, options, placeholder, accent, inputClass }: { value: string; onChange: (v: string) => void; options: { value: string; label?: string; meta?: string }[]; placeholder?: string; accent?: boolean; inputClass?: string }) {
+function VdAutocomplete({ value, onChange, options, placeholder, accent, inputClass, inputLabel }: { value: string; onChange: (v: string) => void; options: { value: string; label?: string; meta?: string }[]; placeholder?: string; accent?: boolean; inputClass?: string; inputLabel?: string }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -2090,6 +2721,7 @@ function VdAutocomplete({ value, onChange, options, placeholder, accent, inputCl
         className={inputClass ?? `fv-ops__vd-in${accent ? ' fv-ops__vd-in--accent' : ''}`}
         value={value}
         placeholder={placeholder ?? 'Select or type…'}
+        aria-label={inputLabel}
         onChange={(e) => { onChange(e.target.value); setOpen(true); setActive(0); }}
         onFocus={() => setOpen(true)}
         onKeyDown={(e) => {
@@ -2156,6 +2788,64 @@ function VdValueUnit({ label, value, onValue, unit, onUnit, units, accent, num, 
   );
 }
 
+/** CP Quantity field with option type selector (OO, CHOPT, ±%, MIN/MAX) and unit dropdown */
+const OPS_QTY_TOLERANCE_PCTS = ['2.5', '5', '7.5', '10', '15'];
+
+function VdCpQuantity({ label, value, onValue, option, onOption, min, onMin, max, onMax, tolerancePct, onTolerancePct, unit, onUnit, units }: { label: string; value: string; onValue: (v: string) => void; option: string; onOption: (v: string) => void; min: string; onMin: (v: string) => void; max: string; onMax: (v: string) => void; tolerancePct: string; onTolerancePct: (v: string) => void; unit: string; onUnit: (v: string) => void; units: string[] }) {
+  const base = num(value);
+  const pct = num(tolerancePct);
+  const pctMin = base && pct ? base * (1 - pct / 100) : 0;
+  const pctMax = base && pct ? base * (1 + pct / 100) : 0;
+  return (
+    <label className="fv-ops__vd-field fv-ops__vd-field--cpqty">
+      <span>{label}</span>
+      <div className="fv-ops__vd-cpqty">
+        <span className="fv-ops__vd-unitwrap fv-ops__vd-unitwrap--triple">
+          <input className="fv-ops__vd-in" inputMode="decimal" value={value} onChange={(e) => onValue(e.target.value)} placeholder="Qty" />
+          <select className="fv-ops__vd-unit" value={unit} onChange={(e) => onUnit(e.target.value)}>
+            {units.map((u) => <option key={u} value={u}>{u}</option>)}
+          </select>
+          <select className="fv-ops__vd-unit" value={option} onChange={(e) => onOption(e.target.value)} title="OO=Option On, CHOPT=Charterer's Option, ±%=Percentage tolerance, MIN/MAX=Min/Max range">
+            <option value="OO">OO</option>
+            <option value="CHOPT">CHOPT</option>
+            <option value="PERCENT">± %</option>
+            <option value="RANGE">MIN/MAX</option>
+          </select>
+        </span>
+        {option === 'PERCENT' && (
+          <div className="fv-ops__vd-field--range">
+            <span className="fv-ops__vd-range-label">Tolerance (± %)</span>
+            <span className="fv-ops__vd-unitwrap fv-ops__vd-unitwrap--pct">
+              <span className="fv-ops__vd-pct-pm">±</span>
+              <input className="fv-ops__vd-in" inputMode="decimal" placeholder="%" value={tolerancePct} onChange={(e) => onTolerancePct(e.target.value)} list="ops-qty-tolerance-pcts" />
+              <span className="fv-ops__vd-pct-suffix">%</span>
+            </span>
+            <datalist id="ops-qty-tolerance-pcts">
+              {OPS_QTY_TOLERANCE_PCTS.map((p) => <option key={p} value={p} />)}
+            </datalist>
+            {base > 0 && pct > 0 && (
+              <span className="fv-ops__vd-pct-range">{fmt(pctMin, 0)} – {fmt(pctMax, 0)} {unit}</span>
+            )}
+          </div>
+        )}
+        {option === 'RANGE' && (
+          <div className="fv-ops__vd-field--range">
+            <span className="fv-ops__vd-range-label">Tolerance Range</span>
+            <span className="fv-ops__vd-unitwrap fv-ops__vd-unitwrap--range">
+              <input className="fv-ops__vd-in" inputMode="decimal" placeholder="Min" value={min} onChange={(e) => onMin(e.target.value)} />
+              <span className="fv-ops__vd-range-to">to</span>
+              <input className="fv-ops__vd-in" inputMode="decimal" placeholder="Max" value={max} onChange={(e) => onMax(e.target.value)} />
+              <select className="fv-ops__vd-unit" value={unit} onChange={(e) => onUnit(e.target.value)}>
+                {units.map((u) => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </span>
+          </div>
+        )}
+      </div>
+    </label>
+  );
+}
+
 
 function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage: Voyage; status: string; onStatus: (v: string) => void }) {
   const cpdd = useCpdds()[voyage.id];
@@ -2169,7 +2859,7 @@ function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage
         <i className="fas fa-ship" aria-hidden="true" />
         <div>
           <span className="fv-ops__recap-sub fv-ops__recap-details">
-            {recap.voyageFixType} · {account} / CPDD {cpdd || recap.cpDate || '—'} - {portFrom} - {portTo}
+            {recap.voyageFixType} · {account} / CPDD {recap.cpDate || cpdd || '—'} - {portFrom} - {portTo}
           </span>
         </div>
       </div>
@@ -2188,9 +2878,132 @@ function RecapTopBar({ recap, voyage, status, onStatus }: { recap: Recap; voyage
 }
 
 export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage; status: string }) {
-  const set = (k: keyof Recap, v: string) => setRecap((r) => ({ ...r, [k]: v }));
+  // Voyage Details is the master entry point: editing a canonical field here also
+  // propagates to the same value stored in the nested laytime/bunker structures.
+  const set = (k: keyof Recap, v: string) => setRecap((r) => {
+    const next = { ...r, [k]: v } as Recap;
+    const fl = r.freightLaytime;
+    const flValid = fl && Array.isArray(fl.laytimes) && Array.isArray(fl.invoices);
+    if (flValid && (k === 'loadRate' || k === 'dischRate')) {
+      const op = k === 'loadRate' ? 'Load' : 'Discharge';
+      next.freightLaytime = { ...fl, laytimes: fl.laytimes.map((p) => (p.op === op ? { ...p, rate: String(num(v)) } : p)) };
+    } else if (flValid && (k === 'demDespatch' || k === 'despatchTerm')) {
+      const demRate = num(k === 'demDespatch' ? v : r.demDespatch);
+      const despRate = /half/i.test(k === 'despatchTerm' ? v : r.despatchTerm) ? demRate / 2 : demRate;
+      next.freightLaytime = { ...fl, laytimes: fl.laytimes.map((p) => ({ ...p, demurrageRate: String(demRate), despatchRate: String(despRate) })) };
+    } else if (flValid && k === 'finalQtyLoaded') {
+      const blQty = num(v);
+      const dischCount = Math.max(1, fl.laytimes.filter((p) => p.op === 'Discharge').length);
+      next.freightLaytime = { ...fl, laytimes: fl.laytimes.map((p) => ({ ...p, quantity: String(Math.round(p.op === 'Load' ? blQty : blQty / dischCount)) })) };
+    }
+    if (Array.isArray(r.bunkers) && (k === 'foPrice' || k === 'doPrice')) {
+      const synced = applyGlobalBunkerPrices(next, k === 'foPrice' ? v : next.foPrice, k === 'doPrice' ? v : next.doPrice);
+      next.bunkers = synced.bunkers;
+    }
+    return next;
+  });
+  // "Bunkers on Delivery" for a Main/Sub/extra fuel grade always reads straight from the Itinerary's
+  // starting-ROB fields (same single source of truth used by BunkersCard.bodDisplay) rather than this
+  // row's own stored `bod`, so this table can never drift out of sync with the Bunkers card or the
+  // ETA & ROB itinerary. Editing here still writes both, for backward-compat storage.
+  const ownersBodDisplay = (fuel: BunkerFuel): string => {
+    const field = startRobFieldFor(recap.etaPlan.perf, fuel.fuel);
+    if (!field) return fuel.bod;
+    if (field.kind === 'main') return recap.etaPlan.startRobVlsfo;
+    if (field.kind === 'sub') return recap.etaPlan.startRobMgo;
+    return recap.etaPlan.startRobExtra?.[field.extraId as string] ?? '';
+  };
   const extraLegs = recap.additionalVoyageLegs ?? [];
+  const normalizeRotationType = (value: string) => ({ Bunkering: 'Bunker', 'Bunker Port': 'Bunker', Redelivery: 'ReDelivery', 'Dry Dock': 'DryDock', Waiting: 'Idle / Waiting', Idle: 'Idle / Waiting', Other: 'Idle / Waiting', Port: 'Idle / Waiting' } as Record<string, string>)[value] || value;
+  const rotationType = (key: string, fallback: string) => normalizeRotationType(recap.portRotationTypes?.[key] || fallback);
+  const isRotationDeleted = (key: string) => recap.portRotationDeleted?.[key] === true;
+  const setRotationType = (key: string, value: string) => setRecap((r) => ({
+    ...r,
+    portRotationTypes: { ...(r.portRotationTypes ?? {}), [key]: value },
+    portRotationDeleted: { ...(r.portRotationDeleted ?? {}), [key]: false },
+  }));
+  useEffect(() => {
+    const stale = (recap.additionalVoyageLegs ?? []).filter((leg) => leg.id.startsWith('canonical-'));
+    if (!stale.length) return;
+    const keys = stale.map((leg) => leg.id.replace(/^canonical-/, ''));
+    setRecap((r) => ({
+      ...r,
+      additionalVoyageLegs: (r.additionalVoyageLegs ?? []).filter((leg) => !leg.id.startsWith('canonical-')),
+      portRotationDeleted: { ...(r.portRotationDeleted ?? {}), ...Object.fromEntries(keys.map((key) => [key, false])) },
+    }));
+  }, [recap.additionalVoyageLegs, setRecap]);
+  const deleteRotation = (key: string) => setRecap((r) => ({ ...r, portRotationDeleted: { ...(r.portRotationDeleted ?? {}), [key]: true } }));
+  const rotOverride = (key: string) => recap.portRotationOverrides?.[key] ?? {};
+  const setRotOverride = (key: string, patch: Partial<{ term: string; dateTime: string; rate: string; pda: string; notice: string; loi: string; loiStatus: string; qty: string; qtyUnit: string; blDate: string }>) =>
+    setRecap((r) => ({ ...r, portRotationOverrides: { ...(r.portRotationOverrides ?? {}), [key]: { ...(r.portRotationOverrides?.[key] ?? {}), ...patch } } }));
+  /**
+   * Renders a port-rotation row whose Type has been switched away from its native
+   * role (e.g. a Discharge row set to ReDelivery). Fields shown — and their
+   * storage (in `portRotationOverrides`) — follow the SELECTED type only, so the
+   * row's native fields (recap.dischRate, etc.) are left untouched and restored if
+   * the user switches the Type back.
+   */
+  const renderGenericRotationRow = (key: string, className: string, selectedType: string, port: string, onPort: (v: string) => void) => {
+    const ov = rotOverride(key);
+    const category = (selectedType === 'Delivery' || selectedType === 'ReDelivery') ? 'delivery'
+      : /bunker/i.test(selectedType) ? 'bunker'
+      : selectedType === 'Loading' ? 'loading'
+      : 'cargo';
+    const noticeDays = (ov.notice || '').split(/[^\d]+/).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n));
+    const setNoticeDays = (days: number[]) => setRotOverride(key, { notice: Array.from(new Set(days)).sort((a, b) => b - a).join('-') });
+    return (
+      <div className={className} key={key}>
+        <VdSelect label="Type" value={selectedType} onChange={(v) => (v === 'Delete leg' ? deleteRotation(key) : setRotationType(key, v))} options={OPS_PORT_ROTATION_TYPES} />
+        <VdPort label="Port" value={port} onChange={onPort} ports={worldPorts} accent />
+        <VdSelect
+          label={category === 'bunker' ? 'Supply Terms' : category === 'delivery' ? `${selectedType} Terms` : 'NOR'}
+          value={ov.term ?? ''}
+          onChange={(v) => setRotOverride(key, { term: v })}
+          options={category === 'bunker' ? ['By arrangement', 'Upon arrival', 'Upon berthing', 'Before departure'] : category === 'delivery' ? OPS_BERTH_TERMS : OPS_NOR_TENDER_TERMS}
+        />
+        {category === 'delivery' ? (
+          <VdDateTime label={`${selectedType} Date & Time UTC`} value={ov.dateTime ?? ''} onChange={(v) => setRotOverride(key, { dateTime: v })} accent />
+        ) : (
+          <div className="fv-ops__legs-stack">
+            <VdDateTime label={category === 'bunker' ? 'Bunker Supply Schedule' : 'Date & Time UTC'} value={ov.dateTime ?? ''} onChange={(v) => setRotOverride(key, { dateTime: v })} />
+            <VdField label={category === 'bunker' ? 'Supply Qty / Rate' : category === 'loading' ? 'Load Rate' : selectedType === 'Discharging' ? 'Disch. Rate' : 'Rate'} value={ov.rate ?? ''} onChange={(v) => setRotOverride(key, { rate: v })} num />
+            <VdField label={category === 'bunker' ? 'Bunker PDA' : 'PDA'} value={ov.pda ?? ''} onChange={(v) => setRotOverride(key, { pda: v })} num />
+          </div>
+        )}
+        <div className="fv-ops__legs-stack">
+          {category === 'delivery' ? (
+            <div className="fv-ops__legs-notice">
+              <span className="fv-ops__vd-field-label">Notice</span>
+              {noticeDays.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day notice`} onClick={() => setNoticeDays(noticeDays.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}
+              <select className="fv-ops__vd-unit" value="" aria-label={`Add ${selectedType.toLowerCase()} notice`} onChange={(e) => { if (e.target.value) { setNoticeDays([...noticeDays, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}>
+                <option value="">+</option>
+                {OPS_NOTICE_DAYS.filter((d) => !noticeDays.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}
+              </select>
+            </div>
+          ) : category === 'bunker' ? (
+            <>
+              <VdField label="Fuel Grade / Notice" value={ov.notice ?? ''} onChange={(v) => setRotOverride(key, { notice: v })} />
+              <VdField label="Barge Name" value={ov.loi ?? ''} onChange={(v) => setRotOverride(key, { loi: v })} />
+            </>
+          ) : category === 'loading' ? (
+            <>
+              <VdValueUnit className="fv-ops__bl-qty" label="Final Qty Loaded / BL" value={ov.qty ?? ''} onValue={(v) => setRotOverride(key, { qty: v })} unit={ov.qtyUnit || 'MT'} onUnit={(v) => setRotOverride(key, { qtyUnit: v })} units={OPS_QTY_UNITS} accent num />
+              <VdDate label="BL Issue Date" value={ov.blDate ?? ''} onChange={(v) => setRotOverride(key, { blDate: v })} />
+            </>
+          ) : (
+            <>
+              <VdSelect label="LOI / OBL" value={ov.loi ?? ''} onChange={(v) => setRotOverride(key, { loi: v })} options={OPS_LOI_OBL} />
+              {ov.loi === 'LOI' && <VdSelect label="LOI Status" value={ov.loiStatus ?? ''} onChange={(v) => setRotOverride(key, { loiStatus: v })} options={OPS_LOI_STATUS} />}
+            </>
+          )}
+          <button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove leg" onClick={() => deleteRotation(key)}><i className="fas fa-trash" aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  };
   const splitPorts = (value: string) => (value || '').split(/\s*(?:\+|\/|,|;)\s*/).map((port) => port.trim()).filter(Boolean);
+  
+  // Update port - changes stay in Operations module only, do NOT sync back to Chartering
   const updatePortPart = (field: 'loadPort' | 'dischargePort', index: number, value: string) => setRecap((r) => {
     const ports = splitPorts(r[field]);
     ports[index] = value;
@@ -2205,7 +3018,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
       ...(detailIndex === index ? patch : {}),
     })),
   }));
-  const addVoyageLeg = () => setRecap((r) => ({ ...r, additionalVoyageLegs: [...(r.additionalVoyageLegs ?? []), { id: `leg-${Date.now()}`, type: 'Port', port: '', term: '', rate: '', pda: '', dateTime: '', notice: '', loi: '', loiStatus: '' }] }));
+  const addVoyageLeg = () => setRecap((r) => ({ ...r, additionalVoyageLegs: [...(r.additionalVoyageLegs ?? []), { id: `leg-${Date.now()}`, type: 'Other', port: '', term: '', rate: '', pda: '', dateTime: '', notice: '', loi: '', loiStatus: '' }] }));
   const updateVoyageLeg = (id: string, patch: Partial<NonNullable<Recap['additionalVoyageLegs']>[number]>) => setRecap((r) => ({ ...r, additionalVoyageLegs: (r.additionalVoyageLegs ?? []).map((leg) => leg.id === id ? { ...leg, ...patch } : leg) }));
   const removeVoyageLeg = (id: string) => setRecap((r) => ({ ...r, additionalVoyageLegs: (r.additionalVoyageLegs ?? []).filter((leg) => leg.id !== id) }));
 
@@ -2246,11 +3059,28 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
     cpConsByFuel: { ...(current.cpConsByFuel ?? {}), [fuel]: value },
   }));
 
-  // Counterparty / service-provider options sourced from Settings → Account Details.
-  const clients = useMemo(() => loadClients(), []);
+  // Counterparty / service-provider options sourced from Settings → Account Details; reactive so a
+  // backend sync or an edit made elsewhere shows up here without needing a page reload.
+  const clients = useClients();
   const worldPorts = useWorldPorts();
-  // Vessel options sourced from Settings → Vessels Details (name + master email).
-  const vessels = useMemo(() => loadVessels(), []);
+  // Actual port DA from the Freight & Laytime PDA/FDA settlement, reflected read-only
+  // into the PDA fields below when a figure has been entered there.
+  const settlementDa = settlementPortDa(recap);
+  const pdaFieldFor = (port: string, fallbackKey: 'pdaLoadPort' | 'pdaDPort') => {
+    const amt = settlementDa.byPort.get((port || '').trim().toUpperCase());
+    if (settlementDa.hasData && amt != null && amt > 0) {
+      return (
+        <label className="fv-ops__vd-field">
+          <span>PDA / FDA</span>
+          <input className="fv-ops__vd-in" readOnly value={money(amt)} title="Actual from Freight & Laytime PDA/FDA settlement" />
+        </label>
+      );
+    }
+    return <VdField label="PDA" value={recap[fallbackKey]} onChange={(v) => set(fallbackKey, v)} />;
+  };
+  // Vessel options sourced from Settings → Vessels Details (name + master email); reactive so a
+  // backend sync or an edit made elsewhere shows up here without needing a page reload.
+  const vessels = useVessels();
   const vesselNames = useMemo(() => vessels.map((v) => v.name.trim()).filter(Boolean), [vessels]);
   const vesselEmails = useMemo(() => Array.from(new Set(vessels.map((v) => v.email.trim()).filter(Boolean))), [vessels]);
   const pickVessel = (name: string) => {
@@ -2305,6 +3135,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
       const next = [...vessels];
       next[idx] = { ...next[idx], email };
       saveVessels(next);
+      if (next[idx].id) void vesselsApi.update(next[idx].id, next[idx]).catch(() => { /* local fallback */ });
     }
   };
 
@@ -2320,6 +3151,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
       const next = [...all];
       next[idx] = { ...next[idx], email };
       saveClients(next);
+      if (next[idx].id) void clientsApi.update(next[idx].id, clientToUpdateDto(next[idx])).catch(() => { /* local fallback */ });
     }
   };
 
@@ -2331,12 +3163,12 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
     { label: 'Fixture No.', value: fixtureNo },
     { label: 'Vessel', value: recap.vesselName || voyage.vessel },
     { label: 'Voyage Type', value: recap.voyageFixType || '—' },
-    ...(showVoyageCargo ? [{ label: 'Cargo', value: recap.cargoName || '—' }] : []),
-    ...(showHireFields ? [{ label: 'Hire / Day', value: `${recap.hireCurrency} ${recap.hirePerDay}`.trim() || '—' }] : []),
+    ...(showVoyageCargo ? [{ label: 'Cargo', value: recap.cargoName || voyage.service || '—' }] : []),
+    ...(showHireFields ? [{ label: 'Hire / Day', value: `${recap.hireCurrency || 'USD'} ${recap.hirePerDay || voyage.costPerDay || voyage.price || ''}`.trim() || '—' }] : []),
     ...(showDualHire ? [{ label: 'Sub-Hire / Day', value: `${recap.charterHireCurrency} ${recap.charterHirePerDay}`.trim() || '—' }] : []),
-    ...(showFreightFields ? [{ label: 'Freight Rate', value: `${recap.freightCurrency} ${recap.freightPerMt} / ${recap.cargoQtyUnit}`.trim() || '—' }] : []),
-    ...(showDelivery ? [{ label: 'Delivery Port', value: recap.deliveryPort || '—' }] : []),
-    ...(showDelivery ? [{ label: 'Redelivery Port', value: recap.redeliveryPort || '—' }] : []),
+    ...(showFreightFields ? [{ label: 'Freight Rate', value: `${recap.freightCurrency || 'USD'} ${recap.freightPerMt || voyage.price || ''} / ${recap.cargoQtyUnit || 'MT'}`.trim() || '—' }] : []),
+    ...(showDelivery ? [{ label: 'Delivery Port', value: recap.deliveryPort || voyage.portFrom || '—' }] : []),
+    ...(showDelivery ? [{ label: 'Redelivery Port', value: recap.redeliveryPort || voyage.portTo || '—' }] : []),
   ];
 
   const milestones = buildMilestones(recap, voyage, status);
@@ -2367,24 +3199,46 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
             </label>
             <VdSelect label="Voyage / Fix Type" value={recap.voyageFixType} onChange={(v) => set('voyageFixType', v)} options={OPS_ALLOWED_VOYAGE_TYPES} />
             {showVoyageCargo && <VdCombo label="Cargo Name" value={recap.cargoName} onChange={(v) => set('cargoName', v)} options={OPS_COMMON_CARGOES} accent />}
-            {showVoyageCargo && <VdValueUnit label="CP Quantity" value={recap.cpQuantity} onValue={(v) => set('cpQuantity', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} />}
+            {showVoyageCargo && (
+              <VdCpQuantity
+                label="CP Quantity"
+                value={recap.cpQuantity}
+                onValue={(v) => set('cpQuantity', v)}
+                option={recap.cpQuantityOption}
+                onOption={(v) => set('cpQuantityOption', v)}
+                min={recap.cpQuantityMin ?? ''}
+                onMin={(v) => set('cpQuantityMin', v)}
+                max={recap.cpQuantityMax ?? ''}
+                onMax={(v) => set('cpQuantityMax', v)}
+                tolerancePct={recap.cpQuantityTolerancePct ?? ''}
+                onTolerancePct={(v) => set('cpQuantityTolerancePct', v)}
+                unit={recap.cargoQtyUnit}
+                onUnit={(v) => set('cargoQtyUnit', v)}
+                units={OPS_QTY_UNITS}
+              />
+            )}
+            <div style={{ gridColumn: '1 / -1', height: '1px' }}></div>
             {showVoyageCargo && <VdSelect label="Hold Cleaning" value={recap.holdCleaning} onChange={(v) => set('holdCleaning', v)} options={OPS_HOLD_CLEANING} />}
+            {!showVoyageCargo && <div></div>}
+            <VdField label="CP Speed (kn)" value={recap.cpSpeed} onChange={(v) => set('cpSpeed', v)} num />
+            {cpFuelTypes.map((fuel, index) => (
+              <VdField key={fuel} label={`CP Consumption - ${fuel} (MT/day)`} value={cpConsumptionFor(fuel, index)} onChange={(v) => setCpConsumption(fuel, v, index)} num />
+            ))}
+            <VdField label="No. of Holds" value={recap.holdCount || ''} onChange={(v) => set('holdCount', v)} num />
             {showDelivery && (
               <label className="fv-ops__vd-field">
                 <span>Voyage Duration (days)</span>
                 <input className="fv-ops__vd-in" readOnly value={fmt(daysBetween(parseDMY(recap.deliveryDateTime), parseDMY(recap.redeliveryDateTime)), 2)} title="Delivery → Redelivery" />
               </label>
             )}
-            <VdField label="CP Speed (kn)" value={recap.cpSpeed} onChange={(v) => set('cpSpeed', v)} num />
-            {cpFuelTypes.map((fuel, index) => (
-              <VdField key={fuel} label={`CP Consumption - ${fuel} (MT/day)`} value={cpConsumptionFor(fuel, index)} onChange={(v) => setCpConsumption(fuel, v, index)} num />
-            ))}
+            {!showDelivery && <div></div>}
           </div>
         </Card>
 
         <Card title="Vessel Profile" icon="fa-id-card" span2 className="fv-ops__vd-vessel-profile">
           <div className="fv-ops__vd-sub-head"><i className="fas fa-ruler-combined" aria-hidden="true" /> Vessel &amp; Engine Details</div>
           <div className="fv-ops__vd-fields">
+            <VdField label="IMO Number" value={recap.vesselImo || voyage.imo || ''} onChange={(v) => set('vesselImo', v)} />
             <VdField label="LOA (m)" value={recap.vesselLoa || voyage.loa || ''} onChange={(v) => set('vesselLoa', v)} num />
             <VdField label="Beam (m)" value={recap.vesselBeam || voyage.beam || ''} onChange={(v) => set('vesselBeam', v)} num />
             <VdField label="Default Draft — Ballast (m)" value={recap.draftBallast || ''} onChange={(v) => set('draftBallast', v)} num />
@@ -2413,7 +3267,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           <div className="fv-ops__vd-fields">
             <VdCombo label="Owners" value={recap.owners} onChange={(v) => set('owners', v)} options={ownerNames} accent />
             <VdCombo label="Owners Broker" value={recap.ownersBroker} onChange={(v) => set('ownersBroker', v)} options={brokerNames} />
-            <VdField label="CP Date" value={recap.cpDate} onChange={(v) => set('cpDate', v)} placeholder="dd-mm-yyyy" />
+            <VdDate label="CP Date" value={recap.cpDate} onChange={(v) => set('cpDate', v)} />
             {showHireFields && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.hirePerDay} onValue={(v) => set('hirePerDay', v)} unit={recap.hireCurrency} onUnit={(v) => set('hireCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
           {showHireFields && (
@@ -2425,9 +3279,9 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           </div>
           <div className="fv-ops__owners-bunker">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunker Settlement</div>
-            <table className="fv-ops__owners-bunker-table"><thead><tr><th>Fuel</th><th>BOD (MT)</th><th>BOR (MT)</th></tr></thead><tbody>
+            <table className="fv-ops__owners-bunker-table"><thead><tr><th>Fuel</th><th>BOD (MT)</th><th>BOR (MT)</th><th>CP Price (USD/MT)</th></tr></thead><tbody>
             {recap.bunkers.map((fuel, index) => (
-              <tr key={`${fuel.fuel}-${index}`}><td>{fuel.fuel || 'Fuel'}</td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.bod} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, bod: e.target.value } : line) }))} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.actualBor} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: e.target.value } : line) }))} /></td></tr>
+              <tr key={`${fuel.fuel}-${index}`}><td>{fuel.fuel || 'Fuel'}</td><td><input className="fv-ops__vd-in" inputMode="decimal" value={ownersBodDisplay(fuel)} onChange={(e) => { const v = e.target.value; setRecap((current) => { const bunkers = current.bunkers.map((line, lineIndex) => (lineIndex === index ? { ...line, bod: v } : line)); const field = startRobFieldFor(current.etaPlan.perf, fuel.fuel); if (!field) return { ...current, bunkers }; const etaPlan = field.kind === 'main' ? { ...current.etaPlan, startRobVlsfo: v } : field.kind === 'sub' ? { ...current.etaPlan, startRobMgo: v } : { ...current.etaPlan, startRobExtra: { ...(current.etaPlan.startRobExtra ?? {}), [field.extraId as string]: v } }; return { ...current, bunkers, etaPlan }; }); }} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.actualBor} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: e.target.value } : line) }))} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={cpPriceFor(recap, fuel.fuel)} onChange={(e) => setRecap((current) => applyCpPriceEdit(current, index, e.target.value))} /></td></tr>
             ))}
             </tbody></table>
           </div>
@@ -2455,7 +3309,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           <div className="fv-ops__vd-fields">
             <VdCombo label="Charterers" value={recap.charterers} onChange={(v) => set('charterers', v)} options={chartererNames} accent />
             <VdCombo label="Charterers Broker" value={recap.charterersBroker} onChange={(v) => set('charterersBroker', v)} options={brokerNames} />
-            <VdField label="Charterers CP Date" value={recap.charterersCpDate} onChange={(v) => set('charterersCpDate', v)} placeholder="dd-mm-yyyy" />
+            <VdDate label="Charterers CP Date" value={recap.charterersCpDate} onChange={(v) => set('charterersCpDate', v)} />
             {showDualHire && <VdValueUnit label="Hire Per Day (PDPR)" value={recap.charterHirePerDay} onValue={(v) => set('charterHirePerDay', v)} unit={recap.charterHireCurrency} onUnit={(v) => set('charterHireCurrency', v)} units={OPS_CURRENCIES} accent num />}
             {showFreightFields && <VdValueUnit label="Freight / MT" value={recap.freightPerMt} onValue={(v) => set('freightPerMt', v)} unit={recap.freightCurrency} onUnit={(v) => set('freightCurrency', v)} units={OPS_CURRENCIES} accent num />}
           </div>
@@ -2474,7 +3328,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
               <div className="fv-ops__vd-sub-head"><i className="fas fa-file-invoice-dollar" aria-hidden="true" /> Freight Payment</div>
               <div className="fv-ops__vd-inline fv-ops__vd-inline--tight">
                 <span>Within</span>
-                <select className="fv-ops__vd-unit" value={recap.freightPaymentDays} onChange={(e) => set('freightPaymentDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
+                <select className="fv-ops__vd-unit" value={String(Math.max(1, num(recap.freightPaymentDays) || 1))} onChange={(e) => set('freightPaymentDays', e.target.value)}>{OPS_BANKING_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}</select>
                 <select className="fv-ops__vd-unit fv-ops__vd-unit--wide" value={recap.freightPaymentBasis} onChange={(e) => set('freightPaymentBasis', e.target.value)}>{OPS_PAYMENT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
                 <span>after loading / BL</span>
               </div>
@@ -2503,13 +3357,45 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
           <div className="fv-ops__legs-table">
             <div className="fv-ops__legs-head"><span>Type</span><span>Port</span><span>Delivery / NOR Terms</span><span>Date &amp; Time UTC / Rate / PDA</span><span>Notice / LOI-OBL / Status</span></div>
             {showDelivery && <>
-              <div className="fv-ops__legs-row fv-ops__legs-row--delivery"><strong>Delivery</strong><VdPort label="Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} ports={worldPorts} accent /><VdSelect label="Term" value={recap.deliveryTerm} onChange={(v) => set('deliveryTerm', v)} options={OPS_BERTH_TERMS} /><VdDateTime label="Delivery Date & Time UTC" value={recap.deliveryDateTime} onChange={(v) => set('deliveryDateTime', v)} accent /><div className="fv-ops__legs-notice">{delNotices.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day delivery notice`} onClick={() => setDelNotices(delNotices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label="Add delivery notice" onChange={(e) => { if (e.target.value) { setDelNotices([...delNotices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">＋ Add</option>{OPS_NOTICE_DAYS.filter((d) => !delNotices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div></div>
-              <div className="fv-ops__legs-row fv-ops__legs-row--redelivery"><strong>Redelivery</strong><VdPort label="Port" value={recap.redeliveryPort} onChange={(v) => set('redeliveryPort', v)} ports={worldPorts} accent /><VdSelect label="Term" value={recap.redeliveryTerm} onChange={(v) => set('redeliveryTerm', v)} options={OPS_BERTH_TERMS} /><VdDateTime label="Redelivery Date & Time UTC" value={recap.redeliveryDateTime} onChange={(v) => set('redeliveryDateTime', v)} accent /><div className="fv-ops__legs-notice">{notices.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day notice`} onClick={() => setNotices(notices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label="Add redelivery notice" onChange={(e) => { if (e.target.value) { setNotices([...notices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">＋ Add</option>{OPS_NOTICE_DAYS.filter((d) => !notices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div></div>
+              {rotationType('delivery', 'Delivery') === 'Delivery' ? (
+                <div className="fv-ops__legs-row fv-ops__legs-row--delivery" style={{ display: isRotationDeleted('delivery') ? 'none' : undefined }}><VdSelect label="Type" value={rotationType('delivery', 'Delivery')} onChange={(v) => setRotationType('delivery', v)} options={OPS_PORT_ROTATION_TYPES} /><VdPort label="Port" value={recap.deliveryPort} onChange={(v) => set('deliveryPort', v)} ports={worldPorts} accent /><VdSelect label="Term" value={recap.deliveryTerm} onChange={(v) => set('deliveryTerm', v)} options={OPS_BERTH_TERMS} /><VdDateTime label="Delivery Date & Time UTC" value={recap.deliveryDateTime} onChange={(v) => set('deliveryDateTime', v)} accent /><div className="fv-ops__legs-notice">{delNotices.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day delivery notice`} onClick={() => setDelNotices(delNotices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label="Add delivery notice" onChange={(e) => { if (e.target.value) { setDelNotices([...delNotices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">+</option>{OPS_NOTICE_DAYS.filter((d) => !delNotices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div></div>
+              ) : renderGenericRotationRow('delivery', 'fv-ops__legs-row fv-ops__legs-row--delivery', rotationType('delivery', 'Delivery'), recap.deliveryPort, (v) => set('deliveryPort', v))}
+              {rotationType('redelivery', 'ReDelivery') === 'ReDelivery' ? (
+                <div className="fv-ops__legs-row fv-ops__legs-row--redelivery" style={{ display: isRotationDeleted('redelivery') ? 'none' : undefined }}><VdSelect label="Type" value={rotationType('redelivery', 'ReDelivery')} onChange={(v) => setRotationType('redelivery', v)} options={OPS_PORT_ROTATION_TYPES} /><VdPort label="Port" value={recap.redeliveryPort} onChange={(v) => set('redeliveryPort', v)} ports={worldPorts} accent /><VdSelect label="Term" value={recap.redeliveryTerm} onChange={(v) => set('redeliveryTerm', v)} options={OPS_BERTH_TERMS} /><div className="fv-ops__legs-stack"><VdDateTime label="Redelivery Date & Time UTC" value={recap.redeliveryDateTime} onChange={(v) => setRecap((r) => ({ ...r, redeliveryDateTime: v, redeliveryDateManual: true }))} accent title={recap.redeliveryDateManual ? 'Manually set \u2014 click Auto to resync from the ETA & ROB itinerary\'s final port arrival.' : 'Auto-synced from the ETA & ROB itinerary\'s final port arrival \u2014 edit here to override.'} />{recap.redeliveryDateManual && recap.etaPlan.legs.length > 0 && <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={() => setRecap((r) => ({ ...r, redeliveryDateManual: false }))} title="Resync from the ETA & ROB itinerary's final port arrival"><i className="fas fa-arrows-rotate" aria-hidden="true" /> Auto</button>}</div><div className="fv-ops__legs-notice">{notices.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day notice`} onClick={() => setNotices(notices.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label="Add redelivery notice" onChange={(e) => { if (e.target.value) { setNotices([...notices, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">+</option>{OPS_NOTICE_DAYS.filter((d) => !notices.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div></div>
+              ) : renderGenericRotationRow('redelivery', 'fv-ops__legs-row fv-ops__legs-row--redelivery', rotationType('redelivery', 'ReDelivery'), recap.redeliveryPort, (v) => set('redeliveryPort', v))}
             </>}
             {showLoadDischarge && <>
-              {splitPorts(recap.loadPort).map((port, index) => <div className="fv-ops__legs-row fv-ops__legs-row--loading" key={`load-${index}`}><strong>Loading</strong><VdPort label="Port" value={port} onChange={(v) => updatePortPart('loadPort', index, v)} ports={worldPorts} accent /><VdSelect label="NOR" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} /><div className="fv-ops__legs-stack"><VdField label="Load Rate" value={recap.loadRate} onChange={(v) => set('loadRate', v)} /><VdField label="PDA" value={recap.pdaLoadPort} onChange={(v) => set('pdaLoadPort', v)} /></div><div className="fv-ops__legs-stack"><VdValueUnit className="fv-ops__bl-qty" label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num /><VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} /></div></div>)}
-              {extraLegs.map((leg) => <div className="fv-ops__legs-row fv-ops__legs-row--manual" key={leg.id}><input className="fv-ops__vd-in" value={leg.type} aria-label="Leg type" onChange={(e) => updateVoyageLeg(leg.id, { type: e.target.value })} /><input className="fv-ops__vd-in" value={leg.port} aria-label="Leg port" onChange={(e) => updateVoyageLeg(leg.id, { port: e.target.value })} /><input className="fv-ops__vd-in" value={leg.term} aria-label="Leg term" onChange={(e) => updateVoyageLeg(leg.id, { term: e.target.value })} /><div className="fv-ops__legs-stack"><input className="fv-ops__vd-in" value={leg.dateTime} aria-label="Leg date and time" placeholder="UTC" onChange={(e) => updateVoyageLeg(leg.id, { dateTime: e.target.value })} /><input className="fv-ops__vd-in" value={leg.rate} aria-label="Leg rate" placeholder="Rate" onChange={(e) => updateVoyageLeg(leg.id, { rate: e.target.value })} /><input className="fv-ops__vd-in" value={leg.pda} aria-label="Leg PDA" placeholder="PDA" onChange={(e) => updateVoyageLeg(leg.id, { pda: e.target.value })} /></div><div className="fv-ops__legs-stack"><input className="fv-ops__vd-in" value={leg.notice} aria-label="Leg notice" placeholder="Notice" onChange={(e) => updateVoyageLeg(leg.id, { notice: e.target.value })} /><input className="fv-ops__vd-in" value={leg.loi} aria-label="Leg LOI or OBL" placeholder="LOI / OBL" onChange={(e) => updateVoyageLeg(leg.id, { loi: e.target.value })} /><input className="fv-ops__vd-in" value={leg.loiStatus} aria-label="Leg LOI status" placeholder="Status" onChange={(e) => updateVoyageLeg(leg.id, { loiStatus: e.target.value })} /><button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove leg" onClick={() => removeVoyageLeg(leg.id)}><i className="fas fa-trash" aria-hidden="true" /></button></div></div>)}
-              {splitPorts(recap.dischargePort).map((port, index) => <div className="fv-ops__legs-row fv-ops__legs-row--discharge" key={`discharge-${index}`}><strong>Discharge</strong><VdPort label="Port" value={port} onChange={(v) => updatePortPart('dischargePort', index, v)} ports={worldPorts} accent /><VdSelect label="NOR" value={recap.norAtDPort} onChange={(v) => set('norAtDPort', v)} options={OPS_NOR_TENDER_TERMS} /><div className="fv-ops__legs-stack"><VdField label="Disch. Rate" value={recap.dischRate} onChange={(v) => set('dischRate', v)} /><VdField label="PDA" value={recap.pdaDPort} onChange={(v) => set('pdaDPort', v)} /></div><div className="fv-ops__legs-stack"><VdSelect label="LOI / OBL" value={dischargeDetails[index]?.loiObl ?? recap.loiOblDPort} onChange={(v) => updateDischargeDetail(index, { loiObl: v })} options={OPS_LOI_OBL} />{(dischargeDetails[index]?.loiObl ?? recap.loiOblDPort) === 'LOI' && <VdSelect label="LOI Status" value={dischargeDetails[index]?.loiStatus ?? recap.loiStatus} onChange={(v) => updateDischargeDetail(index, { loiStatus: v })} options={OPS_LOI_STATUS} />}</div></div>)}
+              {splitPorts(recap.loadPort).map((port, index) => rotationType(`load-${index}`, 'Loading') === 'Loading' ? (
+                <div className="fv-ops__legs-row fv-ops__legs-row--loading" style={{ display: isRotationDeleted(`load-${index}`) ? 'none' : undefined }} key={`load-${index}`}><VdSelect label="Type" value={rotationType(`load-${index}`, 'Loading')} onChange={(v) => setRotationType(`load-${index}`, v)} options={OPS_PORT_ROTATION_TYPES} /><VdPort label="Port" value={port} onChange={(v) => updatePortPart('loadPort', index, v)} ports={worldPorts} accent /><VdSelect label="NOR" value={recap.norAtLoadPort} onChange={(v) => set('norAtLoadPort', v)} options={OPS_NOR_TENDER_TERMS} /><div className="fv-ops__legs-stack"><VdField label="Load Rate" value={recap.loadRate} onChange={(v) => set('loadRate', v)} />{pdaFieldFor(port, 'pdaLoadPort')}</div><div className="fv-ops__legs-stack"><VdValueUnit className="fv-ops__bl-qty" label="Final Qty Loaded / BL" value={recap.finalQtyLoaded} onValue={(v) => set('finalQtyLoaded', v)} unit={recap.cargoQtyUnit} onUnit={(v) => set('cargoQtyUnit', v)} units={OPS_QTY_UNITS} accent num /><VdDate label="BL Issue Date" value={recap.blIssueDate} onChange={(v) => set('blIssueDate', v)} /></div></div>
+              ) : renderGenericRotationRow(`load-${index}`, 'fv-ops__legs-row fv-ops__legs-row--loading', rotationType(`load-${index}`, 'Loading'), port, (v) => updatePortPart('loadPort', index, v)))}
+              {extraLegs.map((leg) => {
+                const rotationType = normalizeRotationType(leg.type);
+                const typeOptions = OPS_PORT_ROTATION_TYPES;
+                const cargoCall = /load|disch|part load|part discharg/i.test(rotationType);
+                const bunkerCall = /bunker/i.test(rotationType);
+                const deliveryCall = rotationType === 'Delivery' || rotationType === 'ReDelivery';
+                const legNoticeDays = (leg.notice || '').split(/[^\d]+/).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n));
+                const setLegNoticeDays = (days: number[]) => updateVoyageLeg(leg.id, { notice: Array.from(new Set(days)).sort((a, b) => b - a).join('-') });
+                return <div className="fv-ops__legs-row fv-ops__legs-row--manual" key={leg.id}>
+                  <VdSelect label="Type" value={rotationType} onChange={(v) => v === 'Delete leg' ? removeVoyageLeg(leg.id) : updateVoyageLeg(leg.id, { type: v })} options={typeOptions} />
+                  <VdPort label="Port" value={leg.port} onChange={(v) => updateVoyageLeg(leg.id, { port: v })} ports={worldPorts} accent />
+                  <VdSelect label={bunkerCall ? 'Supply Terms' : cargoCall ? 'NOR / Terms' : deliveryCall ? `${rotationType} Terms` : 'Terms'} value={leg.term} onChange={(v) => updateVoyageLeg(leg.id, { term: v })} options={bunkerCall ? ['By arrangement', 'Upon arrival', 'Upon berthing', 'Before departure'] : cargoCall ? OPS_NOR_TENDER_TERMS : OPS_BERTH_TERMS} />
+                  <div className="fv-ops__legs-stack">
+                    <VdDateTime label={bunkerCall ? 'Bunker Supply Schedule' : deliveryCall ? `${rotationType} Date & Time UTC` : 'Date & Time UTC'} value={leg.dateTime} onChange={(v) => updateVoyageLeg(leg.id, { dateTime: v })} />
+                    {!deliveryCall && <VdField label={bunkerCall ? 'Supply Qty / Rate' : 'Rate'} value={leg.rate} onChange={(v) => updateVoyageLeg(leg.id, { rate: v })} num />}
+                    {!deliveryCall && <VdField label={bunkerCall ? 'Bunker PDA' : 'PDA'} value={leg.pda} onChange={(v) => updateVoyageLeg(leg.id, { pda: v })} num />}
+                  </div>
+                  <div className="fv-ops__legs-stack">
+                    {deliveryCall ? <div className="fv-ops__legs-notice"><span className="fv-ops__vd-field-label">Notice</span>{legNoticeDays.map((d) => <span key={d} className="fv-ops__vd-chip">{d}<button type="button" aria-label={`Remove ${d} day notice`} onClick={() => setLegNoticeDays(legNoticeDays.filter((x) => x !== d))}><i className="fas fa-xmark" aria-hidden="true" /></button></span>)}<select className="fv-ops__vd-unit" value="" aria-label={`Add ${rotationType.toLowerCase()} notice`} onChange={(e) => { if (e.target.value) { setLegNoticeDays([...legNoticeDays, parseInt(e.target.value, 10)]); e.currentTarget.value = ''; } }}><option value="">+</option>{OPS_NOTICE_DAYS.filter((d) => !legNoticeDays.includes(d)).map((d) => <option key={d} value={d}>{d} days</option>)}</select></div> : <VdField label={bunkerCall ? 'Fuel Grade / Notice' : 'Notice'} value={leg.notice} onChange={(v) => updateVoyageLeg(leg.id, { notice: v })} />}
+                    {!deliveryCall && (bunkerCall ? <VdField label="Barge Name" value={leg.loi} onChange={(v) => updateVoyageLeg(leg.id, { loi: v })} /> : cargoCall ? <VdSelect label="LOI / OBL" value={leg.loi} onChange={(v) => updateVoyageLeg(leg.id, { loi: v })} options={OPS_LOI_OBL} /> : <VdField label="LOI / OBL" value={leg.loi} onChange={(v) => updateVoyageLeg(leg.id, { loi: v })} />)}
+                    {!deliveryCall && !bunkerCall && <VdField label="Status" value={leg.loiStatus} onChange={(v) => updateVoyageLeg(leg.id, { loiStatus: v })} />}
+                    <button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove leg" onClick={() => removeVoyageLeg(leg.id)}><i className="fas fa-trash" aria-hidden="true" /></button>
+                  </div>
+                </div>;
+              })}
+              {splitPorts(recap.dischargePort).map((port, index) => rotationType(`discharge-${index}`, 'Discharging') === 'Discharging' ? (
+                <div className="fv-ops__legs-row fv-ops__legs-row--discharge" key={`discharge-${index}`}><VdSelect label="Type" value={rotationType(`discharge-${index}`, 'Discharging')} onChange={(v) => setRotationType(`discharge-${index}`, v)} options={OPS_PORT_ROTATION_TYPES} /><VdPort label="Port" value={port} onChange={(v) => updatePortPart('dischargePort', index, v)} ports={worldPorts} accent /><VdSelect label="NOR" value={recap.norAtDPort} onChange={(v) => set('norAtDPort', v)} options={OPS_NOR_TENDER_TERMS} /><div className="fv-ops__legs-stack"><VdField label="Disch. Rate" value={recap.dischRate} onChange={(v) => set('dischRate', v)} />{pdaFieldFor(port, 'pdaDPort')}</div><div className="fv-ops__legs-stack"><VdSelect label="LOI / OBL" value={dischargeDetails[index]?.loiObl ?? recap.loiOblDPort} onChange={(v) => updateDischargeDetail(index, { loiObl: v })} options={OPS_LOI_OBL} />{(dischargeDetails[index]?.loiObl ?? recap.loiOblDPort) === 'LOI' && <VdSelect label="LOI Status" value={dischargeDetails[index]?.loiStatus ?? recap.loiStatus} onChange={(v) => updateDischargeDetail(index, { loiStatus: v })} options={OPS_LOI_STATUS} />}</div></div>
+              ) : renderGenericRotationRow(`discharge-${index}`, 'fv-ops__legs-row fv-ops__legs-row--discharge', rotationType(`discharge-${index}`, 'Discharging'), port, (v) => updatePortPart('dischargePort', index, v)))}
             </>}
           </div>
         </Card>}
@@ -2526,7 +3412,7 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
             <VdField label="Sanctions Clause" value={recap.sanctionsClause} onChange={(v) => set('sanctionsClause', v)} placeholder="Applicable sanctions wording" />
             {showHireFields && <VdField label="Ballast Bonus" value={recap.ballastBonus} onChange={(v) => set('ballastBonus', v)} num />}
             {showLaytimeTerms && <VdField label="Demurrage / Day" value={recap.demDespatch} onChange={(v) => set('demDespatch', v)} num />}
-            {showLaytimeTerms && <VdSelect label="Despatch" value={recap.despatchTerm} onChange={(v) => set('despatchTerm', v)} options={OPS_DESPATCH_TERMS} />}
+            {showLaytimeTerms && <VdSelect label="Despatch" value={recap.despatchTerm === 'Same as Demurrage' ? 'Dem = Des' : /half\s*despatch/i.test(recap.despatchTerm || '') ? 'Half Despatch' : recap.despatchTerm} onChange={(v) => set('despatchTerm', v)} options={OPS_DESPATCH_TERMS} />}
             <VdField label="WX Clause" value={recap.wxClause} onChange={(v) => set('wxClause', v)} />
             <VdField label="Hull Cleaning Clause" value={recap.hullCleaningClause} onChange={(v) => set('hullCleaningClause', v)} />
           </div>
@@ -2576,11 +3462,23 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
   );
 }
 
-/** Bunkering figures per fuel grade + a one-line bunker specs field. */
-function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>> }) {
+/** Bunkering figures per fuel grade, incl. a per-grade Specs field (one per active fuel type). */
+function BunkersCard({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; voyage: Voyage }) {
   const fuels = recap.bunkers;
-  const setFuel = (i: number, k: keyof BunkerFuel, v: string) => setRecap((r) => ({ ...r, bunkers: r.bunkers.map((f, idx) => (idx === i ? { ...f, [k]: v } : f)) }));
-  const addFuel = (grade = '') => setRecap((r) => ({ ...r, bunkers: [...r.bunkers, { fuel: grade, bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' }] }));
+  // Editing BOD here also updates the matching field in the ETA & ROB Itinerary's "Bunkers on
+  // Delivery" (Main/Sub/extra) — same physical figure, kept in sync in both directions.
+  const setFuel = (i: number, k: keyof BunkerFuel, v: string) => setRecap((r) => {
+    if (k === 'cpPrice') return applyCpPriceEdit(r, i, v);
+    const bunkers = r.bunkers.map((f, idx) => (idx === i ? { ...f, [k]: v } : f));
+    if (k !== 'bod') return { ...r, bunkers };
+    const field = startRobFieldFor(r.etaPlan.perf, r.bunkers[i].fuel);
+    if (!field) return { ...r, bunkers };
+    const etaPlan = field.kind === 'main' ? { ...r.etaPlan, startRobVlsfo: v }
+      : field.kind === 'sub' ? { ...r.etaPlan, startRobMgo: v }
+      : { ...r.etaPlan, startRobExtra: { ...(r.etaPlan.startRobExtra ?? {}), [field.extraId as string]: v } };
+    return { ...r, bunkers, etaPlan };
+  });
+  const addFuel = (grade = '') => setRecap((r) => ({ ...r, bunkers: [...r.bunkers, { fuel: grade, bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: '' }] }));
   const removeFuel = (i: number) => setRecap((r) => ({ ...r, bunkers: r.bunkers.filter((_, idx) => idx !== i) }));
   const margin = (v: string) => {
     const n = parseFloat((v || '').replace(/,/g, ''));
@@ -2588,6 +3486,7 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
     return <span className="fv-ops__bnk-margin"><span className="fv-ops__bnk-margin-up">+5% {(n * 1.05).toFixed(2)}</span><span className="fv-ops__bnk-margin-dn">−5% {(n * 0.95).toFixed(2)}</span></span>;
   };
   const rows: { key: keyof BunkerFuel; label: string }[] = [
+    { key: 'specs', label: 'Specs' },
     { key: 'bod', label: 'Bunkers on Delivery (MT)' },
     { key: 'expBor', label: 'Expected BOR (MT)' },
     { key: 'cpPrice', label: 'CP Price (USD/MT)' },
@@ -2598,12 +3497,142 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
   ];
   // Expected BOR mirrors the end ROB from the ETA & ROB itinerary (matched by fuel).
   const endRob = etaEndRob(recap.etaPlan);
+  const activeCons = resolveEtaConsumption(recap.etaPlan.perf);
+  const extraFuels = activeCons.extraFuels;
+  // "Bunkers on Delivery" for a Main/Sub/extra fuel grade is always read straight from the Itinerary's
+  // starting-ROB fields (the single source of truth) rather than this row's own stored `bod` — so this
+  // card can never show a value that's out of sync with the ETA & ROB itinerary or the Owners
+  // "Bunker Settlement" table, even for legacy voyages whose stored `bod` diverged before this field
+  // existed. Editing this field (via `setFuel`) still writes both, for backward-compat storage.
+  const bodDisplay = (fuel: string): string => {
+    const field = startRobFieldFor(recap.etaPlan.perf, fuel);
+    if (!field) return recap.bunkers.find((b) => b.fuel === fuel)?.bod ?? '';
+    if (field.kind === 'main') return recap.etaPlan.startRobVlsfo;
+    if (field.kind === 'sub') return recap.etaPlan.startRobMgo;
+    return recap.etaPlan.startRobExtra?.[field.extraId as string] ?? '';
+  };
   const derivedBor = (fuel: string): number | null => {
     const f = (fuel || '').trim().toUpperCase();
-    if (f === 'VLSFO') return endRob.v;
-    if (f === 'MGO' || f === 'LSMGO') return endRob.m;
+    if (f === activeCons.mainNormal.type.trim().toUpperCase()) return endRob.v;
+    if (f === activeCons.subNormal.type.trim().toUpperCase()) return endRob.m;
+    const match = extraFuels.find((x) => x.grade.trim().toUpperCase() === f);
+    if (match) return endRob.extra[match.id] ?? null;
     return null;
   };
+  // Expected BOR is flagged red once it strays outside ±5% of Bunkers on Delivery for that grade
+  // (the same ±5% band shown in the "5% Margin (BOD)" row below) — green while within range.
+  const borOutOfRange = (d: number, fuel: string): boolean => {
+    const bodVal = parseFloat((bodDisplay(fuel) || '').replace(/,/g, ''));
+    if (!Number.isFinite(bodVal) || bodVal === 0) return false;
+    return d < bodVal * 0.95 || d > bodVal * 1.05;
+  };
+  // "Booked Price" and "Actual Supply" link live to the Bunker module's requirement(s) for this
+  // voyage (matched by the shared `reference` — falls back to vessel name for older, untagged
+  // requirements) and fuel grade. With exactly one matching requirement the field is directly
+  // editable here and writes straight into that requirement (true two-way sync — the Bunker module
+  // sees the change immediately, same reactive store). With more than one (multiple bunkering calls
+  // for the same grade) the total/price is shown read-only, since there's no single record an edit
+  // here could unambiguously apply to; with none, the field is a plain, locally-stored value exactly
+  // as before (voyages that never went through the Bunker module aren't affected).
+  const bunkerReqs = useBunkerRequirements();
+  const voyageBunkerReqs = useMemo(
+    () => bunkerReqs.filter((r) => (r.reference || '').trim() === voyage.id || (!r.reference?.trim() && r.vessel.trim().toLowerCase() === recap.vesselName.trim().toLowerCase())),
+    [bunkerReqs, voyage.id, recap.vesselName],
+  );
+  const suppliedQtyFor = (r: BunkerRequirement, fuel: string): number | undefined => {
+    const f = fuel.trim().toUpperCase();
+    const line = r.fuelLines?.find((l) => l.fuel.trim().toUpperCase() === f);
+    if (line) return line.suppliedQty ?? ((r.fuelLines?.length ?? 0) === 1 ? r.suppliedQty : undefined);
+    return r.fuelType.trim().toUpperCase() === f ? r.suppliedQty : undefined;
+  };
+  // Actual quantity received per BDN (Bill of Delivery) — the Bunker module's post-arrival figure,
+  // used here purely for on-arrival reconciliation against what was nominated/planned.
+  const deliveredQtyFor = (r: BunkerRequirement, fuel: string): number | undefined => {
+    const f = fuel.trim().toUpperCase();
+    const line = r.fuelLines?.find((l) => l.fuel.trim().toUpperCase() === f);
+    if (line) return line.deliveredQty ?? ((r.fuelLines?.length ?? 0) === 1 ? r.deliveredQty : undefined);
+    return r.fuelType.trim().toUpperCase() === f ? r.deliveredQty : undefined;
+  };
+  const nominalQtyFor = (r: BunkerRequirement, fuel: string): number => {
+    const f = fuel.trim().toUpperCase();
+    const line = r.fuelLines?.find((l) => l.fuel.trim().toUpperCase() === f);
+    if (line) return line.quantity;
+    return r.fuelType.trim().toUpperCase() === f ? r.quantity : 0;
+  };
+  const bunkerLink = (fuel: string) => {
+    const f = fuel.trim().toUpperCase();
+    const matches = voyageBunkerReqs.filter((r) => (r.fuelLines?.length ? r.fuelLines.some((l) => l.fuel.trim().toUpperCase() === f) : r.fuelType.trim().toUpperCase() === f));
+    if (!matches.length) return null;
+    const supplyVals = matches.map((r) => suppliedQtyFor(r, fuel)).filter((v): v is number => v != null);
+    const totalSupplied = supplyVals.length ? supplyVals.reduce((a, b) => a + b, 0) : null;
+    const deliveredVals = matches.map((r) => deliveredQtyFor(r, fuel)).filter((v): v is number => v != null);
+    const totalDelivered = deliveredVals.length ? deliveredVals.reduce((a, b) => a + b, 0) : null;
+    const totalNominal = matches.reduce((sum, r) => sum + nominalQtyFor(r, fuel), 0);
+    const prices = matches.map((r) => r.pricePerMt).filter((v): v is number => v != null);
+    const uniquePrices = Array.from(new Set(prices));
+    return { matches, totalSupplied, totalDelivered, totalNominal, price: uniquePrices.length === 1 ? uniquePrices[0] : null, single: matches.length === 1 };
+  };
+  // Keep exactly one Bunkers row per fuel grade currently in use by the calculation (Main/Sub Normal
+  // & ECA types, plus any extra fuel types): collapses any already-duplicated rows for the same grade
+  // (merging in non-empty fields from the extras) and adds a row for any grade that has none yet.
+  // Never removes a row (even a blank one) — a row might be one the user just added via "+ Add fuel"
+  // and hasn't filled in yet, so pruning by "inactive + blank" would delete it before they can type.
+  const wantedKey = [activeCons.mainNormal.type, activeCons.subNormal.type, ...extraFuels.map((f) => f.grade)].filter(Boolean).join('|');
+  useEffect(() => {
+    const wantedRaw = wantedKey.split('|').filter(Boolean);
+    const seenWanted = new Set<string>();
+    const wanted: string[] = [];
+    wantedRaw.forEach((g) => {
+      const k = g.trim().toUpperCase();
+      if (!seenWanted.has(k)) { seenWanted.add(k); wanted.push(g); }
+    });
+    setRecap((r) => {
+      const byKey = new Map<string, number>();
+      const deduped: BunkerFuel[] = [];
+      r.bunkers.forEach((b) => {
+        const key = b.fuel.trim().toUpperCase();
+        const idx = key ? byKey.get(key) : undefined;
+        if (idx === undefined) {
+          if (key) byKey.set(key, deduped.length);
+          deduped.push({ ...b });
+        } else {
+          const kept = deduped[idx];
+          (Object.keys(b) as (keyof BunkerFuel)[]).forEach((k) => { if (!kept[k] && b[k]) kept[k] = b[k]; });
+        }
+      });
+      const existing = new Set(deduped.map((b) => b.fuel.trim().toUpperCase()));
+      const missing = wanted.filter((g) => !existing.has(g.trim().toUpperCase()));
+      if (!missing.length && deduped.length === r.bunkers.length) return r;
+      // Seed a newly-created row's BOD from the matching Itinerary starting-ROB field, if any, so an
+      // already-entered figure there isn't lost just because this is the row's first appearance here.
+      const bodFor = (grade: string): string => {
+        const field = startRobFieldFor(r.etaPlan.perf, grade);
+        if (!field) return '';
+        if (field.kind === 'main') return r.etaPlan.startRobVlsfo || '';
+        if (field.kind === 'sub') return r.etaPlan.startRobMgo || '';
+        return r.etaPlan.startRobExtra?.[field.extraId as string] || '';
+      };
+      const next = missing.length
+        ? [...deduped, ...missing.map((fuel) => ({ fuel, bod: bodFor(fuel), expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: '' }))]
+        : deduped;
+      return { ...r, bunkers: next };
+    });
+  }, [wantedKey, setRecap]);
+  // Cleanup of stale, fully-blank-or-zero rows that aren't part of the active calculation — e.g. an
+  // old "ULSFO" column left over after the ECA fuel type was switched away from it (a zero in a
+  // column nobody actively uses is never meaningful data, only a leftover default). Re-runs whenever
+  // the active grade set (`wantedKey`) changes, not on every render — so it can never race a row the
+  // user just added via "+ Add fuel" and hasn't typed into yet (that action doesn't change
+  // `wantedKey`); any row with a real non-zero entry is left alone regardless.
+  useEffect(() => {
+    const wantedRaw = wantedKey.split('|').filter(Boolean).map((g) => g.trim().toUpperCase());
+    const wantedSet = new Set(wantedRaw);
+    const isBlank = (b: BunkerFuel) => !num(b.bod) && !num(b.expBor) && !num(b.cpPrice) && !num(b.bookedPrice) && !num(b.masterReq) && !num(b.actualSupply) && !num(b.actualBor);
+    setRecap((r) => {
+      const kept = r.bunkers.filter((b) => wantedSet.has(b.fuel.trim().toUpperCase()) || !isBlank(b));
+      return kept.length === r.bunkers.length ? r : { ...r, bunkers: kept };
+    });
+  }, [wantedKey, setRecap]);
   return (
     <Card
       title="Bunkers"
@@ -2623,10 +3652,6 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
         </select>
       )}
     >
-      <label className="fv-ops__vd-field fv-ops__bnk-specs">
-        <span>Bunker Specs</span>
-        <input className="fv-ops__vd-in" value={recap.bunkerSpecs} placeholder="e.g. VLSFO max 0.50% S · MGO max 0.10% S" onChange={(e) => setRecap((r) => ({ ...r, bunkerSpecs: e.target.value }))} />
-      </label>
       <table className="fv-ops__bnk">
         <thead>
           <tr>
@@ -2651,7 +3676,69 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
                 if (row.key === 'expBor') {
                   const d = derivedBor(f.fuel);
                   if (d != null) {
-                    return <td key={i} className="fv-ops__bnk-derived" title="Linked to ETA & ROB itinerary end ROB">{fmt(d, 2)}</td>;
+                    const outOfRange = borOutOfRange(d, f.fuel);
+                    return (
+                      <td key={i} className={`fv-ops__bnk-derived${outOfRange ? ' fv-ops__bnk-derived--bad' : ''}`} title={`Linked to ETA & ROB itinerary end ROB${outOfRange ? ' — outside ±5% of Bunkers on Delivery' : ''}`}>
+                        {fmt(d, 2)}
+                      </td>
+                    );
+                  }
+                }
+                if (row.key === 'bod') {
+                  return <td key={i}><input className="fv-ops__vd-in" inputMode="decimal" value={bodDisplay(f.fuel)} onChange={(e) => setFuel(i, 'bod', e.target.value)} /></td>;
+                }
+                if (row.key === 'cpPrice') {
+                  return <td key={i}><input className="fv-ops__vd-in" inputMode="decimal" value={cpPriceFor(recap, f.fuel)} onChange={(e) => setFuel(i, 'cpPrice', e.target.value)} /></td>;
+                }
+                if (row.key === 'specs') {
+                  return <td key={i} className="fv-ops__bnk-specscell"><input className="fv-ops__vd-in fv-ops__bnk-specs-in" placeholder={`e.g. Max 0.50% S`} value={f.specs} onChange={(e) => setFuel(i, 'specs', e.target.value)} /></td>;
+                }
+                if (row.key === 'bookedPrice' || row.key === 'actualSupply') {
+                  const link = bunkerLink(f.fuel);
+                  if (link) {
+                    const linkedVal = row.key === 'bookedPrice' ? link.price : link.totalSupplied;
+                    if (link.single) {
+                      return (
+                        <td key={i}>
+                          <input
+                            className="fv-ops__vd-in"
+                            inputMode="decimal"
+                            title="Linked to the Bunker module requirement"
+                            value={linkedVal != null ? String(linkedVal) : ''}
+                            onChange={(e) => updateBunkerRequirement(
+                              link.matches[0].id,
+                              row.key === 'bookedPrice' ? { pricePerMt: num(e.target.value) } : { suppliedQty: num(e.target.value) },
+                              { user: 'Operations', role: 'Operations', action: `Updated ${row.label} from Operations` },
+                            )}
+                          />
+                        </td>
+                      );
+                    }
+                    // Multiple bunker-port calls for this grade — show + edit each requirement's own
+                    // figure individually (keyed by its own bunker port) instead of an ambiguous
+                    // read-only "Multiple", so it's always clear which supply belongs to which call.
+                    return (
+                      <td key={i} className="fv-ops__bnk-multi" title={`${link.matches.length} Bunker module requirements for this grade`}>
+                        {link.matches.map((m) => {
+                          const mVal = row.key === 'bookedPrice' ? m.pricePerMt : suppliedQtyFor(m, f.fuel);
+                          return (
+                            <div key={m.id} className="fv-ops__bnk-multi-row">
+                              <span className="fv-ops__bnk-multi-port" title={`${m.id} \u2014 ${m.bunkerPort}`}>{m.bunkerPort || m.id}</span>
+                              <input
+                                className="fv-ops__vd-in fv-ops__bnk-multi-in"
+                                inputMode="decimal"
+                                value={mVal != null ? String(mVal) : ''}
+                                onChange={(e) => updateBunkerRequirement(
+                                  m.id,
+                                  row.key === 'bookedPrice' ? { pricePerMt: num(e.target.value) } : { suppliedQty: num(e.target.value) },
+                                  { user: 'Operations', role: 'Operations', action: `Updated ${row.label} from Operations (${m.bunkerPort})` },
+                                )}
+                              />
+                            </div>
+                          );
+                        })}
+                      </td>
+                    );
                   }
                 }
                 return <td key={i}><input className="fv-ops__vd-in" inputMode="decimal" value={f[row.key]} onChange={(e) => setFuel(i, row.key, e.target.value)} /></td>;
@@ -2659,14 +3746,36 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
             </tr>
           ))}
           <tr className="fv-ops__bnk-marginrow">
+            <th scope="row">Delivered (BDN) (MT)</th>
+            {fuels.map((f, i) => {
+              const link = bunkerLink(f.fuel);
+              if (!link || link.totalDelivered == null) return <td key={i} className="fv-ops__bnk-calc">—</td>;
+              // Flags a reconciliation discrepancy the moment the Bunker module's actual BDN figure
+              // diverges from what Operations nominated/planned for this grade — previously nothing
+              // surfaced this mismatch back in Operations at all.
+              const discrepant = link.totalNominal > 0 && Math.abs(link.totalDelivered - link.totalNominal) > link.totalNominal * 0.01;
+              return (
+                <td
+                  key={i}
+                  className={`fv-ops__bnk-derived${discrepant ? ' fv-ops__bnk-derived--bad' : ''}`}
+                  title={discrepant
+                    ? `Delivered ${fmt(link.totalDelivered, 2)} MT vs ${fmt(link.totalNominal, 2)} MT nominated — reconcile with Bunker module (${link.matches.map((m) => m.id).join(', ')})`
+                    : `Delivered ${fmt(link.totalDelivered, 2)} MT per BDN — matches the nominated quantity`}
+                >
+                  {fmt(link.totalDelivered, 2)}
+                </td>
+              );
+            })}
+          </tr>
+          <tr className="fv-ops__bnk-marginrow">
             <th scope="row">5% Margin (BOD)</th>
             {fuels.map((f, i) => (
-              <td key={i} className="fv-ops__bnk-calc">{margin(f.bod)}</td>
+              <td key={i} className="fv-ops__bnk-calc">{margin(bodDisplay(f.fuel))}</td>
             ))}
           </tr>
         </tbody>
       </table>
-      <p className="fv-ops__hint"><i className="fas fa-link" aria-hidden="true" /> Expected BOR (VLSFO / MGO) is linked to the end ROB projected in the ETA &amp; ROB itinerary.</p>
+      <p className="fv-ops__hint"><i className="fas fa-link" aria-hidden="true" /> Expected BOR (VLSFO / MGO) is linked to the end ROB projected in the ETA &amp; ROB itinerary. Booked Price / Actual Supply link live to the matching Bunker module requirement(s) for this voyage — with multiple bunkering calls for the same grade, each is shown and editable individually by its own bunker port. Delivered (BDN) is flagged red if it differs from the nominated quantity by more than 1%, so an on-arrival short/over supply is never silently missed.</p>
       <datalist id="ops-fuel-grades">{OPS_FUEL_GRADES.map((g) => <option key={g} value={g} />)}</datalist>
     </Card>
   );
@@ -2674,23 +3783,91 @@ function BunkersCard({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<Set
 
 /** Build the voyage milestone timeline, marking the active stage from the voyage status. */
 function buildMilestones(recap: Recap, voyage: Voyage, statusOverride?: string): { label: string; date: string; icon: string; state: 'done' | 'current' | 'todo' }[] {
-  const stages = [
-    { label: 'Fixed', date: recap.cpDate || '—', icon: 'fa-file-signature' },
-    { label: 'NOR', date: recap.norAtLoadPort || '—', icon: 'fa-flag' },
-    { label: 'ETD', date: voyage.etdDisplay || recap.deliveryDateTime || '—', icon: 'fa-arrow-up-from-bracket' },
-    { label: 'At Sea', date: voyage.lastNoon || '—', icon: 'fa-water' },
-    { label: 'ETA', date: voyage.eta || '—', icon: 'fa-anchor' },
-    { label: 'Discharge', date: recap.redeliveryDateTime || '—', icon: 'fa-arrow-down-to-bracket' },
-    { label: 'Completion', date: recap.redeliveryDateTime || '—', icon: 'fa-circle-check' },
-  ];
-  const status = (statusOverride || voyage.status || '').toLowerCase();
-  let active = 3; // default: At Sea
-  if (status.includes('load')) active = 1;
-  else if (status.includes('port') || status.includes('berth')) active = 2;
-  else if (status.includes('sea') || status.includes('voyage') || status.includes('transit')) active = 3;
-  else if (status.includes('disch')) active = 5;
-  else if (status.includes('complete') || status.includes('redeliver')) active = 6;
-  return stages.map((s, i) => ({ ...s, state: i < active ? 'done' : i === active ? 'current' : 'todo' }));
+  const norm = (s: string) => (s || '').trim().toLowerCase();
+  const legs = recap.etaPlan?.legs ?? [];
+  const computed = projectEtaLegs(recap.etaPlan);
+  const laytimes = recap.freightLaytime?.laytimes ?? [];
+
+  // Planned arrival at a port from the itinerary (first port leg whose destination matches).
+  const itinArrival = (portName: string): Date | null => {
+    for (let i = 0; i < legs.length; i += 1) {
+      if (legs[i].kind === 'port' && norm(legs[i].to) === norm(portName)) return computed[i]?.arr ?? null;
+    }
+    return null;
+  };
+  // Laytime record for a port (actual NOR / commenced / completed).
+  const layFor = (portName: string, op: 'Load' | 'Discharge') =>
+    laytimes.find((p) => p.op === op && norm(p.name) === norm(portName)) ?? laytimes.find((p) => p.op === op);
+
+  const dOnly = (d: Date | null): string => (d ? fmtShortDate(d) : '');
+  type Node = { label: string; date: string; icon: string; port?: string; when: Date | null; arrived: boolean };
+  const nodes: Node[] = [];
+
+  nodes.push({ label: 'Fixed', icon: 'fa-file-signature', date: dOnly(parseDMY(recap.cpDate)) || (recap.cpDate || '—'), port: undefined, when: parseDMY(recap.cpDate), arrived: !!recap.cpDate });
+  const deliveryDt = parseDMY(recap.deliveryDateTime);
+  nodes.push({ label: 'Delivery', icon: 'fa-ship', date: dOnly(deliveryDt) || '—', port: recap.deliveryPort, when: deliveryDt, arrived: !!deliveryDt });
+
+  splitPorts(recap.loadPort).forEach((p) => {
+    const lay = layFor(p, 'Load');
+    const actual = parseDMY(lay?.commenced || '') || parseDMY(lay?.norAccepted || '') || parseDMY(lay?.norTendered || '');
+    const when = actual || itinArrival(p);
+    nodes.push({ label: `Load — ${p}`, icon: 'fa-arrow-down-to-bracket', date: dOnly(when) || '—', port: p, when, arrived: !!parseDMY(lay?.completed || '') || !!actual });
+  });
+  splitPorts(recap.dischargePort).forEach((p) => {
+    const lay = layFor(p, 'Discharge');
+    const actual = parseDMY(lay?.commenced || '') || parseDMY(lay?.norAccepted || '') || parseDMY(lay?.norTendered || '');
+    const when = actual || itinArrival(p);
+    nodes.push({ label: `Discharge — ${p}`, icon: 'fa-arrow-up-from-bracket', date: dOnly(when) || '—', port: p, when, arrived: !!parseDMY(lay?.completed || '') || !!actual });
+  });
+
+  const redeliveryDt = parseDMY(recap.redeliveryDateTime);
+  nodes.push({ label: 'Completion', icon: 'fa-circle-check', date: dOnly(redeliveryDt) || '—', port: recap.redeliveryPort, when: redeliveryDt, arrived: false });
+
+  // Current position from the latest vessel report (its position + whether at sea / in port).
+  const reports = recap.vesselReports ?? [];
+  const latest = reports.reduce<{ r: VesselReport; t: number } | null>((best, r) => {
+    const t = (parseDMY(r.dtUtc) || parseDMY(r.dtLt))?.getTime();
+    if (t == null || Number.isNaN(t)) return best;
+    return !best || t > best.t ? { r, t } : best;
+  }, null);
+
+  let active = -1;
+  if (latest) {
+    const pos = norm(latest.r.position);
+    const atSea = /cosp|departure|sea/i.test(latest.r.type);
+    const idx = pos ? nodes.findIndex((n) => n.port && (pos.includes(norm(n.port)) || norm(n.port).includes(pos))) : -1;
+    if (idx >= 0) {
+      // At a known port: in-port/arrival reports mark that node current; departure/at-sea advance to next.
+      active = atSea ? idx + 1 : idx;
+    } else {
+      // At sea between ports: the last node whose date has passed is done, the next is current.
+      let lastPassed = -1;
+      nodes.forEach((n, i) => { if (n.when && n.when.getTime() <= latest.t) lastPassed = i; });
+      active = lastPassed + 1;
+    }
+  } else {
+    // No reports yet: fall back to today's date (else the coarse voyage status keyword).
+    const now = Date.now();
+    let lastPassed = -1;
+    nodes.forEach((n, i) => { if (n.when && n.when.getTime() <= now) lastPassed = i; });
+    if (lastPassed >= 0) active = lastPassed;
+    else {
+      const status = (statusOverride || voyage.status || '').toLowerCase();
+      active = 1;
+      if (status.includes('load')) active = 2;
+      else if (status.includes('disch')) active = nodes.length - 2;
+      else if (status.includes('complete') || status.includes('redeliver')) active = nodes.length - 1;
+      else if (status.includes('sea') || status.includes('voyage') || status.includes('transit')) active = Math.min(nodes.length - 1, 2);
+    }
+  }
+  active = Math.max(0, Math.min(active, nodes.length - 1));
+
+  return nodes.map((n, i) => ({
+    label: n.label,
+    date: n.date,
+    icon: n.icon,
+    state: i < active ? 'done' : i === active ? 'current' : 'todo',
+  }));
 }
 
 /* ------------------------------------------------------------ Live P&L tab */
@@ -2718,17 +3895,27 @@ function PnlTab({ recap, setRecap, pnl, estPnl }: { recap: Recap; setRecap: Disp
   ].filter(Boolean);
   const performanceSource = actualReportData ? `Vessel Reports (${actualReportCount} noon/EOSP report${actualReportCount === 1 ? '' : 's'})` : 'Voyage Details fallback fields';
 
+  // Fix type decides whether hire is our income (charter-out) or expense (charter-in).
+  const [inType = '', outType = ''] = (recap.voyageFixType || '').toUpperCase().split('-');
+  const owns = inType === 'OWN';
+  const chartersIn = inType === 'TCIN' || inType === 'TCTIN';
+  const chartersOut = outType === 'TCOUT' || outType === 'TCTOUT';
+  const performsVoyage = outType === 'VOUT';
+
   const revenueItems: PnlItem[] = [
-    { label: 'Freight', est: estPnl.freight, act: pnl.freight, kind: 'income' },
+    ...(performsVoyage ? [{ label: 'Freight', est: estPnl.freight, act: pnl.freight, kind: 'income' as const }] : []),
+    ...(chartersOut ? [{ label: owns ? 'Hire Income (Owned Vessel)' : 'Hire Income (Sub-Charter)', est: estPnl.hireOutIncome, act: pnl.hireOutIncome, kind: 'income' as const }] : []),
     { label: 'Demurrage / Despatch', est: estPnl.demDespatch, act: pnl.demDespatch, kind: 'income' },
     { label: 'Misc Income', est: estPnl.miscIncome, act: pnl.miscIncome, kind: 'income' },
   ];
   const costItems: PnlItem[] = [
-    { label: 'Hire Cost', est: estPnl.totalHire, act: pnl.totalHire, kind: 'cost' },
+    ...(chartersIn ? [{ label: 'Hire Cost (Charter In)', est: estPnl.totalHire, act: pnl.totalHire, kind: 'cost' as const }] : []),
+    { label: 'Ballast Bonus', est: estPnl.ballastBonus, act: pnl.ballastBonus, kind: 'cost' },
     { label: 'Bunker Cost', est: estPnl.bunkerCost, act: pnl.bunkerCost, kind: 'cost' },
     { label: 'Port DA (Load + Disch)', est: estPnl.portCost, act: pnl.portCost, kind: 'cost' },
     { label: 'C.V.E.', est: estPnl.cveTotal, act: pnl.cveTotal, kind: 'cost' },
     { label: 'ILOHC', est: estPnl.ilohc, act: pnl.ilohc, kind: 'cost' },
+    { label: 'EUA / Carbon', est: estPnl.carbonCost, act: pnl.carbonCost, kind: 'cost' },
     { label: 'Other Cost', est: estPnl.otherCost, act: pnl.otherCost, kind: 'cost' },
   ];
   const resultItems: PnlItem[] = [
@@ -2777,10 +3964,12 @@ function PnlTab({ recap, setRecap, pnl, estPnl }: { recap: Recap; setRecap: Disp
   // Expenses breakdown (actual) — dependency-free stacked bar + legend.
   const expSegments = [
     { label: 'Hire', val: pnl.totalHire, color: '#3b82f6' },
+    { label: 'Ballast Bonus', val: pnl.ballastBonus, color: '#6366f1' },
     { label: 'Bunkers', val: pnl.bunkerCost, color: '#ef4444' },
     { label: 'Port DA', val: pnl.portCost, color: '#8b5cf6' },
     { label: 'C.V.E.', val: pnl.cveTotal, color: '#22c55e' },
     { label: 'ILOHC', val: pnl.ilohc, color: '#f59e0b' },
+    { label: 'EUA / Carbon', val: pnl.carbonCost, color: '#0ea5e9' },
     { label: 'Other', val: pnl.otherCost, color: '#14b8a6' },
   ].filter((e) => e.val > 0);
   const expTotal = expSegments.reduce((s, e) => s + e.val, 0) || 1;
@@ -2901,11 +4090,13 @@ function PnlTab({ recap, setRecap, pnl, estPnl }: { recap: Recap; setRecap: Disp
                 <div><b>{reportProblems.length > 0 ? 'Speed and consumption alert' : 'Speed and consumption source'}</b><span>{reportProblems.length > 0 ? reportProblems.join(' ') : `${performanceSource} — Live P&L uses these reported values.`}</span>{actualReportData && <small>Average speed: {fmt(actualReportData.speed, 2)} kn · FO: {fmt(actualReportData.foCons, 2)} MT · DO: {fmt(actualReportData.doCons, 2)} MT</small>}{!actualReportData && <small>Open Vessel Reports and save vessel-reported speed/consumption to make the P&amp;L actual.</small>}</div>
               </div>
               <div className="fv-ops__pnl-source-list">
-                <div><span>Revenue</span><b>Voyage Details: Freight / MT × Final Qty Loaded / BL</b></div>
+                <div><span>Revenue</span><b>Voyage Details: Freight / MT × Final Qty Loaded / BL, net of address commission</b></div>
                 <div><span>Demurrage / Despatch</span><b>Voyage Details / Freight &amp; Laytime</b></div>
-                <div><span>Hire</span><b>Voyage Details: Owners hire per day and commercial terms</b></div>
-                <div><span>Port DA</span><b>Voyage Details: Load and Discharge PDA fields</b></div>
-                <div><span>Bunker prices</span><b>Voyage Details: FO and DO price per MT</b></div>
+                <div><span>Hire</span><b>Expense when chartered in (TCIN/TCTIN); income when chartered out (TCOUT/TCTOUT) — from fix type, less off-hire</b></div>
+                <div><span>Ballast Bonus</span><b>Voyage Details: Commercial Terms</b></div>
+                <div><span>Port DA</span><b>Freight &amp; Laytime PDA/FDA settlement (fallback: Voyage Details PDA fields)</b></div>
+                <div><span>Bunker prices</span><b>Voyage Details: FO and DO price per MT (ECA portion priced at ULSFO); extra fuel types priced from their matching Bunkers row</b></div>
+                <div><span>EUA / Carbon</span><b>Emissions (EUA): phased EUAs × latest ledger price</b></div>
                 <div><span>CVE / ILOHC / Other</span><b>Voyage Details: Commercial Terms</b></div>
               </div>
             </div>
@@ -2924,8 +4115,200 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
   const [bunkerOpen, setBunkerOpen] = useState(false);
   const setPlan = (patch: Partial<EtaPlan>) => setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, ...patch } }));
   const setPerf = (patch: Partial<EtaPerf>) => setPlan({ perf: { ...plan.perf, ...patch } });
-  const setMain = (which: 'mainNormal' | 'mainEca', patch: Partial<EtaMainCons>) => setPerf({ [which]: { ...plan.perf[which], ...patch } } as Partial<EtaPerf>);
-  const setSub = (which: 'subNormal' | 'subEca', patch: Partial<EtaSubCons>) => setPerf({ [which]: { ...plan.perf[which], ...patch } } as Partial<EtaPerf>);
+  // Changing the default weather margin pushes it onto every sea leg's WM %; each row can still be
+  // manually edited afterwards (individual leg edits go through setLeg and are not touched by this).
+  const setWeatherMargin = (v: string) =>
+    setRecap((r) => ({
+      ...r,
+      etaPlan: {
+        ...r.etaPlan,
+        weatherMargin: v,
+        legs: r.etaPlan.legs.map((l) => (l.kind === 'sea' ? { ...l, wf: v } : l)),
+      },
+    }));
+  // Backfill any sea leg whose WM % was never set (e.g. legacy/imported legs) with the current default.
+  useEffect(() => {
+    if (!plan.weatherMargin) return;
+    const needsFill = plan.legs.some((l) => l.kind === 'sea' && !l.wf);
+    if (!needsFill) return;
+    setRecap((r) => ({
+      ...r,
+      etaPlan: {
+        ...r.etaPlan,
+        legs: r.etaPlan.legs.map((l) => (l.kind === 'sea' && !l.wf ? { ...l, wf: r.etaPlan.weatherMargin } : l)),
+      },
+    }));
+  }, [plan.weatherMargin, plan.legs, setRecap]);
+  // Auto-derive each sea/port leg's TZ from its "To" port; recomputes whenever To changes or
+  // (re)hydrates with a stale value, but is skipped once the TZ has been manually edited
+  // (`tzAuto === false`) — a subsequent To edit re-enables auto-detection for that leg.
+  const worldPorts = useWorldPorts();
+  useEffect(() => {
+    if (!worldPorts.length) return;
+    const patches: Record<number, string> = {};
+    plan.legs.forEach((l, i) => {
+      if (!l.to || l.tzAuto === false) return;
+      const port = matchWorldPort(l.to, worldPorts);
+      if (!port) return;
+      const tz = tzFromLon(port.lon);
+      if (tz !== l.tz) patches[i] = tz;
+    });
+    if (!Object.keys(patches).length) return;
+    setRecap((r) => ({
+      ...r,
+      etaPlan: { ...r.etaPlan, legs: r.etaPlan.legs.map((l, i) => (patches[i] !== undefined ? { ...l, tz: patches[i], tzAuto: true } : l)) },
+    }));
+  }, [worldPorts, plan.legs, setRecap]);
+  // When the Normal and ECA fuel TYPE differ for Main (FO) or Sub (DO), the ECA-zone consumption
+  // can't be blended into the Normal-type's column (different tank/grade) — auto-manage a hidden
+  // `auto-eca-main`/`auto-eca-sub` extra-fuel entry (Normal rate 0, ECA rate = the ECA row's rate)
+  // so it gets its own tracked Cons/Used/Supply/Est ROB columns and Bunkers ROB under its own grade.
+  // Uses `ecaFuelRouting` (same routing `blendedLegCons` uses) so an orphan ECA share that's really
+  // the SAME tank as the Main/Sub column, or the SAME grade as the other slot's ECA share, never gets
+  // its own duplicate-looking column — it's folded/merged instead. Also skipped entirely when a
+  // user-added extra fuel already uses that exact grade name.
+  useEffect(() => {
+    const cons = resolveEtaConsumption(plan.perf);
+    const zero = (type: string): EtaMainCons => ({ type, ballast: '0', laden: '0', idle: '0', work: '0' });
+    const fromSub = (eca: EtaSubCons): EtaMainCons => ({ type: eca.type, ballast: eca.sea, laden: eca.sea, idle: eca.idle, work: eca.work });
+    const makeAuto = (id: string, grade: string, normal: EtaMainCons, eca: EtaMainCons): EtaExtraFuel => ({ id, grade, fullNormal: normal, fullEca: eca, ecoNormal: normal, ecoEca: eca, customNormal: normal, customEca: eca });
+    const existing = plan.perf.extraFuels ?? [];
+    const userFuels = existing.filter((f) => !f.id.startsWith('auto-eca-'));
+    const hasUserGrade = (grade: string) => userFuels.some((f) => f.grade.trim().toUpperCase() === grade.trim().toUpperCase());
+    const route = ecaFuelRouting(cons);
+    let wantMain: EtaExtraFuel | null = null;
+    let wantSub: EtaExtraFuel | null = null;
+    if (route.mergeEca) {
+      if (!hasUserGrade(cons.mainEca.type)) wantMain = makeAuto('auto-eca-main', cons.mainEca.type, zero(cons.mainEca.type), cons.mainEca);
+    } else {
+      if (route.needsAutoMain && !hasUserGrade(cons.mainEca.type)) wantMain = makeAuto('auto-eca-main', cons.mainEca.type, zero(cons.mainEca.type), cons.mainEca);
+      if (route.needsAutoSub && !hasUserGrade(cons.subEca.type)) wantSub = makeAuto('auto-eca-sub', cons.subEca.type, zero(cons.subEca.type), fromSub(cons.subEca));
+    }
+    const curMain = existing.find((f) => f.id === 'auto-eca-main') ?? null;
+    const curSub = existing.find((f) => f.id === 'auto-eca-sub') ?? null;
+    if (JSON.stringify(wantMain) === JSON.stringify(curMain) && JSON.stringify(wantSub) === JSON.stringify(curSub)) return;
+    const next = existing.filter((f) => f.id !== 'auto-eca-main' && f.id !== 'auto-eca-sub');
+    if (wantMain) next.push(wantMain);
+    if (wantSub) next.push(wantSub);
+    // When an auto column's grade changes (or it's removed because the ECA share now folds into
+    // Main/Sub's own column), rename/merge the matching Bunkers-card row too, in the same update —
+    // otherwise it lingers under the old grade name (e.g. a stale "ULSFO" row after switching the
+    // ECA fuel type to MGO) since nothing else ever renames or drops it.
+    const renames: { from: string; to: string }[] = [];
+    if (curMain && curMain.grade.trim().toUpperCase() !== (wantMain?.grade ?? '').trim().toUpperCase()) {
+      renames.push({ from: curMain.grade, to: wantMain ? wantMain.grade : (route.mainEcaFoldsIntoSub ? cons.subNormal.type : cons.mainNormal.type) });
+    }
+    if (curSub && curSub.grade.trim().toUpperCase() !== (wantSub?.grade ?? '').trim().toUpperCase()) {
+      renames.push({ from: curSub.grade, to: wantSub ? wantSub.grade : (route.subEcaFoldsIntoMain ? cons.mainNormal.type : cons.subNormal.type) });
+    }
+    setRecap((r) => {
+      let bunkers = r.bunkers;
+      renames.forEach(({ from, to }) => {
+        if (from.trim().toUpperCase() === to.trim().toUpperCase()) return;
+        const fromIdx = bunkers.findIndex((b) => b.fuel.trim().toUpperCase() === from.trim().toUpperCase());
+        if (fromIdx < 0) return;
+        const toIdx = bunkers.findIndex((b) => b.fuel.trim().toUpperCase() === to.trim().toUpperCase());
+        const row = bunkers[fromIdx];
+        if (toIdx < 0) {
+          bunkers = bunkers.map((b, i) => (i === fromIdx ? { ...b, fuel: to } : b));
+        } else {
+          const target = bunkers[toIdx];
+          const merged = { ...target };
+          (Object.keys(row) as (keyof BunkerFuel)[]).forEach((k) => { if (!merged[k] && row[k]) merged[k] = row[k]; });
+          bunkers = bunkers.map((b, i) => (i === toIdx ? merged : b)).filter((_, i) => i !== fromIdx);
+        }
+      });
+      return { ...r, etaPlan: { ...r.etaPlan, perf: { ...r.etaPlan.perf, extraFuels: next } }, bunkers };
+    });
+  }, [plan.perf, setRecap]);
+  // Auto-blend each leg's Cons (MT/day) from the Normal/ECA rates by its own Non-ECA/ECA distance
+  // split; recomputes whenever distances or the instructed profile change, unless manually edited
+  // (`consAuto === false`) — a subsequent distance edit re-enables auto-blending for that leg.
+  useEffect(() => {
+    const patches: Record<number, { consVlsfo: string; consMgo: string; extraCons: Record<string, string> }> = {};
+    plan.legs.forEach((l, i) => {
+      if (l.consAuto === false) return;
+      const blend = blendedLegCons(plan.perf, l);
+      const extraChanged = Object.entries(blend.extra).some(([id, v]) => v !== (l.extraCons?.[id] ?? '0'));
+      if (blend.v === l.consVlsfo && blend.m === l.consMgo && !extraChanged) return;
+      patches[i] = { consVlsfo: blend.v, consMgo: blend.m, extraCons: blend.extra };
+    });
+    if (!Object.keys(patches).length) return;
+    setRecap((r) => ({
+      ...r,
+      etaPlan: {
+        ...r.etaPlan,
+        legs: r.etaPlan.legs.map((l, i) => (patches[i] ? { ...l, consVlsfo: patches[i].consVlsfo, consMgo: patches[i].consMgo, extraCons: patches[i].extraCons, consAuto: true } : l)),
+      },
+    }));
+  }, [plan.legs, plan.perf, setRecap]);
+  useEffect(() => {
+    const p = plan.perf;
+    if (p.fullMainNormal && p.fullMainEca && p.fullSubNormal && p.fullSubEca && p.ecoMainNormal && p.ecoMainEca && p.ecoSubNormal && p.ecoSubEca && p.customMainNormal && p.customMainEca && p.customSubNormal && p.customSubEca) return;
+    setRecap((r) => {
+      const current = r.etaPlan.perf;
+      return {
+        ...r,
+        etaPlan: {
+          ...r.etaPlan,
+          perf: {
+            ...current,
+            fullMainNormal: current.fullMainNormal ?? current.mainNormal,
+            fullMainEca: current.fullMainEca ?? current.mainEca,
+            fullSubNormal: current.fullSubNormal ?? current.subNormal,
+            fullSubEca: current.fullSubEca ?? current.subEca,
+            ecoMainNormal: current.ecoMainNormal ?? { type: current.mainNormal.type, ballast: '23', laden: '26', idle: '2', work: '4' },
+            ecoMainEca: current.ecoMainEca ?? { type: current.mainEca.type, ballast: '23', laden: '26', idle: '2', work: '4' },
+            ecoSubNormal: current.ecoSubNormal ?? { type: current.subNormal.type, sea: '0.08', idle: '0', work: '0' },
+            ecoSubEca: current.ecoSubEca ?? { type: current.subEca.type, sea: '0.08', idle: '0', work: '0' },
+            customMainNormal: current.customMainNormal ?? current.mainNormal,
+            customMainEca: current.customMainEca ?? current.mainEca,
+            customSubNormal: current.customSubNormal ?? current.subNormal,
+            customSubEca: current.customSubEca ?? current.subEca,
+          },
+        },
+      };
+    });
+  }, [plan.perf, setRecap]);
+  const setMain = (which: 'mainNormal' | 'mainEca', patch: Partial<EtaMainCons>) => {
+    const active = resolveEtaConsumption(plan.perf);
+    const key = plan.perf.speedMode === 'Full' ? (which === 'mainNormal' ? 'fullMainNormal' : 'fullMainEca') : plan.perf.speedMode === 'Eco' ? (which === 'mainNormal' ? 'ecoMainNormal' : 'ecoMainEca') : (which === 'mainNormal' ? 'customMainNormal' : 'customMainEca');
+    setPerf({ [key]: { ...(which === 'mainNormal' ? active.mainNormal : active.mainEca), ...patch } } as Partial<EtaPerf>);
+  };
+  const setSub = (which: 'subNormal' | 'subEca', patch: Partial<EtaSubCons>) => {
+    const active = resolveEtaConsumption(plan.perf);
+    const key = plan.perf.speedMode === 'Full' ? (which === 'subNormal' ? 'fullSubNormal' : 'fullSubEca') : plan.perf.speedMode === 'Eco' ? (which === 'subNormal' ? 'ecoSubNormal' : 'ecoSubEca') : (which === 'subNormal' ? 'customSubNormal' : 'customSubEca');
+    setPerf({ [key]: { ...(which === 'subNormal' ? active.subNormal : active.subEca), ...patch } } as Partial<EtaPerf>);
+  };
+  // Extra fuel types (beyond FO/DO) — Normal/ECA consumption per speed mode, kept
+  // in sync with the Bunkers card so pricing/BOD/BOR fields exist for the grade.
+  const addExtraFuel = () => setRecap((r) => {
+    const used = new Set([r.etaPlan.perf.mainNormal.type, r.etaPlan.perf.subNormal.type, ...(r.etaPlan.perf.extraFuels ?? []).map((f) => f.grade)]);
+    const grade = OPS_FUEL_GRADES.find((g) => !used.has(g)) || 'Other';
+    const blankMain = (): EtaMainCons => ({ type: grade, ballast: '0', laden: '0', idle: '0', work: '0' });
+    const fuel: EtaExtraFuel = { id: `xf-${Date.now()}`, grade, fullNormal: blankMain(), fullEca: blankMain(), ecoNormal: blankMain(), ecoEca: blankMain(), customNormal: blankMain(), customEca: blankMain() };
+    const hasBunkerRow = (r.bunkers ?? []).some((b) => b.fuel === grade);
+    return {
+      ...r,
+      etaPlan: { ...r.etaPlan, perf: { ...r.etaPlan.perf, extraFuels: [...(r.etaPlan.perf.extraFuels ?? []), fuel] } },
+      bunkers: hasBunkerRow ? r.bunkers : [...r.bunkers, { fuel: grade, bod: '', expBor: '', cpPrice: '', bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '', specs: '' }],
+    };
+  });
+  const setExtraFuel = (id: string, which: 'normal' | 'eca', patch: Partial<EtaMainCons>) => {
+    const active = resolveEtaConsumption(plan.perf);
+    const cur = active.extraFuels.find((f) => f.id === id);
+    if (!cur) return;
+    const key = plan.perf.speedMode === 'Full' ? (which === 'normal' ? 'fullNormal' : 'fullEca') : plan.perf.speedMode === 'Eco' ? (which === 'normal' ? 'ecoNormal' : 'ecoEca') : (which === 'normal' ? 'customNormal' : 'customEca');
+    setPerf({
+      extraFuels: (plan.perf.extraFuels ?? []).map((f) => f.id === id ? { ...f, [key]: { ...(which === 'normal' ? cur.normal : cur.eca), ...patch } } : f),
+    });
+  };
+  const renameExtraFuelGrade = (id: string, grade: string) => setPerf({
+    extraFuels: (plan.perf.extraFuels ?? []).map((f) => f.id === id
+      ? { ...f, grade, fullNormal: { ...f.fullNormal, type: grade }, fullEca: { ...f.fullEca, type: grade }, ecoNormal: { ...f.ecoNormal, type: grade }, ecoEca: { ...f.ecoEca, type: grade }, customNormal: { ...f.customNormal, type: grade }, customEca: { ...f.customEca, type: grade } }
+      : f),
+  });
+  const removeExtraFuel = (id: string) => setPerf({ extraFuels: (plan.perf.extraFuels ?? []).filter((f) => f.id !== id) });
   const setSpeedMode = (mode: string) => setPerf({ speedMode: mode });
   const patchActiveSpeed = (patch: Partial<EtaSpeedSet>) => {
     const m = plan.perf.speedMode;
@@ -2944,6 +4327,39 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
   const removeCustom = (id: string) => setPerf({ customs: plan.perf.customs.filter((c) => c.id !== id), speedMode: plan.perf.speedMode === id ? 'Full' : plan.perf.speedMode });
   const setLeg = (i: number, patch: Partial<EtaLeg>) =>
     setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, legs: r.etaPlan.legs.map((l, idx) => (idx === i ? { ...l, ...patch } : l)) } }));
+  // Per-leg extra-fuel consumption / supply (keyed by EtaExtraFuel.id).
+  const setLegExtraCons = (i: number, fuelId: string, value: string) =>
+    setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, legs: r.etaPlan.legs.map((l, idx) => (idx === i ? { ...l, extraCons: { ...(l.extraCons ?? {}), [fuelId]: value } } : l)) } }));
+  const setLegExtraSup = (i: number, fuelId: string, value: string) =>
+    setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, legs: r.etaPlan.legs.map((l, idx) => (idx === i ? { ...l, extraSup: { ...(l.extraSup ?? {}), [fuelId]: value } } : l)) } }));
+  // Starting ROB fields also mirror into the matching Bunkers-card row's BOD — same physical figure,
+  // kept in sync in both directions (see BunkersCard.setFuel / the Owners "Bunker Settlement" table).
+  const setStartRobMain = (value: string) =>
+    setRecap((r) => {
+      const grade = resolveEtaConsumption(r.etaPlan.perf).mainNormal.type;
+      const bunkers = r.bunkers.map((b) => (b.fuel.trim().toUpperCase() === grade.trim().toUpperCase() ? { ...b, bod: value } : b));
+      return { ...r, etaPlan: { ...r.etaPlan, startRobVlsfo: value }, bunkers };
+    });
+  const setStartRobSub = (value: string) =>
+    setRecap((r) => {
+      const grade = resolveEtaConsumption(r.etaPlan.perf).subNormal.type;
+      const bunkers = r.bunkers.map((b) => (b.fuel.trim().toUpperCase() === grade.trim().toUpperCase() ? { ...b, bod: value } : b));
+      return { ...r, etaPlan: { ...r.etaPlan, startRobMgo: value }, bunkers };
+    });
+  const setStartRobExtra = (fuelId: string, value: string) =>
+    setRecap((r) => {
+      const etaPlan = { ...r.etaPlan, startRobExtra: { ...(r.etaPlan.startRobExtra ?? {}), [fuelId]: value } };
+      const grade = r.etaPlan.perf.extraFuels?.find((f) => f.id === fuelId)?.grade;
+      const bunkers = grade ? r.bunkers.map((b) => (b.fuel.trim().toUpperCase() === grade.trim().toUpperCase() ? { ...b, bod: value } : b)) : r.bunkers;
+      return { ...r, etaPlan, bunkers };
+    });
+  // NOTE: `plan.startRobVlsfo` / `startRobMgo` / `startRobExtra` are the single source of truth for
+  // Main/Sub/extra-fuel "Bunkers on Delivery" — the Bunkers card and Owners "Bunker Settlement" table
+  // never read their own stored `bunkers[].bod` for a grade that matches Main/Sub/an extra fuel type;
+  // they always *display* the value straight from `plan` (see `bodDisplay` in BunkersCard and
+  // `ownersBodDisplay` here) and only write back into `bunkers[].bod` for backward-compat storage.
+  // This removes any possibility of the two views drifting apart or racing to "self-heal" each other
+  // (a prior continuous reconciliation effect here was itself a source of hydration-race glitches).
   const addLeg = (kind: 'sea' | 'port') =>
     setRecap((r) => {
       const p = r.etaPlan;
@@ -2958,20 +4374,32 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
         portDays: kind === 'port' ? '1' : '',
         consVlsfo: kind === 'sea' ? d.seaV : d.portV,
         consMgo: kind === 'sea' ? d.seaM : d.portM,
+        consAuto: true,
         supVlsfo: '', supMgo: '', tz: last?.tz ?? '+0',
+        extraCons: Object.fromEntries(Object.entries(d.extra).map(([id, v]) => [id, kind === 'sea' ? v.sea : v.port])),
+        extraSup: {},
       };
       return { ...r, etaPlan: { ...p, legs: [...p.legs, leg] } };
     });
   const removeLeg = (i: number) =>
     setRecap((r) => ({ ...r, etaPlan: { ...r.etaPlan, legs: r.etaPlan.legs.filter((_, idx) => idx !== i) } }));
-  // Push the instructed speed / cons profile onto every leg (per kind).
+  // Push the instructed speed profile onto every leg, and re-blend each leg's Cons (MT/day) from the
+  // Normal/ECA rates by its own Non-ECA/ECA distance split (any manual Cons override is reset).
   const applyInstructed = () =>
     setRecap((r) => {
       const p = r.etaPlan;
       const d = legDefaults(p.perf);
-      const legs = p.legs.map((l) => l.kind === 'sea'
-        ? { ...l, speed: d.speed, consVlsfo: d.seaV, consMgo: d.seaM }
-        : { ...l, consVlsfo: d.portV, consMgo: d.portM });
+      const legs = p.legs.map((l) => {
+        const blend = blendedLegCons(p.perf, l);
+        return {
+          ...l,
+          ...(l.kind === 'sea' ? { speed: d.speed } : null),
+          consVlsfo: blend.v,
+          consMgo: blend.m,
+          extraCons: blend.extra,
+          consAuto: true,
+        };
+      });
       return { ...r, etaPlan: { ...p, legs } };
     });
 
@@ -2985,6 +4413,13 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
   const computed = projectEtaLegs(plan);
   const endV = computed.length ? computed[computed.length - 1].robV : num(plan.startRobVlsfo);
   const endM = computed.length ? computed[computed.length - 1].robM : num(plan.startRobMgo);
+  const itinCons = resolveEtaConsumption(plan.perf);
+  // Itinerary column headers mirror whatever Type is currently selected in Instructed Speed & Consumption.
+  const mainFuelLabel = itinCons.mainNormal.type || 'VLSFO';
+  const subFuelLabel = itinCons.subNormal.type || 'MGO';
+  const extraFuelList = itinCons.extraFuels;
+  const endExtra: Record<string, number> = {};
+  extraFuelList.forEach((f) => { endExtra[f.id] = computed.length ? computed[computed.length - 1].extraRob[f.id] : num(plan.startRobExtra?.[f.id]); });
 
   // Bunker-booking request: supply ports (arrival + supplied qty) drawn from the itinerary.
   const bunkerPortOptions: BunkerReqPort[] = plan.legs.map((l, i) => {
@@ -3005,6 +4440,8 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
   const totalDays = computed.reduce((s, c) => s + c.days, 0);
   const totalUsedV = computed.reduce((s, c) => s + c.usedV, 0);
   const totalUsedM = computed.reduce((s, c) => s + c.usedM, 0);
+  const totalUsedExtra: Record<string, number> = {};
+  extraFuelList.forEach((f) => { totalUsedExtra[f.id] = computed.reduce((s, c) => s + (c.extraUsed[f.id] || 0), 0); });
 
   const nIn = (val: string, on: (v: string) => void, cls = '') => (
     <input className={`fv-ops__eta-in ${cls}`} inputMode="decimal" value={val} onChange={(e) => on(e.target.value)} />
@@ -3017,6 +4454,10 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
   );
   const perf = plan.perf;
   const activeSpeed = resolveEtaSpeed(perf);
+  const activeConsumption = resolveEtaConsumption(perf);
+  // Auto-managed ECA-split fuels (see syncEcaFuelSplit) mirror the ECA rate already shown in the
+  // FO/DO tables above — hide them from the user-editable extra-fuel list to avoid a confusing dupe.
+  const userExtraFuels = activeConsumption.extraFuels.filter((f) => !f.id.startsWith('auto-eca-'));
 
   return (
     <div className="fv-ops__col">
@@ -3060,19 +4501,19 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
               <tbody>
                 <tr>
                   <td>Normal</td>
-                  <td>{fuelSel(perf.mainNormal.type, (v) => setMain('mainNormal', { type: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainNormal.ballast, (v) => setMain('mainNormal', { ballast: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainNormal.laden, (v) => setMain('mainNormal', { laden: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainNormal.idle, (v) => setMain('mainNormal', { idle: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainNormal.work, (v) => setMain('mainNormal', { work: v }))}</td>
+                  <td>{fuelSel(activeConsumption.mainNormal.type, (v) => setMain('mainNormal', { type: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainNormal.ballast, (v) => setMain('mainNormal', { ballast: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainNormal.laden, (v) => setMain('mainNormal', { laden: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainNormal.idle, (v) => setMain('mainNormal', { idle: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainNormal.work, (v) => setMain('mainNormal', { work: v }))}</td>
                 </tr>
                 <tr>
                   <td>ECA</td>
-                  <td>{fuelSel(perf.mainEca.type, (v) => setMain('mainEca', { type: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainEca.ballast, (v) => setMain('mainEca', { ballast: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainEca.laden, (v) => setMain('mainEca', { laden: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainEca.idle, (v) => setMain('mainEca', { idle: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.mainEca.work, (v) => setMain('mainEca', { work: v }))}</td>
+                  <td>{fuelSel(activeConsumption.mainEca.type, (v) => setMain('mainEca', { type: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainEca.ballast, (v) => setMain('mainEca', { ballast: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainEca.laden, (v) => setMain('mainEca', { laden: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainEca.idle, (v) => setMain('mainEca', { idle: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.mainEca.work, (v) => setMain('mainEca', { work: v }))}</td>
                 </tr>
               </tbody>
             </table>
@@ -3081,20 +4522,50 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
               <tbody>
                 <tr>
                   <td>Normal</td>
-                  <td>{fuelSel(perf.subNormal.type, (v) => setSub('subNormal', { type: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.subNormal.sea, (v) => setSub('subNormal', { sea: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.subNormal.idle, (v) => setSub('subNormal', { idle: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.subNormal.work, (v) => setSub('subNormal', { work: v }))}</td>
+                  <td>{fuelSel(activeConsumption.subNormal.type, (v) => setSub('subNormal', { type: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.subNormal.sea, (v) => setSub('subNormal', { sea: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.subNormal.idle, (v) => setSub('subNormal', { idle: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.subNormal.work, (v) => setSub('subNormal', { work: v }))}</td>
                 </tr>
                 <tr>
                   <td>ECA</td>
-                  <td>{fuelSel(perf.subEca.type, (v) => setSub('subEca', { type: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.subEca.sea, (v) => setSub('subEca', { sea: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.subEca.idle, (v) => setSub('subEca', { idle: v }))}</td>
-                  <td className="fv-ops__r">{nIn(perf.subEca.work, (v) => setSub('subEca', { work: v }))}</td>
+                  <td>{fuelSel(activeConsumption.subEca.type, (v) => setSub('subEca', { type: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.subEca.sea, (v) => setSub('subEca', { sea: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.subEca.idle, (v) => setSub('subEca', { idle: v }))}</td>
+                  <td className="fv-ops__r">{nIn(activeConsumption.subEca.work, (v) => setSub('subEca', { work: v }))}</td>
                 </tr>
               </tbody>
             </table>
+            {userExtraFuels.map((f) => (
+              <div className="fv-ops__perf-extrafuel" key={f.id}>
+                <div className="fv-ops__perf-extrafuel-head">
+                  <input className="fv-ops__eta-sel fv-ops__perf-extrafuel-name" value={f.grade} onChange={(e) => renameExtraFuelGrade(f.id, e.target.value)} />
+                  <button type="button" className="fv-ops__perf-customx fv-ops__perf-extrafuel-rm" title="Remove fuel" aria-label="Remove fuel" onClick={() => removeExtraFuel(f.id)}><i className="fas fa-times" aria-hidden="true" /></button>
+                </div>
+                <table className="fv-ops__perf-tbl">
+                  <thead><tr><th /><th>Type</th><th className="fv-ops__r">Ballast</th><th className="fv-ops__r">Laden</th><th className="fv-ops__r">Idle</th><th className="fv-ops__r">Work</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td>Normal</td>
+                      <td>{fuelSel(f.normal.type, (v) => setExtraFuel(f.id, 'normal', { type: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.normal.ballast, (v) => setExtraFuel(f.id, 'normal', { ballast: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.normal.laden, (v) => setExtraFuel(f.id, 'normal', { laden: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.normal.idle, (v) => setExtraFuel(f.id, 'normal', { idle: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.normal.work, (v) => setExtraFuel(f.id, 'normal', { work: v }))}</td>
+                    </tr>
+                    <tr>
+                      <td>ECA</td>
+                      <td>{fuelSel(f.eca.type, (v) => setExtraFuel(f.id, 'eca', { type: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.eca.ballast, (v) => setExtraFuel(f.id, 'eca', { ballast: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.eca.laden, (v) => setExtraFuel(f.id, 'eca', { laden: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.eca.idle, (v) => setExtraFuel(f.id, 'eca', { idle: v }))}</td>
+                      <td className="fv-ops__r">{nIn(f.eca.work, (v) => setExtraFuel(f.id, 'eca', { work: v }))}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ))}
+            <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={addExtraFuel}><i className="fas fa-plus" aria-hidden="true" /> Add Fuel</button>
           </div>
         </div>
       </Card>
@@ -3106,17 +4577,17 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
         right={(
           <span className="fv-ops__eta-addbtns">
             <button type="button" className="fv-ops__btn fv-ops__btn--primary" onClick={() => setBunkerOpen(true)} title="Raise a bunker booking request to the Bunkers department"><i className="fas fa-gas-pump" aria-hidden="true" /> Request Bunker Booking</button>
-            <button type="button" className="fv-ops__btn" onClick={rebuildFromPorts} title="Rebuild legs from the voyage port rotation"><i className="fas fa-arrows-rotate" aria-hidden="true" /> From ports</button>
+            <button type="button" className="fv-ops__btn" onClick={rebuildFromPorts} title="Discards all current legs and rebuilds the itinerary from the voyage port rotation"><i className="fas fa-arrows-rotate" aria-hidden="true" /> Reset</button>
             <button type="button" className="fv-ops__btn" onClick={() => addLeg('sea')}><i className="fas fa-water" aria-hidden="true" /> Sea leg</button>
             <button type="button" className="fv-ops__btn" onClick={() => addLeg('port')}><i className="fas fa-anchor" aria-hidden="true" /> Port stay</button>
           </span>
         )}
       >
         <div className="fv-ops__vd-fields fv-ops__eta-controls">
-          <VdDateTime label="Delivery Date / Time (DEP-UTC)" value={plan.startDep} onChange={(v) => setPlan({ startDep: v })} accent />
-          <VdField label="Default Weather Margin (%)" value={plan.weatherMargin} onChange={(v) => setPlan({ weatherMargin: v })} num />
-          <VdField label="Bunkers on Delivery — VLSFO" value={plan.startRobVlsfo} onChange={(v) => setPlan({ startRobVlsfo: v })} num />
-          <VdField label="Bunkers on Delivery — LSMGO" value={plan.startRobMgo} onChange={(v) => setPlan({ startRobMgo: v })} num />
+          <VdDateTime label="Delivery Date / Time (DEP-UTC)" value={plan.startDep} onChange={(v) => setPlan({ startDep: v })} accent readOnly title="Derived from Voyage Details' Delivery Date & Time \u2014 edit it there to change this." />
+          <VdField label="Default Weather Margin (%)" value={plan.weatherMargin} onChange={setWeatherMargin} num />
+          <VdField label={`Bunkers on Delivery — ${mainFuelLabel}`} value={plan.startRobVlsfo} onChange={setStartRobMain} num />
+          <VdField label={`Bunkers on Delivery — ${subFuelLabel}`} value={plan.startRobMgo} onChange={setStartRobSub} num />
         </div>
         <div className="fv-ops__eta-scroll">
           <table className="fv-ops__eta">
@@ -3136,12 +4607,16 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
               <col className="fv-ops__eta-c-dt" />
               <col className="fv-ops__eta-c-num" />
               <col className="fv-ops__eta-c-num" />
+              {extraFuelList.map((f) => <col className="fv-ops__eta-c-num" key={`cg-cons-${f.id}`} />)}
               <col className="fv-ops__eta-c-num" />
               <col className="fv-ops__eta-c-num" />
+              {extraFuelList.map((f) => <col className="fv-ops__eta-c-num" key={`cg-used-${f.id}`} />)}
               <col className="fv-ops__eta-c-num" />
               <col className="fv-ops__eta-c-num" />
+              {extraFuelList.map((f) => <col className="fv-ops__eta-c-num" key={`cg-sup-${f.id}`} />)}
               <col className="fv-ops__eta-c-num" />
               <col className="fv-ops__eta-c-num" />
+              {extraFuelList.map((f) => <col className="fv-ops__eta-c-num" key={`cg-rob-${f.id}`} />)}
               <col className="fv-ops__eta-c-rm" />
             </colgroup>
             <thead>
@@ -3158,30 +4633,37 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
                 <th rowSpan={2}>ARR-UTC</th>
                 <th rowSpan={2}>TZ</th>
                 <th rowSpan={2}>ARR-LT</th>
-                <th colSpan={2}>Cons (MT/day)</th>
-                <th colSpan={2}>Used (MT)</th>
-                <th colSpan={2}>Supply (MT)</th>
-                <th colSpan={2}>Est ROB (MT)</th>
+                <th colSpan={2 + extraFuelList.length}>Cons (MT/day)</th>
+                <th colSpan={2 + extraFuelList.length}>Used (MT)</th>
+                <th colSpan={2 + extraFuelList.length}>Supply (MT)</th>
+                <th colSpan={2 + extraFuelList.length}>Est ROB (MT)</th>
                 <th rowSpan={2} aria-label="Remove" />
               </tr>
               <tr>
                 <th>Non-ECA</th>
                 <th>ECA</th>
-                <th>VLSFO</th>
-                <th>MGO</th>
-                <th>VLSFO</th>
-                <th>MGO</th>
-                <th>VLSFO</th>
-                <th>MGO</th>
-                <th>VLSFO</th>
-                <th>LSMGO</th>
+                <th>{mainFuelLabel}</th>
+                <th>{subFuelLabel}</th>
+                {extraFuelList.map((f) => <th key={`h-cons-${f.id}`}>{extraFuelLabel(f)}</th>)}
+                <th>{mainFuelLabel}</th>
+                <th>{subFuelLabel}</th>
+                {extraFuelList.map((f) => <th key={`h-used-${f.id}`}>{extraFuelLabel(f)}</th>)}
+                <th>{mainFuelLabel}</th>
+                <th>{subFuelLabel}</th>
+                {extraFuelList.map((f) => <th key={`h-sup-${f.id}`}>{extraFuelLabel(f)}</th>)}
+                <th>{mainFuelLabel}</th>
+                <th>{subFuelLabel}</th>
+                {extraFuelList.map((f) => <th key={`h-rob-${f.id}`}>{extraFuelLabel(f)}</th>)}
               </tr>
             </thead>
             <tbody>
               <tr className="fv-ops__eta-delivery">
-                <td colSpan={19}>Bunkers on Delivery</td>
+                <td colSpan={19 + 3 * extraFuelList.length}>Bunkers on Delivery</td>
                 <td className="fv-ops__r fv-ops__eta-rob">{fmt(num(plan.startRobVlsfo))}</td>
                 <td className="fv-ops__r fv-ops__eta-rob">{fmt(num(plan.startRobMgo))}</td>
+                {extraFuelList.map((f) => (
+                  <td className="fv-ops__r fv-ops__eta-rob" key={`del-${f.id}`}>{nIn(plan.startRobExtra?.[f.id] ?? '0', (v) => setStartRobExtra(f.id, v))}</td>
+                ))}
                 <td />
               </tr>
               {plan.legs.map((l, i) => {
@@ -3195,25 +4677,43 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
                       </select>
                     </td>
                     <td>{nIn(l.from, (v) => setLeg(i, { from: v }), 'fv-ops__eta-in--wide')}</td>
-                    <td>{nIn(l.to, (v) => setLeg(i, { to: v }), 'fv-ops__eta-in--wide')}</td>
-                    <td className="fv-ops__r">{l.kind === 'sea' ? nIn(l.distNonEca, (v) => setLeg(i, { distNonEca: v })) : '—'}</td>
-                    <td className="fv-ops__r">{l.kind === 'sea' ? nIn(l.distEca, (v) => setLeg(i, { distEca: v })) : '—'}</td>
+                    <td>{nIn(l.to, (v) => setLeg(i, { to: v, tzAuto: true }), 'fv-ops__eta-in--wide')}</td>
+                    <td className="fv-ops__r">{l.kind === 'sea' ? nIn(l.distNonEca, (v) => setLeg(i, { distNonEca: v, consAuto: true })) : '—'}</td>
+                    <td className="fv-ops__r">
+                      {l.kind === 'sea'
+                        ? nIn(l.distEca, (v) => setLeg(i, { distEca: v, consAuto: true }))
+                        : <label className="fv-ops__eta-port-eca" title="Port is within an ECA zone">
+                            <input type="checkbox" checked={!!l.ecaPort} onChange={(e) => setLeg(i, { ecaPort: e.target.checked, consAuto: true })} /> ECA
+                          </label>}
+                    </td>
                     <td className="fv-ops__r">{l.kind === 'sea' ? nIn(l.speed, (v) => setLeg(i, { speed: v })) : '—'}</td>
                     <td className="fv-ops__r">{l.kind === 'sea' ? nIn(l.wf, (v) => setLeg(i, { wf: v })) : '—'}</td>
                     <td className="fv-ops__r fv-ops__eta-calc">{l.kind === 'sea' ? fmt(c.avgSpeed, 2) : '—'}</td>
                     <td className="fv-ops__r">{l.kind === 'port' ? nIn(l.portDays, (v) => setLeg(i, { portDays: v })) : <span className="fv-ops__eta-calc">{fmt(c.days, 2)}</span>}</td>
                     <td className="fv-ops__eta-dt">{fmtDT(c.dep)}</td>
                     <td className="fv-ops__eta-dt">{fmtDT(c.arr)}</td>
-                    <td className="fv-ops__r">{nIn(l.tz, (v) => setLeg(i, { tz: v }), 'fv-ops__eta-in--tz')}</td>
+                    <td className="fv-ops__r">{nIn(l.tz, (v) => setLeg(i, { tz: v, tzAuto: false }), 'fv-ops__eta-in--tz')}</td>
                     <td className="fv-ops__eta-dt fv-ops__eta-lt">{fmtDT(c.arrLt)}</td>
-                    <td className="fv-ops__r">{nIn(l.consVlsfo, (v) => setLeg(i, { consVlsfo: v }))}</td>
-                    <td className="fv-ops__r">{nIn(l.consMgo, (v) => setLeg(i, { consMgo: v }))}</td>
+                    <td className="fv-ops__r">{nIn(l.consVlsfo, (v) => setLeg(i, { consVlsfo: v, consAuto: false }))}</td>
+                    <td className="fv-ops__r">{nIn(l.consMgo, (v) => setLeg(i, { consMgo: v, consAuto: false }))}</td>
+                    {extraFuelList.map((f) => (
+                      <td className="fv-ops__r" key={`cons-${f.id}`}>{nIn(l.extraCons?.[f.id] ?? '0', (v) => { setLegExtraCons(i, f.id, v); setLeg(i, { consAuto: false }); })}</td>
+                    ))}
                     <td className="fv-ops__r fv-ops__eta-calc">{fmt(c.usedV, 2)}</td>
                     <td className="fv-ops__r fv-ops__eta-calc">{fmt(c.usedM, 2)}</td>
+                    {extraFuelList.map((f) => (
+                      <td className="fv-ops__r fv-ops__eta-calc" key={`used-${f.id}`}>{fmt(c.extraUsed[f.id] || 0, 2)}</td>
+                    ))}
                     <td className="fv-ops__r">{nIn(l.supVlsfo, (v) => setLeg(i, { supVlsfo: v }))}</td>
                     <td className="fv-ops__r">{nIn(l.supMgo, (v) => setLeg(i, { supMgo: v }))}</td>
+                    {extraFuelList.map((f) => (
+                      <td className="fv-ops__r" key={`sup-${f.id}`}>{nIn(l.extraSup?.[f.id] ?? '0', (v) => setLegExtraSup(i, f.id, v))}</td>
+                    ))}
                     <td className={`fv-ops__r fv-ops__eta-rob${c.robV < 0 ? ' fv-ops__neg' : ''}`}>{fmt(c.robV, 2)}</td>
                     <td className={`fv-ops__r fv-ops__eta-rob${c.robM < 0 ? ' fv-ops__neg' : ''}`}>{fmt(c.robM, 2)}</td>
+                    {extraFuelList.map((f) => (
+                      <td className={`fv-ops__r fv-ops__eta-rob${(c.extraRob[f.id] || 0) < 0 ? ' fv-ops__neg' : ''}`} key={`rob-${f.id}`}>{fmt(c.extraRob[f.id] || 0, 2)}</td>
+                    ))}
                     <td className="fv-ops__r"><button type="button" className="fv-ops__vd-sp-rm" aria-label="Remove leg" onClick={() => removeLeg(i)}><i className="fas fa-trash" aria-hidden="true" /></button></td>
                   </tr>
                 );
@@ -3223,12 +4723,18 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
               <tr className="fv-ops__row-sub">
                 <td colSpan={8}>Totals</td>
                 <td className="fv-ops__r">{fmt(totalDays, 2)}</td>
-                <td colSpan={6} />
+                <td colSpan={6 + extraFuelList.length} />
                 <td className="fv-ops__r">{fmt(totalUsedV, 2)}</td>
                 <td className="fv-ops__r">{fmt(totalUsedM, 2)}</td>
-                <td colSpan={2} />
+                {extraFuelList.map((f) => (
+                  <td className="fv-ops__r" key={`tot-used-${f.id}`}>{fmt(totalUsedExtra[f.id] || 0, 2)}</td>
+                ))}
+                <td colSpan={2 + extraFuelList.length} />
                 <td className="fv-ops__r">{fmt(endV, 2)}</td>
                 <td className="fv-ops__r">{fmt(endM, 2)}</td>
+                {extraFuelList.map((f) => (
+                  <td className="fv-ops__r" key={`tot-rob-${f.id}`}>{fmt(endExtra[f.id] || 0, 2)}</td>
+                ))}
                 <td />
               </tr>
             </tfoot>
@@ -3240,8 +4746,8 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
       </Card>
 
       {/* Bunker details (same box as Voyage Details — BOD, 5% margins, CP price) */}
-      <BunkersCard recap={recap} setRecap={setRecap} />
-      {bunkerOpen && <BunkerRequestModal recap={recap} voyage={voyage} ports={bunkerPortOptions} onClose={() => setBunkerOpen(false)} />}
+      <BunkersCard recap={recap} setRecap={setRecap} voyage={voyage} />
+      {bunkerOpen && <BunkerRequestModal recap={recap} voyage={voyage} ports={bunkerPortOptions} mainFuel={mainFuelLabel} subFuel={subFuelLabel} onClose={() => setBunkerOpen(false)} />}
     </div>
   );
 }
@@ -3252,12 +4758,27 @@ function EtaRobTab({ recap, setRecap, voyage }: { recap: Recap; setRecap: Dispat
 interface BunkerReqPort { port: string; eta: string; laycanStart: string; laycanEnd: string; supV: number; supM: number }
 
 /** Request bunker booking — seeded from the itinerary supply columns; submits to the Bunkers dept. */
-function BunkerRequestModal({ recap, voyage, ports, onClose }: {
-  recap: Recap; voyage: Voyage; ports: BunkerReqPort[]; onClose: () => void;
+function BunkerRequestModal({ recap, voyage, ports, mainFuel, subFuel, onClose }: {
+  recap: Recap; voyage: Voyage; ports: BunkerReqPort[]; mainFuel: string; subFuel: string; onClose: () => void;
 }) {
   // Pre-populate ALL ports that have supply values; fall back to first port if none.
   const supplyPorts = ports.filter((o) => o.supV + o.supM > 0);
   const initPorts = supplyPorts.length > 0 ? supplyPorts : [ports[0] ?? { port: recap.dischargePort, eta: '', laycanStart: '', laycanEnd: '', supV: 0, supM: 0 }];
+  // Only pre-fill a fuel line for a grade that actually has a supply quantity recorded against
+  // this port — a port with only VLSFO supplied shouldn't also show a blank/zero LSMGO row. Uses
+  // the voyage's actual active Main/Sub fuel grades (not hardcoded names), so e.g. a vessel running
+  // MGO rather than LSMGO shows "MGO" here, matching the ETA & ROB itinerary and Bunkers card.
+  const linesForSupply = (supV: number, supM: number): { fuel: string; qty: string }[] => {
+    const lines: { fuel: string; qty: string }[] = [];
+    if (supV > 0) lines.push({ fuel: mainFuel, qty: String(supV) });
+    if (supM > 0) lines.push({ fuel: subFuel, qty: String(supM) });
+    return lines.length ? lines : [{ fuel: mainFuel, qty: '' }];
+  };
+  // Shows the Bunkers card's Specs entry for this grade, so the bunkers team sees the required
+  // spec alongside the quantity being requested (read-only here — specs are edited in the Bunkers
+  // card itself).
+  const specsFor = (fuel: string): string =>
+    recap.bunkers.find((b) => b.fuel.trim().toUpperCase() === fuel.trim().toUpperCase())?.specs ?? '';
 
   // Each entry is one port with its own fuel lines.
   const [portEntries, setPortEntries] = useState<Array<{
@@ -3265,10 +4786,7 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
     lines: { fuel: string; qty: string }[];
   }>>(initPorts.map((o) => ({
     port: o.port, eta: o.eta, laycanStart: o.laycanStart, laycanEnd: o.laycanEnd,
-    lines: [
-      { fuel: 'VLSFO', qty: o.supV ? String(o.supV) : '' },
-      { fuel: 'LSMGO', qty: o.supM ? String(o.supM) : '' },
-    ],
+    lines: linesForSupply(o.supV, o.supM),
   })));
   const [note, setNote] = useState('');
   const [done, setDone] = useState(false);
@@ -3293,21 +4811,26 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
     return `${dd}-${mo}-${y}`;
   };
 
-  const applyPort = (entryIdx: number, portIdx: number) => {
-    const o = ports[portIdx];
+  // Ports with an actual supply quantity recorded in the itinerary — the only ones selectable in
+  // the single "Port of Supply" field below (falls back to the full itinerary list if none have
+  // supply yet, so the field is never left with nothing to pick).
+  const supplyPortList = ports.filter((o) => o.supV + o.supM > 0);
+  const portPickList = supplyPortList.length > 0 ? supplyPortList : ports;
+  const applyPortByName = (entryIdx: number, portName: string) => {
+    const o = ports.find((p) => p.port === portName);
     if (!o) return;
     setPortEntries((prev) => prev.map((e, i) => i !== entryIdx ? e : {
       ...e, port: o.port, eta: o.eta, laycanStart: o.laycanStart, laycanEnd: o.laycanEnd,
-      lines: [{ fuel: 'VLSFO', qty: o.supV ? String(o.supV) : '' }, { fuel: 'LSMGO', qty: o.supM ? String(o.supM) : '' }],
+      lines: linesForSupply(o.supV, o.supM),
     }));
   };
   const setEntryField = (i: number, patch: Partial<typeof portEntries[0]>) =>
     setPortEntries((prev) => prev.map((e, k) => (k === i ? { ...e, ...patch } : e)));
   const setLine = (ei: number, li: number, patch: Partial<{ fuel: string; qty: string }>) =>
     setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: e.lines.map((l, j) => (j === li ? { ...l, ...patch } : l)) }));
-  const addLine = (ei: number) => setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: [...e.lines, { fuel: 'VLSFO', qty: '' }] }));
+  const addLine = (ei: number) => setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: [...e.lines, { fuel: mainFuel, qty: '' }] }));
   const delLine = (ei: number, li: number) => setPortEntries((prev) => prev.map((e, k) => k !== ei ? e : { ...e, lines: e.lines.filter((_, j) => j !== li) }));
-  const addPort = () => setPortEntries((prev) => [...prev, { port: '', eta: '', laycanStart: '', laycanEnd: '', lines: [{ fuel: 'VLSFO', qty: '' }] }]);
+  const addPort = () => setPortEntries((prev) => [...prev, { port: '', eta: '', laycanStart: '', laycanEnd: '', lines: [{ fuel: mainFuel, qty: '' }] }]);
   const removePort = (i: number) => setPortEntries((prev) => prev.filter((_, k) => k !== i));
 
   const validEntries = portEntries.filter((e) => e.port.trim() && e.lines.some((l) => num(l.qty) > 0));
@@ -3319,10 +4842,10 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
     validEntries.forEach((e) => {
       const activeLines = e.lines.filter((l) => num(l.qty) > 0);
       const id = addBunkerRequirement({
-        vessel: recap.vesselName, imo: voyage.imo, loadPort: recap.loadPort, dischargePort: recap.dischargePort,
-        bunkerPort: e.port, eta: e.eta, requiredOn: e.laycanStart,
+        vessel: recap.vesselName, imo: recap.vesselImo || voyage.imo, reference: voyage.id, loadPort: recap.loadPort, dischargePort: recap.dischargePort,
+        bunkerPort: e.port, eta: e.eta, requiredOn: e.laycanStart, laycanStart: e.laycanStart, laycanEnd: e.laycanEnd,
         fuelType: activeLines[0].fuel, quantity: num(activeLines[0].qty),
-        fuelLines: activeLines.map((l) => ({ fuel: l.fuel, quantity: num(l.qty) })),
+        fuelLines: activeLines.map((l) => ({ fuel: l.fuel, quantity: num(l.qty), specs: specsFor(l.fuel) || undefined })),
         ownerInstructions: note || undefined,
       });
       ids.push(id);
@@ -3339,7 +4862,7 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
         <div className="fv-ops__soa-head">
           <div>
             <h2>Request Bunker Booking</h2>
-            <span className="fv-ops__soa-sub">{recap.vesselName} · IMO {voyage.imo || '—'} · to Bunkers Department</span>
+            <span className="fv-ops__soa-sub">{recap.vesselName} · IMO {recap.vesselImo || voyage.imo || '—'} · to Bunkers Department</span>
           </div>
           <div className="fv-ops__soa-headbtns">
             <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
@@ -3365,12 +4888,11 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
                   <div className="fv-ops__vd-fields">
                     <label className="fv-ops__vd-field">
                       <span>Port of Supply</span>
-                      <select className="fv-ops__vd-in" value="" onChange={(e) => applyPort(ei, Number(e.target.value))}>
+                      <select className="fv-ops__vd-in" value={entry.port} onChange={(e) => applyPortByName(ei, e.target.value)}>
                         <option value="">— pick from itinerary —</option>
-                        {ports.map((o, i) => <option key={i} value={i}>{o.port}{o.supV + o.supM > 0 ? ' · supply planned' : ''}</option>)}
+                        {portPickList.map((o, i) => <option key={i} value={o.port}>{o.port}{o.supV + o.supM > 0 ? ' · supply planned' : ''}</option>)}
                       </select>
                     </label>
-                    <label className="fv-ops__vd-field"><span>Port (edit)</span><input className="fv-ops__vd-in" value={entry.port} onChange={(e) => setEntryField(ei, { port: e.target.value })} /></label>
                     <label className="fv-ops__vd-field"><span>ETA at Port</span><input type="datetime-local" className="fv-ops__vd-in fv-ops__vd-in--dt" value={dmyToDatetimeLocal(entry.eta)} onChange={(e) => setEntryField(ei, { eta: datetimeLocalToDmy(e.target.value) })} /></label>
                     <label className="fv-ops__vd-field"><span>Laycan Start</span><input type="datetime-local" className="fv-ops__vd-in fv-ops__vd-in--dt" value={dmyToDatetimeLocal(entry.laycanStart)} onChange={(e) => setEntryField(ei, { laycanStart: dateInputToDmy(e.target.value.split('T')[0]) })} /></label>
                     <label className="fv-ops__vd-field"><span>Laycan End</span><input type="datetime-local" className="fv-ops__vd-in fv-ops__vd-in--dt" value={dmyToDatetimeLocal(entry.laycanEnd)} onChange={(e) => setEntryField(ei, { laycanEnd: dateInputToDmy(e.target.value.split('T')[0]) })} /></label>
@@ -3379,12 +4901,13 @@ function BunkerRequestModal({ recap, voyage, ports, onClose }: {
                     <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={() => addLine(ei)}><i className="fas fa-plus" aria-hidden="true" /> Fuel</button>
                   </div>
                   <table className="fv-ops__table">
-                    <thead><tr><th>Fuel Type</th><th className="fv-ops__r">Quantity (MT)</th><th aria-label="Remove" /></tr></thead>
+                    <thead><tr><th>Fuel Type</th><th className="fv-ops__r">Quantity (MT)</th><th>Specs</th><th aria-label="Remove" /></tr></thead>
                     <tbody>
                       {entry.lines.map((l, li) => (
                         <tr key={li}>
                           <td><select className="fv-ops__eta-sel" value={l.fuel} onChange={(e) => setLine(ei, li, { fuel: e.target.value })}>{OPS_FUEL_GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></td>
                           <td className="fv-ops__r"><input className="fv-ops__eta-in" value={l.qty} placeholder="0" onChange={(e) => setLine(ei, li, { qty: e.target.value })} /></td>
+                          <td className="fv-ops__bnkreq-specs">{specsFor(l.fuel) || '—'}</td>
                           <td className="fv-ops__r">{entry.lines.length > 1 && <button type="button" className="fv-ops__bnk-rm" aria-label="Remove fuel" onClick={() => delLine(ei, li)}><i className="fas fa-xmark" aria-hidden="true" /></button>}</td>
                         </tr>
                       ))}
@@ -3425,18 +4948,159 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
     });
   const removePoint = (i: number) =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, points: r.stowage.points.filter((_, idx) => idx !== i) } }));
+  // Rebuild the zone/port columns from the ETA & ROB port rotation, auto-inserting a Load
+  // Line Zone crossing column wherever the route between two consecutive ports is detected
+  // to pass through a different zone (best-effort — see classifyLoadLineZone()).
+  const worldPorts = useWorldPorts();
+  const syncPointsFromRotation = () => {
+    const computed = projectEtaLegs(recap.etaPlan);
+    const seen = new Set<string>();
+    const stops: { name: string; lat?: number; lon?: number; date?: Date }[] = [];
+    recap.etaPlan.legs.forEach((l, idx) => {
+      const name = l.to?.trim();
+      if (l.kind !== 'port' || !name) return;
+      const key = name.toUpperCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      const port = matchWorldPort(name, worldPorts);
+      const date = computed[idx]?.dep ?? computed[idx]?.arr ?? undefined;
+      stops.push({ name, lat: port?.lat, lon: port?.lon, date: date ?? undefined });
+    });
+
+    const names: string[] = [];
+    stops.forEach((a, i) => {
+      names.push(a.name);
+      const b = stops[i + 1];
+      if (!b || a.lat == null || a.lon == null || b.lat == null || b.lon == null) return;
+      // Sample the straight-line path between the two ports (with the date interpolated across
+      // the leg's transit time) and flag every zone the route passes through in between.
+      const steps = 16;
+      let lon2 = b.lon;
+      while (lon2 - a.lon > 180) lon2 -= 360;
+      while (lon2 - a.lon < -180) lon2 += 360;
+      const tMs = a.date && b.date ? b.date.getTime() - a.date.getTime() : 0;
+      let prevZone = classifyLoadLineZone(a.lat, a.lon, a.date ?? new Date()).name;
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        const lat = a.lat + (b.lat - a.lat) * t;
+        const lon = a.lon + (lon2 - a.lon) * t;
+        const date = a.date && tMs ? new Date(a.date.getTime() + tMs * t) : (a.date ?? new Date());
+        const zone = classifyLoadLineZone(lat, lon, date).name;
+        if (zone !== prevZone) {
+          names.push(`Entry ${zone}`);
+          prevZone = zone;
+        }
+      }
+    });
+
+    setRecap((r) => ({
+      ...r,
+      stowage: {
+        ...r.stowage,
+        points: names.map((name) => {
+          const existing = r.stowage.points.find((p) => p.name.trim().toUpperCase() === name.toUpperCase());
+          return existing ?? { name, displacement: '', density: '', vlsfo: '0', mgo: '0', bw: '0', fw: '0', constants: '0' };
+        }),
+      },
+    }));
+  };
   const setHold = (i: number, patch: Partial<StowageHold>) =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, holds: r.stowage.holds.map((h, idx) => (idx === i ? { ...h, ...patch } : h)) } }));
+  const addHold = () =>
+    setRecap((r) => {
+      const base = r.stowage.holds[r.stowage.holds.length - 1];
+      const nh: StowageHold = { name: `Hold ${r.stowage.holds.length + 1}`, cargo: base?.cargo ?? '', qty: '0', capacity: base?.capacity ?? '', grainCap: base?.grainCap ?? '', baleCap: base?.baleCap ?? '', tankTopArea: base?.tankTopArea ?? '', tankTopMax: base?.tankTopMax ?? '' };
+      return { ...r, stowage: { ...r.stowage, holds: [...r.stowage.holds, nh] } };
+    });
+  const removeHold = (i: number) =>
+    setRecap((r) => ({ ...r, stowage: { ...r.stowage, holds: r.stowage.holds.filter((_, idx) => idx !== i) } }));
+  // Keep the hold rows (grow or shrink) in sync with "No. of Holds" (Fixture & Vessel card).
+  // Runs on mount too (the Cargo & Stowage tab unmounts when you switch tabs, so a ref-based
+  // "only when it changes" guard missed edits made on the Voyage Details tab) and is a no-op
+  // once the counts already match, so it won't fight a manual +/✕ edit on its own.
+  useEffect(() => {
+    const target = Math.round(num(recap.holdCount || ''));
+    if (!(target > 0)) return;
+    setRecap((r) => {
+      if (r.stowage.holds.length === target) return r;
+      let holds = [...r.stowage.holds];
+      if (holds.length < target) {
+        while (holds.length < target) {
+          holds.push({ name: `Hold ${holds.length + 1}`, cargo: '', qty: '0', capacity: '', grainCap: '', baleCap: '', tankTopArea: '', tankTopMax: '' });
+        }
+      } else if (holds.length > target) {
+        holds = holds.slice(0, target);
+      }
+      return { ...r, stowage: { ...r.stowage, holds } };
+    });
+  }, [recap.holdCount, setRecap]);
   const setGrade = (i: number, patch: Partial<StowageGrade>) =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, grades: r.stowage.grades.map((g, idx) => (idx === i ? { ...g, ...patch } : g)) } }));
   const addGrade = () =>
-    setRecap((r) => ({ ...r, stowage: { ...r.stowage, grades: [...r.stowage.grades, { grade: '', sf: '', qty: '' }] } }));
+    setRecap((r) => ({ ...r, stowage: { ...r.stowage, grades: [...r.stowage.grades, { grade: '', sf: '', qty: '', sfAuto: true }] } }));
   const removeGrade = (i: number) =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, grades: r.stowage.grades.filter((_, idx) => idx !== i) } }));
+
+  // Cargo Master database lookup — grade names searched against the admin-maintained
+  // cargo database, with the stowage factor pulled from it unless manually overridden.
+  const cargoMaster = useCargoMaster();
+  const cargoOptions = useMemo(
+    () => cargoMaster
+      .filter((c) => c.status === 'Active')
+      .map((c) => ({
+        value: c.cargoName,
+        meta: c.stowageFactorMin || c.stowageFactorMax
+          ? `SF ${c.stowageFactorMin || '—'}–${c.stowageFactorMax || '—'} ${c.stowageFactorUnit}`
+          : c.category || undefined,
+      })),
+    [cargoMaster],
+  );
+  // Grade name change: re-match the Cargo Master database and pull its SF whenever the
+  // field still holds an auto-filled value, or was left blank (a non-empty manual SF
+  // edit sticks until the grade is changed again).
+  const setGradeName = (i: number, name: string) => {
+    const sf = cargoStowageFactor(name);
+    setRecap((r) => ({
+      ...r,
+      stowage: {
+        ...r.stowage,
+        grades: r.stowage.grades.map((g, idx) => {
+          if (idx !== i) return g;
+          if (sf && (g.sfAuto !== false || !g.sf.trim())) return { ...g, grade: name, sf, sfAuto: true };
+          return { ...g, grade: name };
+        }),
+      },
+    }));
+  };
   const setPort = (i: number, patch: Partial<StowagePort>) =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, ports: r.stowage.ports.map((p, idx) => (idx === i ? { ...p, ...patch } : p)) } }));
   const addPort = () =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, ports: [...r.stowage.ports, { name: '', maxDraft: '', density: '1.025', remarks: '' }] } }));
+  // Rebuild the port list from the ETA & ROB port rotation (kind: 'port' legs) — remarks
+  // mirror that leg's Type, and any max draft / density already entered for a matching
+  // port name is preserved.
+  const syncPortsFromRotation = () => {
+    const seen = new Set<string>();
+    const rotation: { name: string; type: string }[] = [];
+    recap.etaPlan.legs.forEach((l) => {
+      const name = l.to?.trim();
+      if (l.kind !== 'port' || !name) return;
+      const key = name.toUpperCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      rotation.push({ name, type: l.type || '' });
+    });
+    setRecap((r) => ({
+      ...r,
+      stowage: {
+        ...r.stowage,
+        ports: rotation.map(({ name, type }) => {
+          const existing = r.stowage.ports.find((p) => p.name.trim().toUpperCase() === name.toUpperCase());
+          return { name, maxDraft: existing?.maxDraft ?? '', density: existing?.density ?? '', remarks: type };
+        }),
+      },
+    }));
+  };
   const removePort = (i: number) =>
     setRecap((r) => ({ ...r, stowage: { ...r.stowage, ports: r.stowage.ports.filter((_, idx) => idx !== i) } }));
 
@@ -3451,10 +5115,10 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
   }, [recap.etaPlan]);
 
   const lightship = num(st.lightship);
-  // Vessel hydrostatic reference (from the density-correction card) for deriving
-  // a port's max displacement from its max draft: Δdisp = TPC × 100 per metre.
+  // Vessel hydrostatic reference (from the Displacement field above, or the density-correction
+  // card if left blank) for deriving a port's max displacement from its max draft: Δdisp = TPC × 100 per metre.
   const draftRef = num(st.draft.draftCurrent);
-  const dispRef = num(st.draft.dispSW);
+  const dispRef = num(st.refDisplacement) || num(st.draft.dispSW);
   const tpcRef = num(st.draft.tpc);
   const portFor = (name: string) => st.ports.find((pp) => pp.name.trim().toUpperCase() === (name || '').trim().toUpperCase());
   // Load-line zone crossing → the vessel's zone draught caps the max draft.
@@ -3472,14 +5136,14 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
     const density = portDensity || num(p.density) || 1.025;
     const maxDraft = zoneDraft > 0 ? zoneDraft : (port ? num(port.maxDraft) : 0);
     const draftDerived = maxDraft > 0 && dispRef > 0 && tpcRef > 0 && draftRef > 0;
-    const dispMax = draftDerived ? dispRef + (maxDraft - draftRef) * tpcRef * 100 : num(p.displacement);
+    const dispMax = (p.displacementAuto !== false && draftDerived) ? dispRef + (maxDraft - draftRef) * tpcRef * 100 : num(p.displacement);
     const dispPort = dispMax * (density / 1.025);
     const auto = st.autoBunker ? robByPort[p.name.trim().toUpperCase()] : undefined;
     const vlsfo = auto ? auto.v : num(p.vlsfo);
     const mgo = auto ? auto.m : num(p.mgo);
-    const bw = num(p.bw);
-    const fw = num(p.fw);
-    const constants = num(p.constants);
+    const bw = num(st.ballastWater);
+    const fw = num(st.freshWater);
+    const constants = num(st.constants);
     const deductions = vlsfo + mgo + bw + fw + constants;
     const dwt = dispPort - lightship;
     const cargo = dwt - deductions;
@@ -3493,30 +5157,6 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
   const govDensity = governIdx >= 0 ? rows[governIdx].density.toFixed(3) : '';
   const govBunker = governIdx >= 0 ? rows[governIdx].vlsfo + rows[governIdx].mgo : 0;
   const govPort = st.ports.find((p) => p.name.trim().toUpperCase() === (governName || '').trim().toUpperCase());
-
-  // --- Heuristic "AI" recommendations (freight × intake trade-offs) ---------
-  const freight = num(recap.freightPerMt);
-  const cpNum = num((recap.cpQuantity || '').split('/')[0]);
-  const maxCargoVal = cargoVals.length ? Math.max(...cargoVals) : 0;
-  const trapped = Math.max(0, maxCargoVal - minCargo);
-  const bunkerAtGov = governIdx >= 0 ? rows[governIdx].vlsfo + rows[governIdx].mgo : 0;
-  const portBefore = governIdx > 0 ? st.points[governIdx - 1]?.name : '';
-  const portAfter = governIdx >= 0 && governIdx < st.points.length - 1 ? st.points[governIdx + 1]?.name : '';
-  const applyMaxIntake = () => setRecap((r) => ({ ...r, finalQtyLoaded: String(Math.round(minCargo)) }));
-
-  type Rec = { tone: 'good' | 'bad' | 'flat'; icon: string; title: string; text: string; impact?: number; action?: () => void; actionLabel?: string };
-  const recs: Rec[] = [];
-  if (cpNum > 0 && minCargo >= cpNum) {
-    recs.push({ tone: 'good', icon: 'fa-arrow-trend-up', title: 'Lift full CP quantity', text: `Governing zone ${governName} allows ${fmt(minCargo, 0)} MT — above CP ${fmt(cpNum, 0)} MT. Load CP max within tolerance; ${fmt(minCargo - cpNum, 0)} MT spare capacity.`, impact: cpNum * freight, action: applyMaxIntake, actionLabel: 'Set BL = max intake' });
-  } else if (minCargo > 0) {
-    const short = Math.max(0, cpNum - minCargo);
-    recs.push({ tone: 'bad', icon: 'fa-triangle-exclamation', title: 'Intake below CP — deadfreight risk', text: `Max intake ${fmt(minCargo, 0)} MT (governing at ${governName})${cpNum ? ` is ${fmt(short, 0)} MT under CP ${fmt(cpNum, 0)} MT` : ''}. Potential deadfreight ≈ $${fmt(short * freight, 0)}. Trim bunkers / ballast at ${governName} or advise charterers.`, impact: -short * freight, action: applyMaxIntake, actionLabel: 'Set BL = max intake' });
-  }
-  recs.push({ tone: 'good', icon: 'fa-gas-pump', title: 'Optimise bunker ROB at governing zone', text: `${governName} carries ${fmt(bunkerAtGov, 0)} MT bunkers on board — each MT trimmed here frees 1 MT of cargo (~$${fmt(freight, 2)}/MT). Stemming 200 MT less before ${governName} ≈ +$${fmt(200 * freight, 0)} freight; bunker after the summer-zone crossing instead.`, impact: 200 * freight });
-  recs.push({ tone: 'flat', icon: 'fa-arrows-split-up-and-left', title: 'Split supply across two ports', text: `Stem only enough VLSFO at ${portBefore || 'the load port'} to safely reach ${governName}, then top up at ${portAfter || 'the next port'} after the deepest-draft zone. Keeps ROB low where draft governs; compare bunker prices at ${portBefore || 'port A'} vs ${portAfter || 'port B'} and lift the cheaper grade in bulk.` });
-  if (trapped > 0) {
-    recs.push({ tone: 'flat', icon: 'fa-scale-unbalanced', title: 'Draft-limited cargo', text: `Up to ${fmt(trapped, 0)} MT (≈ $${fmt(trapped * freight, 0)} freight) is trapped by the ${governName} restriction vs the least-restrictive zone. Managing bunkers/ballast at that crossing recovers part of it.`, impact: trapped * freight });
-  }
 
   const nIn = (val: string, on: (v: string) => void) => (
     <input className="fv-ops__eta-in" inputMode="decimal" value={val} onChange={(e) => on(e.target.value)} />
@@ -3533,7 +5173,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
     const maxByGrain = sf > 0 ? num(h.grainCap) / sf : 0;
     const maxByBale = sf > 0 ? num(h.baleCap) / sf : 0;
     const maxByStrength = num(h.tankTopArea) * num(h.tankTopMax);
-    const constraints = [maxByGrain, maxByStrength].filter((v) => v > 0);
+    const constraints = [maxByGrain, maxByBale, maxByStrength].filter((v) => v > 0);
     const maxLoadable = constraints.length ? Math.min(...constraints) : num(h.capacity);
     return { sf, maxByGrain, maxByBale, maxByStrength, maxLoadable };
   };
@@ -3556,11 +5196,102 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
   const shoreQ = num(dc.shoreScaleQty);
   const diffQty = shoreQ - shipQ;
   const pctDiff = shipQ > 0 ? (diffQty / shipQ) * 100 : 0;
-  const loi = Math.abs(pctDiff) > 0.5 ? 'YES' : 'NO';
+  const loiTolerance = num(dc.loiTolerancePct) || 0.5;
+  const loi = Math.abs(pctDiff) > loiTolerance ? 'YES' : 'NO';
+
+  // --- "AI" recommendations — every figure below is pulled live from the actual Cargo & Stowage
+  // data (DWT intake, hold capacities, ETA & ROB bunkers, ship/shore survey) rather than fixed
+  // assumptions, so each recommendation only appears when it reflects a real, current condition. ---
+  const freight = num(recap.freightPerMt);
+  const cpNum = num((recap.cpQuantity || '').split('/')[0]);
+  const maxCargoVal = cargoVals.length ? Math.max(...cargoVals) : 0;
+  const trapped = Math.max(0, maxCargoVal - minCargo);
+  const bunkerAtGov = governIdx >= 0 ? rows[governIdx].vlsfo + rows[governIdx].mgo : 0;
+  const portBefore = governIdx > 0 ? st.points[governIdx - 1]?.name : '';
+  const portAfter = governIdx >= 0 && governIdx < st.points.length - 1 ? st.points[governIdx + 1]?.name : '';
+  const applyMaxIntake = () => setRecap((r) => ({ ...r, finalQtyLoaded: String(Math.round(minCargo)) }));
+
+  // Minimum bunkers needed (+10% margin) to safely sail the leg departing the governing point —
+  // anything carried above this at the governing point is genuine spare ROB, not a cargo guess.
+  const legFromGoverning = recap.etaPlan.legs.find((l) => l.kind === 'sea' && l.from.trim().toUpperCase() === (governName || '').trim().toUpperCase());
+  let safeMinBunkerAtGov = 0;
+  if (legFromGoverning) {
+    const dist = num(legFromGoverning.distNonEca) + num(legFromGoverning.distEca);
+    const speed = num(legFromGoverning.speed) * (1 - num(legFromGoverning.wf) / 100);
+    const days = speed > 0 ? dist / (speed * 24) : 0;
+    safeMinBunkerAtGov = (num(legFromGoverning.consVlsfo) + num(legFromGoverning.consMgo)) * days * 1.1;
+  }
+  const spareBunkerAtGov = legFromGoverning ? Math.max(0, bunkerAtGov - safeMinBunkerAtGov) : 0;
+
+  type Rec = { tone: 'good' | 'bad' | 'flat'; icon: string; title: string; text: string; impact?: number; action?: () => void; actionLabel?: string };
+  const recs: Rec[] = [];
+
+  if (cpNum > 0 && minCargo >= cpNum) {
+    recs.push({ tone: 'good', icon: 'fa-arrow-trend-up', title: 'Lift full CP quantity', text: `Governing zone ${governName} allows ${fmt(minCargo, 0)} MT — above CP ${fmt(cpNum, 0)} MT. Load CP max within tolerance; ${fmt(minCargo - cpNum, 0)} MT spare capacity.`, impact: cpNum * freight, action: applyMaxIntake, actionLabel: 'Set BL = max intake' });
+  } else if (minCargo > 0 && cpNum > 0) {
+    const short = Math.max(0, cpNum - minCargo);
+    recs.push({ tone: 'bad', icon: 'fa-triangle-exclamation', title: 'Intake below CP — deadfreight risk', text: `Max intake ${fmt(minCargo, 0)} MT (governing at ${governName}) is ${fmt(short, 0)} MT under CP ${fmt(cpNum, 0)} MT. Potential deadfreight ≈ $${fmt(short * freight, 0)}. Trim bunkers / ballast at ${governName} or advise charterers.`, impact: -short * freight, action: applyMaxIntake, actionLabel: 'Set BL = max intake' });
+  }
+
+  // Bunker-trim opportunity — only surfaced when there's real spare ROB *and* draft is actually
+  // binding (trapped > 0), sized from the next leg's own consumption rather than a flat guess.
+  if (spareBunkerAtGov > 20 && trapped > 0 && governName && governName !== '—') {
+    const gain = Math.min(spareBunkerAtGov, trapped);
+    recs.push({
+      tone: 'good',
+      icon: 'fa-gas-pump',
+      title: 'Trim bunkers at the governing point',
+      text: `${governName} carries ${fmt(bunkerAtGov, 0)} MT bunkers vs ~${fmt(safeMinBunkerAtGov, 0)} MT needed (+10% margin) to safely reach ${legFromGoverning?.to || 'the next port'}. Trimming the ${fmt(spareBunkerAtGov, 0)} MT spare frees up to ${fmt(gain, 0)} MT of extra cargo.`,
+      impact: gain * freight,
+    });
+  }
+
+  if (portBefore && portAfter && bunkerAtGov > 0 && trapped > 0) {
+    recs.push({ tone: 'flat', icon: 'fa-arrows-split-up-and-left', title: 'Split bunker supply across two ports', text: `Stem only enough fuel at ${portBefore} to safely reach ${governName}, then top up at ${portAfter} after the draft-restricted crossing — keeps ROB low exactly where draft governs the intake.` });
+  }
+
+  if (trapped > 10) {
+    recs.push({ tone: 'flat', icon: 'fa-scale-unbalanced', title: 'Draft-limited cargo', text: `Up to ${fmt(trapped, 0)} MT (≈ $${fmt(trapped * freight, 0)} freight) is trapped by the ${governName} restriction vs the least-restrictive zone (max ${fmt(maxCargoVal, 0)} MT). Managing bunkers/ballast at that crossing recovers part of it.`, impact: trapped * freight });
+  }
+
+  // Hold-level checks — real figures from the Hold Capacities table, not just the DWT summary.
+  const overHolds = st.holds.map((h) => ({ h, lim: holdLimits(h) })).filter(({ h, lim }) => lim.maxLoadable > 0 && num(h.qty) > lim.maxLoadable);
+  if (overHolds.length > 0) {
+    const worst = overHolds.reduce((a, b) => (num(b.h.qty) - b.lim.maxLoadable > num(a.h.qty) - a.lim.maxLoadable ? b : a));
+    const excess = num(worst.h.qty) - worst.lim.maxLoadable;
+    const governs = worst.lim.maxByStrength > 0 && worst.lim.maxByStrength === worst.lim.maxLoadable ? 'tank-top strength' : worst.lim.maxByBale > 0 && worst.lim.maxByBale === worst.lim.maxLoadable ? 'bale capacity' : 'grain capacity';
+    recs.push({
+      tone: 'bad',
+      icon: 'fa-weight-hanging',
+      title: overHolds.length > 1 ? `${overHolds.length} holds over their loadable limit` : `${worst.h.name} over its loadable limit`,
+      text: `${worst.h.name} is planned at ${fmt(num(worst.h.qty), 0)} MT vs a max loadable of ${fmt(worst.lim.maxLoadable, 0)} MT (${governs} governs) — ${fmt(excess, 0)} MT over.${overHolds.length > 1 ? ` ${overHolds.length - 1} other hold(s) also exceed their limit.` : ''} Redistribute to holds with spare capacity.`,
+    });
+  }
+
+  // A grade with no stowage factor makes every Grain/Bale capacity figure for that hold unreliable.
+  const gradesNoSf = Array.from(new Set(st.holds.map((h) => h.cargo.trim()).filter(Boolean))).filter((cargoName) => gradeSf(cargoName) <= 0);
+  if (gradesNoSf.length > 0) {
+    recs.push({ tone: 'bad', icon: 'fa-circle-question', title: 'Missing stowage factor', text: `No SF found for ${gradesNoSf.join(', ')} in Cargo Grades & Stowage Factor — Max by Grain/Bale can't be calculated for those holds until SF is entered.` });
+  }
+
+  // Hold-wise plan vs the DWT-derived governing cargo figure should reconcile.
+  const holdsTotal = st.holds.reduce((s, h) => s + num(h.qty), 0);
+  const holdsVsIntakeDiff = holdsTotal - minCargo;
+  if (st.holds.length > 0 && minCargo > 0 && Math.abs(holdsVsIntakeDiff) > Math.max(50, minCargo * 0.01)) {
+    recs.push({ tone: 'flat', icon: 'fa-clipboard-check', title: "Hold plan doesn't match max intake", text: `Holds total ${fmt(holdsTotal, 0)} MT vs ${fmt(minCargo, 0)} MT max intake at ${governName} — a ${fmt(Math.abs(holdsVsIntakeDiff), 0)} MT ${holdsVsIntakeDiff > 0 ? 'over-allocation' : 'shortfall'}. Re-check the hold-wise distribution.` });
+  }
+
+  // Ship/shore quantity dispute — surfaced here too since it directly affects the B/L figure.
+  if (loi === 'YES') {
+    recs.push({ tone: 'bad', icon: 'fa-file-signature', title: 'Ship/shore difference exceeds tolerance', text: `${fmt(Math.abs(pctDiff), 2)}% difference between ship draft survey and shore scale qty (tolerance ${fmt(loiTolerance, 2)}%) — issue a Letter of Protest before finalising cargo documents.` });
+  }
+
+  recs.sort((a, b) => Math.abs(b.impact ?? 0) - Math.abs(a.impact ?? 0));
 
   const calcField = (label: string, value: string) => (
     <div className="fv-ops__vd-field"><span>{label}</span><b className="fv-ops__stw-calcfield">{value}</b></div>
   );
+
 
   return (
     <div className="fv-ops__col">
@@ -3572,7 +5303,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
         <div className="fv-ops__vd-cell"><span className="fv-ops__vd-cell-label">Governing Density</span><span className="fv-ops__vd-cell-value">{govDensity || '—'}</span></div>
         <div className="fv-ops__vd-cell"><span className="fv-ops__vd-cell-label">Max Draft @ Governing</span><span className="fv-ops__vd-cell-value">{govPort?.maxDraft ? `${govPort.maxDraft} m` : '—'}</span></div>
         <div className="fv-ops__vd-cell"><span className="fv-ops__vd-cell-label">Bunkers @ Governing</span><span className="fv-ops__vd-cell-value">{fmt(govBunker, 0)} MT</span></div>
-        <div className="fv-ops__vd-cell"><span className="fv-ops__vd-cell-label">CP Quantity</span><span className="fv-ops__vd-cell-value">{recap.cpQuantity || '—'}</span></div>
+        <div className="fv-ops__vd-cell"><span className="fv-ops__vd-cell-label">CP Quantity</span><span className="fv-ops__vd-cell-value">{recap.cpQuantity ? `${recap.cpQuantity} ${recap.cpQuantityOption === 'RANGE' ? `(${recap.cpQuantityMin || '—'}–${recap.cpQuantityMax || '—'}) MIN/MAX` : recap.cpQuantityOption === 'PERCENT' ? `± ${recap.cpQuantityTolerancePct || '0'}%` : recap.cpQuantityOption || 'OO'}` : '—'}</span></div>
         <div className="fv-ops__vd-cell"><span className="fv-ops__vd-cell-label">Final Qty / BL</span><span className="fv-ops__vd-cell-value">{recap.finalQtyLoaded || '—'} MT</span></div>
       </div>
 
@@ -3590,8 +5321,24 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
             <tbody>
               {st.grades.map((g, i) => (
                 <tr key={i}>
-                  <td><input className="fv-ops__vd-in" value={g.grade} placeholder="e.g. Gypsum" onChange={(e) => setGrade(i, { grade: e.target.value })} /></td>
-                  <td className="fv-ops__r">{nIn(g.sf, (v) => setGrade(i, { sf: v }))}</td>
+                  <td>
+                    <VdAutocomplete
+                      value={g.grade}
+                      onChange={(v) => setGradeName(i, v)}
+                      options={cargoOptions}
+                      placeholder="Search cargo database…"
+                      inputClass="fv-ops__vd-in"
+                    />
+                  </td>
+                  <td className="fv-ops__r">
+                    <input
+                      className={`fv-ops__eta-in${g.sfAuto && g.sf ? ' fv-ops__stw-derived-in' : ''}`}
+                      inputMode="decimal"
+                      value={g.sf}
+                      title={g.sfAuto && g.sf ? 'From Cargo Master database — edit to override' : undefined}
+                      onChange={(e) => setGrade(i, { sf: e.target.value, sfAuto: false })}
+                    />
+                  </td>
                   <td className="fv-ops__r">{nIn(g.qty, (v) => setGrade(i, { qty: v }))}</td>
                   <td className="fv-ops__r fv-ops__stw-calc">{fmt(num(g.qty) * num(g.sf), 0)}</td>
                   <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label="Remove grade" onClick={() => removeGrade(i)}><i className="fas fa-xmark" aria-hidden="true" /></button></td>
@@ -3599,13 +5346,20 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
               ))}
             </tbody>
           </table>
-          <p className="fv-ops__hint">Stowage Factor (SF) = m³ occupied per MT. Higher SF = lighter/bulkier cargo. Used to derive each hold's max weight from its volume.</p>
+          <p className="fv-ops__hint">Grade / Description is searched against the Cargo Master database (Settings → Cargo Master) — picking a match pulls its Stowage Factor automatically; edit SF manually to override. SF (m³/MT) is used to derive each hold's max weight from its volume.</p>
         </Card>
 
         <Card
           title="Ports & Draft Restrictions"
           icon="fa-anchor"
-          right={<button type="button" className="fv-ops__btn" onClick={addPort}><i className="fas fa-plus" aria-hidden="true" /> Port</button>}
+          right={(
+            <span className="fv-ops__eta-addbtns">
+              <button type="button" className="fv-ops__btn" onClick={syncPortsFromRotation} title="Rebuild the port list from the ETA & ROB port rotation">
+                <i className="fas fa-rotate" aria-hidden="true" /> Sync from ETA &amp; ROB
+              </button>
+              <button type="button" className="fv-ops__btn" onClick={addPort}><i className="fas fa-plus" aria-hidden="true" /> Port</button>
+            </span>
+          )}
         >
           <table className="fv-ops__stw fv-ops__stw--rows">
             <thead>
@@ -3623,7 +5377,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
               ))}
             </tbody>
           </table>
-          <p className="fv-ops__hint">Enter each port's max permissible draft &amp; water density — the deepest-draft / lowest-density port usually governs the cargo intake.</p>
+          <p className="fv-ops__hint">“Sync from ETA &amp; ROB” pulls the port list and Remarks (leg Type) from the ETA &amp; ROB port rotation — any Max Draft / Density already entered for a matching port name is kept. No database currently holds per-port max draft or water density (the World Port Index has only name/country/coordinates), so enter these manually from the port's sailing directions / agent advice.</p>
         </Card>
       </div>
 
@@ -3632,6 +5386,9 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
         icon="fa-scale-balanced"
         right={(
           <span className="fv-ops__eta-addbtns">
+            <button type="button" className="fv-ops__btn" onClick={syncPointsFromRotation} title="Rebuild the zone/port columns from the ETA & ROB port rotation, auto-detecting any Load Line Zone crossing in between">
+              <i className="fas fa-rotate" aria-hidden="true" /> Sync from ETA &amp; ROB
+            </button>
             <button type="button" className="fv-ops__btn" onClick={deriveZoneDrafts} title="Winter = Summer − 1/48; Tropical = Summer + 1/48">W/T from Summer</button>
             <label className="fv-ops__stw-toggle" title="Auto-fill VLSFO/MGO from the ETA & ROB itinerary where the port name matches">
               <input type="checkbox" checked={st.autoBunker} onChange={(e) => setPlan({ autoBunker: e.target.checked })} /> Auto bunkers
@@ -3640,8 +5397,12 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
           </span>
         )}
       >
-        <div className="fv-ops__vd-fields fv-ops__eta-controls">
+        <div className="fv-ops__vd-fields fv-ops__eta-controls fv-ops__stw-dwtfields">
+          <VdField label="Displacement (MT)" value={st.refDisplacement} onChange={(v) => setPlan({ refDisplacement: v })} num />
           <VdField label="Lightship (MT)" value={st.lightship} onChange={(v) => setPlan({ lightship: v })} num />
+          <VdField label="Constants (MT)" value={st.constants} onChange={(v) => setPlan({ constants: v })} num />
+          <VdField label="Fresh Water (MT)" value={st.freshWater} onChange={(v) => setPlan({ freshWater: v })} num />
+          <VdField label="Ballast Water (MT)" value={st.ballastWater} onChange={(v) => setPlan({ ballastWater: v })} num />
           <VdField label="Summer Draft (m)" value={st.summerDraft} onChange={(v) => setPlan({ summerDraft: v })} num />
           <VdField label="Winter Draft (m)" value={st.winterDraft} onChange={(v) => setPlan({ winterDraft: v })} num />
           <VdField label="Tropical Draft (m)" value={st.tropicalDraft} onChange={(v) => setPlan({ tropicalDraft: v })} num />
@@ -3655,6 +5416,13 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
                   <th key={i} className={i === governIdx ? 'fv-ops__stw-gov' : undefined}>
                     <span className="fv-ops__bnk-fuelhd">
                       <input className="fv-ops__vd-in" value={p.name} onChange={(e) => setPoint(i, { name: e.target.value })} />
+                      {i === governIdx && spareBunkerAtGov > 20 && trapped > 0 && (
+                        <i
+                          className="fas fa-lightbulb fv-ops__stw-gov-tip"
+                          aria-hidden="true"
+                          title={`Governing point — trim ~${fmt(spareBunkerAtGov, 0)} MT bunkers here (keeping ~${fmt(safeMinBunkerAtGov, 0)} MT to safely reach ${legFromGoverning?.to || 'the next port'}) to free up to ${fmt(Math.min(spareBunkerAtGov, trapped), 0)} MT more cargo (~$${fmt(Math.min(spareBunkerAtGov, trapped) * freight, 0)} extra revenue).`}
+                        />
+                      )}
                       {st.points.length > 1 && <button type="button" className="fv-ops__bnk-rm" aria-label="Remove point" onClick={() => removePoint(i)}><i className="fas fa-xmark" aria-hidden="true" /></button>}
                     </span>
                   </th>
@@ -3663,16 +5431,33 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
             </thead>
             <tbody>
               <tr><th scope="row">Max Draft (m)</th>{rows.map((r, i) => <td key={i} className="fv-ops__r fv-ops__stw-calc" title={r.zone ? 'Vessel load-line zone draught' : undefined}>{r.maxDraft > 0 ? `${fmt(r.maxDraft, 2)}${r.zone ? ' ⚓' : ''}` : '—'}</td>)}</tr>
-              <tr><th scope="row">Displacement (Max)</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{rows[i].draftDerived ? <span className="fv-ops__stw-derived" title="Derived from Max Draft × TPC (density-correction card)">{fmt(rows[i].dispMax, 0)}</span> : nIn(p.displacement, (v) => setPoint(i, { displacement: v }))}</td>)}</tr>
+              <tr>
+                <th scope="row">Displacement (Max)</th>
+                {st.points.map((p, i) => {
+                  const r = rows[i];
+                  const auto = p.displacementAuto !== false && r.draftDerived;
+                  return (
+                    <td key={i} className="fv-ops__r">
+                      <input
+                        className={`fv-ops__eta-in${auto ? ' fv-ops__stw-derived-in' : ''}`}
+                        inputMode="decimal"
+                        value={auto ? String(Math.round(r.dispMax)) : p.displacement}
+                        title={auto ? 'Derived from Max Draft × TPC — edit to override' : undefined}
+                        onChange={(e) => setPoint(i, { displacement: e.target.value, displacementAuto: false })}
+                      />
+                    </td>
+                  );
+                })}
+              </tr>
               <tr><th scope="row">Lightship</th>{rows.map((_, i) => <td key={i} className="fv-ops__r fv-ops__stw-calc">{fmt(lightship, 0)}</td>)}</tr>
               <tr><th scope="row">Water Density</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{rows[i].densityFromPort ? <span className="fv-ops__stw-derived" title="From Ports & Draft Restrictions">{rows[i].density.toFixed(3)}</span> : nIn(p.density, (v) => setPoint(i, { density: v }))}</td>)}</tr>
               <tr><th scope="row">Displacement @ Density</th>{rows.map((r, i) => <td key={i} className="fv-ops__r fv-ops__stw-calc">{fmt(r.dispPort, 0)}</td>)}</tr>
               <tr className="fv-ops__stw-sub"><th scope="row">Net DWT</th>{rows.map((r, i) => <td key={i} className="fv-ops__r">{fmt(r.dwt, 0)}</td>)}</tr>
               <tr><th scope="row">(−) VLSFO</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{rows[i].autoMatched ? <span className="fv-ops__stw-derived" title="From ETA & ROB">{fmt(rows[i].vlsfo, 0)}</span> : nIn(p.vlsfo, (v) => setPoint(i, { vlsfo: v }))}</td>)}</tr>
               <tr><th scope="row">(−) MGO</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{rows[i].autoMatched ? <span className="fv-ops__stw-derived" title="From ETA & ROB">{fmt(rows[i].mgo, 0)}</span> : nIn(p.mgo, (v) => setPoint(i, { mgo: v }))}</td>)}</tr>
-              <tr><th scope="row">(−) Ballast Water</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{nIn(p.bw, (v) => setPoint(i, { bw: v }))}</td>)}</tr>
-              <tr><th scope="row">(−) Fresh Water</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{nIn(p.fw, (v) => setPoint(i, { fw: v }))}</td>)}</tr>
-              <tr><th scope="row">(−) Constants</th>{st.points.map((p, i) => <td key={i} className="fv-ops__r">{nIn(p.constants, (v) => setPoint(i, { constants: v }))}</td>)}</tr>
+              <tr><th scope="row">(−) Ballast Water</th>{rows.map((r, i) => <td key={i} className="fv-ops__r fv-ops__stw-calc">{fmt(r.bw, 0)}</td>)}</tr>
+              <tr><th scope="row">(−) Fresh Water</th>{rows.map((r, i) => <td key={i} className="fv-ops__r fv-ops__stw-calc">{fmt(r.fw, 0)}</td>)}</tr>
+              <tr><th scope="row">(−) Constants</th>{rows.map((r, i) => <td key={i} className="fv-ops__r fv-ops__stw-calc">{fmt(r.constants, 0)}</td>)}</tr>
               <tr className="fv-ops__stw-cargo">
                 <th scope="row">Cargo Qty (MT)</th>
                 {rows.map((r, i) => <td key={i} className={`fv-ops__r${i === governIdx ? ' fv-ops__stw-gov' : ''}`}>{fmt(r.cargo, 0)}</td>)}
@@ -3681,7 +5466,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
           </table>
         </div>
         <p className="fv-ops__hint">
-          <i className="fas fa-circle-info" aria-hidden="true" /> A point named <b>Summer / Winter / Tropical</b> zone is capped at the vessel's corresponding load-line draught (⚓); otherwise the Max Draft comes from the matching Ports row. <b>Max Displacement is derived from that Max Draft</b> (Δ = TPC × 100 per metre vs the reference draft/displacement in the density-correction card) and <b>Density</b> from the Ports table. Cargo Qty = (Displacement × Density/1.025) − Lightship − VLSFO − MGO − Ballast − Fresh Water − Constants. The lowest intake sets the max loadable cargo. “Auto bunkers” pulls VLSFO/MGO from the ETA &amp; ROB projection.
+          <i className="fas fa-circle-info" aria-hidden="true" /> <b>Sync from ETA &amp; ROB</b> rebuilds the zone/port columns from the port rotation and auto-inserts an <b>Entry [Zone]</b> column wherever the route between two ports is estimated to cross into a different Load Line Zone (best-effort — approximates the IMO Load Line Zone chart using each port's position and the ETA &amp; ROB transit dates; always confirm against the current chart / vessel's load line certificate). A column named <b>Summer / Winter / Tropical</b> zone is capped at the vessel's corresponding load-line draught (⚓); otherwise the Max Draft comes from the matching Ports row. <b>Max Displacement is derived from that Max Draft</b> (Δ = TPC × 100 per metre vs the <b>Displacement (MT)</b> field above and TPC/reference draft from the density-correction card — edit a column's Displacement directly to override it) and <b>Density</b> from the Ports table. Cargo Qty = (Displacement × Density/1.025) − Lightship − VLSFO − MGO − Ballast − Fresh Water − Constants. <b>Ballast Water</b>, <b>Fresh Water</b> and <b>Constants</b> are entered once above and applied to every zone/port column. The lowest intake sets the max loadable cargo. “Auto bunkers” pulls VLSFO/MGO from the ETA &amp; ROB projection.
         </p>
       </Card>
 
@@ -3724,11 +5509,12 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
         <div className="fv-ops__vd-fields">
           <VdField label="Ship Draft Survey (MT)" value={dc.shipSurveyQty} onChange={(v) => setDraft({ shipSurveyQty: v })} num />
           <VdField label="Qty as per Shore Scale (MT)" value={dc.shoreScaleQty} onChange={(v) => setDraft({ shoreScaleQty: v })} num />
+          <VdField label="LOI Tolerance (%)" value={dc.loiTolerancePct} onChange={(v) => setDraft({ loiTolerancePct: v })} num />
           {calcField('Diff in Qty (MT)', `${diffQty >= 0 ? '+' : '−'}${fmt(Math.abs(diffQty), 2)}`)}
           {calcField('% Age Diff', `${diffQty >= 0 ? '+' : '−'}${fmt(Math.abs(pctDiff), 2)}%`)}
           <div className="fv-ops__vd-field"><span>LOI to be done</span><b className={`fv-ops__stw-loi fv-ops__stw-loi--${loi === 'YES' ? 'yes' : 'no'}`}>{loi}</b></div>
         </div>
-        <p className="fv-ops__hint">LOI flagged when the ship/shore difference exceeds 0.50%. Diff = Shore Scale − Ship Draft Survey.</p>
+        <p className="fv-ops__hint">LOI flagged when the ship/shore difference exceeds the tolerance above (default 0.50%). Diff = Shore Scale − Ship Draft Survey.</p>
       </Card>
 
       {/* Hold-wise cargo distribution — ship top view */}
@@ -3761,7 +5547,11 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
       </Card>
 
       {/* Hold capacities & strength limits */}
-      <Card title="Hold Capacities & Strength Limits" icon="fa-cubes-stacked">
+      <Card
+        title="Hold Capacities & Strength Limits"
+        icon="fa-cubes-stacked"
+        right={<button type="button" className="fv-ops__btn" onClick={addHold}><i className="fas fa-plus" aria-hidden="true" /> Hold</button>}
+      >
         <div className="fv-ops__eta-scroll">
           <table className="fv-ops__stw fv-ops__stw--rows">
             <thead>
@@ -3778,6 +5568,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
                 <th className="fv-ops__r">Max by Strength (MT)</th>
                 <th className="fv-ops__r">Max Loadable (MT)</th>
                 <th className="fv-ops__r">Planned (MT)</th>
+                <th aria-label="Remove" />
               </tr>
             </thead>
             <tbody>
@@ -3785,10 +5576,10 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
                 const lim = holdLimits(h);
                 const qty = num(h.qty);
                 const over = lim.maxLoadable > 0 && qty > lim.maxLoadable;
-                const strengthGoverns = lim.maxByStrength > 0 && lim.maxByStrength <= lim.maxByGrain;
+                const strengthGoverns = lim.maxByStrength > 0 && lim.maxByStrength === lim.maxLoadable;
                 return (
                   <tr key={i}>
-                    <th scope="row">{h.name}</th>
+                    <th scope="row"><input className="fv-ops__vd-in" value={h.name} onChange={(e) => setHold(i, { name: e.target.value })} /></th>
                     <td><input className="fv-ops__vd-in" list="stw-grade-list" value={h.cargo} onChange={(e) => setHold(i, { cargo: e.target.value })} /></td>
                     <td className="fv-ops__r fv-ops__stw-calc">{lim.sf ? fmt(lim.sf, 2) : '—'}</td>
                     <td className="fv-ops__r">{nIn(h.grainCap, (v) => setHold(i, { grainCap: v }))}</td>
@@ -3800,6 +5591,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
                     <td className={`fv-ops__r fv-ops__stw-calc${strengthGoverns ? ' fv-ops__stw-gov' : ''}`}>{lim.maxByStrength ? fmt(lim.maxByStrength, 0) : '—'}</td>
                     <td className="fv-ops__r fv-ops__stw-calc"><b>{fmt(lim.maxLoadable, 0)}</b></td>
                     <td className={`fv-ops__r${over ? ' fv-ops__neg' : ''}`}>{fmt(qty, 0)}</td>
+                    <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label="Remove hold" onClick={() => removeHold(i)}><i className="fas fa-xmark" aria-hidden="true" /></button></td>
                   </tr>
                 );
               })}
@@ -3815,6 +5607,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
       {/* AI recommendations */}
       <Card title="AI Recommendations" icon="fa-robot">
         <div className="fv-ops__rec-list">
+          {recs.length === 0 && <p className="fv-ops__vd-empty">No issues or opportunities detected from the current intake, hold plan and ETA &amp; ROB bunkers.</p>}
           {recs.map((rec, i) => (
             <div key={i} className={`fv-ops__rec fv-ops__rec--${rec.tone}`}>
               <span className="fv-ops__rec-icon"><i className={`fas ${rec.icon}`} aria-hidden="true" /></span>
@@ -3833,7 +5626,7 @@ function StowageTab({ recap, setRecap }: { recap: Recap; setRecap: Dispatch<SetS
             </div>
           ))}
         </div>
-        <p className="fv-ops__hint">Heuristic guidance from the live intake, freight rate and ETA/ROB bunkers — validate against actual bunker prices &amp; charter terms before acting.</p>
+        <p className="fv-ops__hint">Recalculated live from the current intake, hold plan, ETA &amp; ROB bunkers and ship/shore figures — sorted by $ impact. Validate against actual bunker prices &amp; charter terms before acting.</p>
       </Card>
     </div>
   );
@@ -3846,10 +5639,23 @@ interface OffHireRow { cat: string; from: string; to: string; pct: string; remar
 /** Extra ad-hoc expense line in a hire SOA, due to Owners or Charterers. */
 interface ExtraExpense { desc: string; amount: string; due: string }
 /** Per-installment hire workflow state. */
-interface HirePayEntry { status: string; ballast: boolean; name?: string; from?: string; to?: string; offHire?: OffHireRow[]; bunkerPay?: boolean; bunkerRev?: boolean; jointOn?: string; jointOff?: string; hra?: string; ownersExp?: string; ownersClaim?: string; ownersClaimIds?: string[]; ilohcOn?: boolean; borV?: string; borM?: string; borFo?: string; borDo?: string; bunkerPayOff?: boolean; ballastPayOff?: boolean; extraExpenses?: ExtraExpense[]; deleted?: boolean }
+interface HirePayEntry { status: string; ballast: boolean; name?: string; from?: string; to?: string; amount?: number; due?: string; offHire?: OffHireRow[]; bunkerPay?: boolean; bunkerRev?: boolean; jointOn?: string; jointOff?: string; hra?: string; ownersExp?: string; ownersClaim?: string; ownersClaimIds?: string[]; ilohcOn?: boolean; borV?: string; borM?: string; borFo?: string; borDo?: string; bunkerPayOff?: boolean; ballastPayOff?: boolean; extraExpenses?: ExtraExpense[]; deleted?: boolean; toManual?: boolean }
 
-/** A standalone snapshot of a hire installment — independent from the live schedule. */
-interface HireDuplicate { id: string; name: string; account: string; from: string; to: string; onHire: number; offHire: number; amount: number; due: string; status: string }
+/** A standalone, independently-editable snapshot of a hire installment — opened in its own SOA
+ *  popup (same editing experience as a real hire) to experiment with "what if" scenarios without
+ *  ever touching the live schedule. Carries its OWN copy of every clause/rate field a real
+ *  installment would otherwise share via `recap` — self-contained, no carry-forward to/from
+ *  anything else (always treated as its own first-and-last installment). */
+interface HireDuplicate {
+  id: string; name: string; account: string; from: string; to: string; onHire: number; offHire: number; amount: number; due: string; status: string;
+  ballast: boolean; bunkers: number; bunkerCredit: number;
+  hirePerDay: string; adcom: string; brokerage: string; foPrice: string; doPrice: string; cve: string; ilohc: string; ballastBonus: string;
+  delV: string; delM: string; borV: string; borM: string; borFo: string; borDo: string;
+  offHireEvents: OffHireRow[]; extraExpenses: ExtraExpense[]; jointOn: string; jointOff: string; ilohcOn: boolean;
+}
+
+/** Persisted snapshot of one live hire-schedule row (serializable, saved alongside the recap). */
+interface HireScheduleRow { key: string; name: string; account: string; from: string; to: string; onHire: number; offHire: number; amount: number; due: string; status: string; ballast: boolean; bunkers: number; bunkerCredit: number; deleted: boolean }
 
 /** Hire installment workflow states. */
 const HIRE_FLOW = ['Draft', 'Sent For Approval', 'Approved', 'Sent For Payment', 'Paid & Locked'] as const;
@@ -3860,7 +5666,7 @@ function normalizeHireStatus(value: unknown): HireStatus {
 }
 const hireLocked = (s: HireStatus) => s === 'Sent For Payment' || s === 'Paid & Locked';
 const hireStatusPill = (s: HireStatus) => (s === 'Draft' ? 'blue' : s === 'Paid & Locked' ? 'green' : 'amber');
-const OFFHIRE_CATS = ['A. Working (Port)', 'B. Idle (Sea/Port)', 'C. Sea Off-Hire', 'D. Weather / WRI Time Loss'];
+const OFFHIRE_CATS = ['A. Working (Port)', 'B. Idle (Sea/Port)', 'C. Sea Off-Hire (Ballast)', 'C. Sea Off-Hire (Laden)', 'D. Weather / WRI Time Loss'];
 
 /** Off-hire duration in days for a row: (To − From) × %. */
 function offHireDays(o: OffHireRow): number {
@@ -3870,6 +5676,99 @@ function offHireDays(o: OffHireRow): number {
   const days = (t.getTime() - f.getTime()) / 86_400_000;
   const pct = o.pct === '' ? 100 : num(o.pct);
   return Math.max(0, days) * (pct / 100);
+}
+
+/** Per-category daily consumption rate (VLSFO main engine, MGO/DO aux) used to project off-hire
+ *  bunker consumption — shared by the Hire SOA popup's off-hire table and the schedule's own
+ *  off-hire value deduction. */
+function offHireCatRate(perf: EtaPerf, cat: string): { v: number; m: number } {
+  const mnCons = perf.mainNormal;
+  const snCons = perf.subNormal;
+  if (cat.startsWith('A')) return { v: num(mnCons.work), m: num(snCons.work) };
+  if (cat.startsWith('B')) return { v: num(mnCons.idle), m: num(snCons.idle) };
+  const ballast = /ballast/i.test(cat);
+  return { v: num(ballast ? mnCons.ballast : mnCons.laden), m: num(snCons.sea) };
+}
+
+/** Projected bunker ROB/consumption for one off-hire event; a manual End ROB entry is used as-is. */
+function offHireBunker(perf: EtaPerf, o: OffHireRow): { startV: number; startM: number; endV: number; endM: number; consV: number; consM: number } {
+  const r = offHireCatRate(perf, o.cat);
+  const d = offHireDays(o);
+  const startV = num(o.robStartV ?? '0'); const startM = num(o.robStartM ?? '0');
+  const manualV = (o.robEndV ?? '').trim() !== ''; const manualM = (o.robEndM ?? '').trim() !== '';
+  const endV = manualV ? num(o.robEndV ?? '0') : startV - r.v * d;
+  const endM = manualM ? num(o.robEndM ?? '0') : startM - r.m * d;
+  const consV = manualV ? startV - endV : r.v * d;
+  const consM = manualM ? startM - endM : r.m * d;
+  return { startV, startM, endV, endM, consV, consM };
+}
+
+/** Off-hire $ value for one installment's own off-hire events: hire-rate deduction (net of
+ *  commission) for the CUMULATIVE off-hire days through this hire, plus CVE for those same days,
+ *  plus bunker-consumption cost for just this hire's own events — mirrors the Hire SOA popup's
+ *  "Less: Off-Hire" balance deduction. The Cable/Victualing line charges CVE for the FULL (gross)
+ *  on-hire period, so the off-hire days' share must be deducted here, or CVE would be overpaid
+ *  for time the vessel was off-hire. */
+function offHireValueFor(perf: EtaPerf, offHireList: OffHireRow[], cumulativeOffHireDays: number, hirePerDay: number, dedPct: number, cvePerMonth: number, foPrice: number, doPrice: number): number {
+  const bunkerCost = offHireList.reduce((s, o) => {
+    const b = offHireBunker(perf, o);
+    return s + b.consV * foPrice + b.consM * doPrice;
+  }, 0);
+  return cumulativeOffHireDays * hirePerDay * (1 - dedPct / 100) + (cvePerMonth / 30) * cumulativeOffHireDays + bunkerCost;
+}
+
+/** Recompute a `HireDuplicate`'s displayed on/off-hire days, bunkers and amount payable from its
+ *  own independent fields — mirrors the real cumulative-then-deduct formula exactly, but
+ *  self-contained (it's always its own first-and-last installment: BOD/BOR/ILOHC/Joint Survey
+ *  apply in full here, nothing carries forward from or to any other hire, real or duplicate). */
+function recomputeDuplicate(d: HireDuplicate, perf: EtaPerf): HireDuplicate {
+  const from = parseDMY(d.from);
+  const to = parseDMY(d.to);
+  const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : 0;
+  const offHire = d.offHireEvents.reduce((s, o) => s + offHireDays(o), 0);
+  const hd = num(d.hirePerDay);
+  const dedPct = num(d.adcom) + num(d.brokerage);
+  const foP = num(d.foPrice);
+  const doP = num(d.doPrice);
+  const gross = hd * onHire;
+  const bb = d.ballast ? num(d.ballastBonus) : 0;
+  const cve = (num(d.cve) / 30) * onHire;
+  const bodValue = num(d.delV) * foP + num(d.delM) * doP;
+  const borV = d.borV.trim() !== '' ? num(d.borV) : 0;
+  const borM = d.borM.trim() !== '' ? num(d.borM) : 0;
+  const borFo = d.borFo.trim() !== '' ? num(d.borFo) : foP;
+  const borDo = d.borDo.trim() !== '' ? num(d.borDo) : doP;
+  const borValue = borV * borFo + borM * borDo;
+  const offHireValue = offHireValueFor(perf, d.offHireEvents, offHire, hd, dedPct, num(d.cve), foP, doP);
+  const ilohcValue = d.ilohcOn ? num(d.ilohc) : 0;
+  const extrasOwners = d.extraExpenses.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0);
+  const extrasCharterers = d.extraExpenses.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0);
+  const amount = gross * (1 - dedPct / 100) + cve - offHireValue + bodValue + bb - borValue
+    + extrasOwners - extrasCharterers - ilohcValue - num(d.jointOn) / 2 - num(d.jointOff) / 2;
+  return { ...d, onHire, offHire, amount, bunkers: bodValue, bunkerCredit: borValue };
+}
+
+/** Cumulative Other-Expense totals (additive) and Joint Survey totals (override-cascade) across
+ *  installments 1..(uptoIndex+1). Other Expenses ADD into the running total from whichever hire
+ *  they're entered on (never overridden, never retroactive to earlier hires). Joint Survey is
+ *  instead a single running figure: whichever hire last explicitly set its own amount becomes the
+ *  new total from that hire onward; hires that never touched it simply inherit the nearest earlier
+ *  hire's value unchanged — editing it on hire N never changes what hires before N already
+ *  calculated. ILOHC is a single global value (recap.ilohc) gated by a per-hire checkbox, so it
+ *  carries forward like BOD/BB instead — see ilohcPayIdx in the caller. */
+function cumulativeExtrasFor(stateOf: (key: string) => HirePayEntry, uptoIndex: number): { jointOn: number; jointOff: number; extrasOwners: number; extrasCharterers: number; extrasList: ExtraExpense[] } {
+  let jointOn = 0, jointOff = 0, extrasOwners = 0, extrasCharterers = 0;
+  const extrasList: ExtraExpense[] = [];
+  for (let k = 0; k <= uptoIndex; k++) {
+    const e = stateOf(String(k + 1));
+    if (e.jointOn !== undefined) jointOn = num(e.jointOn);
+    if (e.jointOff !== undefined) jointOff = num(e.jointOff);
+    (e.extraExpenses ?? []).forEach((ex) => {
+      extrasList.push(ex);
+      if (ex.due === 'Owners') extrasOwners += num(ex.amount); else extrasCharterers += num(ex.amount);
+    });
+  }
+  return { jointOn, jointOff, extrasOwners, extrasCharterers, extrasList };
 }
 
 export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }: { recap: Recap; setRecap: Dispatch<SetStateAction<Recap>>; pnl: Pnl; voyage: Voyage; module?: 'Operations' | 'Postfix' }) {
@@ -3887,7 +5786,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
   const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
-  const seededSettlement = useMemo(() => seedFreightSettlement(voyage), [voyage.id, voyage.portFrom, voyage.portTo]);
+  const seededSettlement = useMemo(() => seedFreightSettlement(voyage, recap), [voyage.id, voyage.portFrom, voyage.portTo, recap.loadPort, recap.dischargePort]);
   const settlement = fl.settlement ?? seededSettlement;
   const setFL = (patch: Partial<FreightLaytimeData>) =>
     setRecap((r) => {
@@ -3910,11 +5809,11 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
 
   const stateOf = (key: string): HirePayEntry => {
     const s = recap.hirePayState[key];
-    return { status: normalizeHireStatus(s?.status), ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
+    return { status: normalizeHireStatus(s?.status), ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, amount: s?.amount, due: s?.due, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false, toManual: s?.toManual ?? false };
   };
   const setState = (key: string, patch: Partial<HirePayEntry>) =>
     setRecap((r) => ({ ...r, hirePayState: { ...r.hirePayState, [key]: { ...stateOfRaw(r, key), ...patch } } }));
-  const stateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: normalizeHireStatus(r.hirePayState[key]?.status), ballast: r.hirePayState[key]?.ballast ?? false, name: r.hirePayState[key]?.name, from: r.hirePayState[key]?.from, to: r.hirePayState[key]?.to, offHire: r.hirePayState[key]?.offHire ?? [], bunkerPay: r.hirePayState[key]?.bunkerPay ?? false, bunkerRev: r.hirePayState[key]?.bunkerRev ?? false, jointOn: r.hirePayState[key]?.jointOn, jointOff: r.hirePayState[key]?.jointOff, hra: r.hirePayState[key]?.hra, ownersExp: r.hirePayState[key]?.ownersExp, ownersClaim: r.hirePayState[key]?.ownersClaim, ownersClaimIds: r.hirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.hirePayState[key]?.ilohcOn, borV: r.hirePayState[key]?.borV, borM: r.hirePayState[key]?.borM, borFo: r.hirePayState[key]?.borFo, borDo: r.hirePayState[key]?.borDo, bunkerPayOff: r.hirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.hirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.hirePayState[key]?.extraExpenses ?? [], deleted: r.hirePayState[key]?.deleted ?? false });
+  const stateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: normalizeHireStatus(r.hirePayState[key]?.status), ballast: r.hirePayState[key]?.ballast ?? false, name: r.hirePayState[key]?.name, from: r.hirePayState[key]?.from, to: r.hirePayState[key]?.to, amount: r.hirePayState[key]?.amount, due: r.hirePayState[key]?.due, offHire: r.hirePayState[key]?.offHire ?? [], bunkerPay: r.hirePayState[key]?.bunkerPay ?? false, bunkerRev: r.hirePayState[key]?.bunkerRev ?? false, jointOn: r.hirePayState[key]?.jointOn, jointOff: r.hirePayState[key]?.jointOff, hra: r.hirePayState[key]?.hra, ownersExp: r.hirePayState[key]?.ownersExp, ownersClaim: r.hirePayState[key]?.ownersClaim, ownersClaimIds: r.hirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.hirePayState[key]?.ilohcOn, borV: r.hirePayState[key]?.borV, borM: r.hirePayState[key]?.borM, borFo: r.hirePayState[key]?.borFo, borDo: r.hirePayState[key]?.borDo, bunkerPayOff: r.hirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.hirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.hirePayState[key]?.extraExpenses ?? [], deleted: r.hirePayState[key]?.deleted ?? false, toManual: r.hirePayState[key]?.toManual ?? false });
   // Bunker reversal anchor is single-select: setting one clears the flag on other installments.
   const setBunkerAnchor = (key: string, field: 'bunkerPay' | 'bunkerRev', on: boolean) =>
     setRecap((r) => {
@@ -3944,9 +5843,9 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
 
   const charterStateOf = (key: string): HirePayEntry => {
     const s = recap.charterHirePayState[key];
-    return { status: normalizeHireStatus(s?.status), ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false };
+    return { status: normalizeHireStatus(s?.status), ballast: s?.ballast ?? false, name: s?.name, from: s?.from, to: s?.to, amount: s?.amount, due: s?.due, offHire: s?.offHire ?? [], bunkerPay: s?.bunkerPay ?? false, bunkerRev: s?.bunkerRev ?? false, jointOn: s?.jointOn, jointOff: s?.jointOff, hra: s?.hra, ownersExp: s?.ownersExp, ownersClaim: s?.ownersClaim, ownersClaimIds: s?.ownersClaimIds ?? [], ilohcOn: s?.ilohcOn, borV: s?.borV, borM: s?.borM, borFo: s?.borFo, borDo: s?.borDo, bunkerPayOff: s?.bunkerPayOff ?? false, ballastPayOff: s?.ballastPayOff ?? false, extraExpenses: s?.extraExpenses ?? [], deleted: s?.deleted ?? false, toManual: s?.toManual ?? false };
   };
-  const charterStateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: normalizeHireStatus(r.charterHirePayState[key]?.status), ballast: r.charterHirePayState[key]?.ballast ?? false, name: r.charterHirePayState[key]?.name, from: r.charterHirePayState[key]?.from, to: r.charterHirePayState[key]?.to, offHire: r.charterHirePayState[key]?.offHire ?? [], bunkerPay: r.charterHirePayState[key]?.bunkerPay ?? false, bunkerRev: r.charterHirePayState[key]?.bunkerRev ?? false, jointOn: r.charterHirePayState[key]?.jointOn, jointOff: r.charterHirePayState[key]?.jointOff, hra: r.charterHirePayState[key]?.hra, ownersExp: r.charterHirePayState[key]?.ownersExp, ownersClaim: r.charterHirePayState[key]?.ownersClaim, ownersClaimIds: r.charterHirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.charterHirePayState[key]?.ilohcOn, borV: r.charterHirePayState[key]?.borV, borM: r.charterHirePayState[key]?.borM, borFo: r.charterHirePayState[key]?.borFo, borDo: r.charterHirePayState[key]?.borDo, bunkerPayOff: r.charterHirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.charterHirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.charterHirePayState[key]?.extraExpenses ?? [], deleted: r.charterHirePayState[key]?.deleted ?? false });
+  const charterStateOfRaw = (r: Recap, key: string): HirePayEntry => ({ status: normalizeHireStatus(r.charterHirePayState[key]?.status), ballast: r.charterHirePayState[key]?.ballast ?? false, name: r.charterHirePayState[key]?.name, from: r.charterHirePayState[key]?.from, to: r.charterHirePayState[key]?.to, amount: r.charterHirePayState[key]?.amount, due: r.charterHirePayState[key]?.due, offHire: r.charterHirePayState[key]?.offHire ?? [], bunkerPay: r.charterHirePayState[key]?.bunkerPay ?? false, bunkerRev: r.charterHirePayState[key]?.bunkerRev ?? false, jointOn: r.charterHirePayState[key]?.jointOn, jointOff: r.charterHirePayState[key]?.jointOff, hra: r.charterHirePayState[key]?.hra, ownersExp: r.charterHirePayState[key]?.ownersExp, ownersClaim: r.charterHirePayState[key]?.ownersClaim, ownersClaimIds: r.charterHirePayState[key]?.ownersClaimIds ?? [], ilohcOn: r.charterHirePayState[key]?.ilohcOn, borV: r.charterHirePayState[key]?.borV, borM: r.charterHirePayState[key]?.borM, borFo: r.charterHirePayState[key]?.borFo, borDo: r.charterHirePayState[key]?.borDo, bunkerPayOff: r.charterHirePayState[key]?.bunkerPayOff ?? false, ballastPayOff: r.charterHirePayState[key]?.ballastPayOff ?? false, extraExpenses: r.charterHirePayState[key]?.extraExpenses ?? [], deleted: r.charterHirePayState[key]?.deleted ?? false, toManual: r.charterHirePayState[key]?.toManual ?? false });
   const setCharterState = (key: string, patch: Partial<HirePayEntry>) =>
     setRecap((r) => ({ ...r, charterHirePayState: { ...r.charterHirePayState, [key]: { ...charterStateOfRaw(r, key), ...patch } } }));
   const setCharterBunkerAnchor = (key: string, field: 'bunkerPay' | 'bunkerRev', on: boolean) =>
@@ -4003,11 +5902,22 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const incl = recap.firstHireInclude || 'Bunkers';
   const firstInclBallast = incl === 'Ballast Bonus' || incl === 'Both';
   const firstInclBunkers = incl === 'Bunkers' || incl === 'Both';
+  // Banking basis skips weekends; Running/Calendar basis uses plain calendar days.
+  const useBankingBasis = /banking/i.test(recap.firstHireBasis || 'Banking Days');
   const total = pnl.days;
   const start = parseDMY(recap.deliveryDateTime);
   const [manualExtra, setManualExtra] = useState(0);
+  // Prefer the live ETA/Rotation projection's final arrival (reflects the actual planned voyage)
+  // over the manually-typed CP redelivery field, which is easy to leave stale/unset; fall back to
+  // the manual field when the rotation plan has no legs or its arrival predates the voyage start.
+  const etaLegsForRedelivery = projectEtaLegs(recap.etaPlan);
+  const etaComputedRedelivery = etaLegsForRedelivery.length ? etaLegsForRedelivery[etaLegsForRedelivery.length - 1].arr : null;
+  const manualRedelivery = parseDMY(recap.redeliveryDateTime);
+  const expectedRedelivery = (etaComputedRedelivery && start && etaComputedRedelivery.getTime() > start.getTime())
+    ? etaComputedRedelivery
+    : manualRedelivery;
 
-  interface HireRow { key: string; name: string; account: string; from: Date | null; to: Date | null; onHire: number; offHire: number; amount: number; due: Date | null; status: HireStatus; ballast: boolean; bunkers: number; bunkerCredit: number; cumulativeOnHire?: number; cumulativeOffHire?: number; cumulativeGross?: number }
+  interface HireRow { key: string; name: string; account: string; from: Date | null; to: Date | null; onHire: number; offHire: number; amount: number; due: Date | null; status: HireStatus; ballast: boolean; bunkers: number; bunkerCredit: number; cumulativeOnHire?: number; cumulativeOffHire?: number; cumulativeGross?: number; offHireValue?: number; cumulativeAmountDue?: number; cumulativeIlohc?: number; cumulativeJointOn?: number; cumulativeJointOff?: number; cumulativeExtrasOwners?: number; cumulativeExtrasCharterers?: number; cumulativeExtrasList?: ExtraExpense[]; cumulativeOffHireEvents?: OffHireRow[] }
   let rows: HireRow[] = [];
   let covered = 0;
   let n = 1;
@@ -4016,37 +5926,60 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
     const e = stateOf(key);
     const status = e.status as HireStatus;
     const periodLen = n === 1 ? firstPeriod : subPeriod;
-    const days = Math.min(periodLen, total - covered);
+    const normalDays = Math.min(periodLen, total - covered);
     // From/To: use clause-computed dates for unlocked interim hires; allow override only for
     // locked (paid/approved) hires — the cumulative final hire's date override is applied post-loop.
     const locked = hireLocked(status);
     const from = (locked && e.from) ? parseDMY(e.from) : (start ? addDays(start, covered) : null);
-    const to = (locked && e.to) ? parseDMY(e.to) : (start ? addDays(start, covered + days) : null);
+    // A hire the user has manually edited the "Hire To Date" on and saved (via the SOA popup)
+    // keeps that date even while still Draft — unlike other saved fields, this one is explicitly
+    // flagged (`toManual`) so leftover/stale `e.to` values from elsewhere can't masquerade as one.
+    const manualTo = (!locked && e.toManual && e.to) ? parseDMY(e.to) : null;
+    // The LAST hire of the schedule (the one that reaches the voyage's actual redelivery) settles
+    // to the exact expected-redelivery timestamp instead of the plain clause cutoff — independent
+    // of which hire carries the BOR bunker credit (see bunkerSettleIdx below, which may land on an
+    // earlier hire to avoid dumping the whole credit onto a single, deeply negative final invoice).
+    const isLastRow = manualExtra === 0 && !manualTo && (covered + normalDays) >= total - 0.01;
+    // Guard against a stale/unset redelivery date that falls before this hire even starts — that
+    // would collapse On-Hire to 0 and break the whole calculation, so fall back to the clause cutoff.
+    const redeliveryValid = isLastRow && expectedRedelivery && from && expectedRedelivery.getTime() > from.getTime();
+    const to = (locked && e.to) ? parseDMY(e.to)
+      : manualTo ? manualTo
+      : redeliveryValid ? expectedRedelivery
+      : (start ? addDays(start, covered + normalDays) : null);
+    // Actual elapsed days for this installment — reflects a manual "To" edit (which may run
+    // longer or shorter than the normal clause period); later installments shift to follow it.
+    const days = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : normalDays;
     const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : days;
     const offHire = (e.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
-    const duePre = n === 1 ? (start ? addBankingDays(start, dueBank) : null) : from;
-    const due = moveOffWeekend(duePre);
+    // Due date: every installment is payable within `dueBank` days of its OWN period start, using
+    // the clause's basis — Banking Days counts business days only and nudges a weekend result back
+    // to Friday; Running/Calendar Days count every day with no weekend adjustment.
+    const duePre = from ? (useBankingBasis ? addBankingDays(from, dueBank) : addDays(from, dueBank)) : null;
+    const due = useBankingBasis ? moveOffWeekend(duePre) : duePre;
     // CUMULATIVE CALCULATION: Gross hire from Delivery date to this hire's end date
     // Cumulative on-hire days from delivery to this hire's end
     const cumulativeOnHire = to && start ? Math.max(0, (to.getTime() - start.getTime()) / 86_400_000) : 0;
     // Cumulative off-hire from ALL hires from delivery to this hire's end (including current hire)
     let cumulativeOffHire = 0;
+    const cumulativeOffHireEvents: OffHireRow[] = [];
     for (let k = 0; k < n; k++) {
       const rKey = String(k + 1);
       const rEntry = stateOf(rKey);
       const offHireList = rEntry.offHire ?? [];
       cumulativeOffHire += offHireList.reduce((s, o) => s + offHireDays(o), 0);
+      cumulativeOffHireEvents.push(...offHireList);
     }
     const cumulativeGross = hd * cumulativeOnHire;
     const cumulativeNett = Math.max(0, cumulativeOnHire - cumulativeOffHire);
     const cumulativeCve = (num(recap.cve) / 30) * cumulativeNett;
     // Amount is cumulative hire (net of commissions) + CVE, minus prior payments (applied later)
     const amount = cumulativeGross * (1 - dedPct / 100) + cumulativeCve;
-    rows.push({ key, name: `${ordinal(n)} Hire`, account: owners, from, to, onHire, offHire, amount, due, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross });
+    const offHireValue = offHireValueFor(recap.etaPlan.perf, cumulativeOffHireEvents, cumulativeOffHire, hd, dedPct, num(recap.cve), num(recap.foPrice), num(recap.doPrice));
+    rows.push({ key, name: `${ordinal(n)} Hire`, account: owners, from, to, onHire, offHire, amount, due, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross, offHireValue, cumulativeOffHireEvents });
     covered += days;
     n += 1;
   }
-  const autoCount = rows.length; // installments auto-built to cover the estimated voyage
   // Manually added installments (for when the actual voyage runs beyond the estimate) — each
   // continues from the previous cut-off, editable per installment. Not consolidated on settlement.
   let manualFrom: Date | null = rows.length ? rows[rows.length - 1].to : start;
@@ -4055,104 +5988,178 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
     const e = stateOf(key);
     const status = e.status as HireStatus;
     const from = e.from ? parseDMY(e.from) : manualFrom;
-    const to = e.to ? parseDMY(e.to) : (from ? addDays(from, subPeriod) : null);
+    // The last manual installment settles to the expected redelivery date instead of the plain
+    // clause cutoff (which row carries the BOR bunker credit is decided separately, below).
+    const isLastManRow = m === manualExtra - 1;
+    const redeliveryValidMan = isLastManRow && expectedRedelivery && from && expectedRedelivery.getTime() > from.getTime();
+    const to = e.to ? parseDMY(e.to) : redeliveryValidMan ? expectedRedelivery : (from ? addDays(from, subPeriod) : null);
     const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : subPeriod;
     const offHire = (e.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
     // CUMULATIVE: Manual hires also calculate from delivery to their end date
     const cumulativeOnHire = to && start ? Math.max(0, (to.getTime() - start.getTime()) / 86_400_000) : 0;
     let cumulativeOffHire = 0;
+    const cumulativeOffHireEvents: OffHireRow[] = [];
     for (let k = 1; k <= rows.length + m + 1; k++) {
       const rKey = String(k);
       const rEntry = stateOf(rKey);
       const offHireList = rEntry.offHire ?? [];
       cumulativeOffHire += offHireList.reduce((s, o) => s + offHireDays(o), 0);
+      cumulativeOffHireEvents.push(...offHireList);
     }
     const cumulativeGross = hd * cumulativeOnHire;
     const cumulativeNett = Math.max(0, cumulativeOnHire - cumulativeOffHire);
     const cumulativeCve = (num(recap.cve) / 30) * cumulativeNett;
     const amount = cumulativeGross * (1 - dedPct / 100) + cumulativeCve;
-    const dueMan = moveOffWeekend(from);
-    rows.push({ key, name: `${ordinal(n)} Hire`, account: owners, from, to, onHire, offHire, amount, due: dueMan, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross });
+    const offHireValue = offHireValueFor(recap.etaPlan.perf, cumulativeOffHireEvents, cumulativeOffHire, hd, dedPct, num(recap.cve), num(recap.foPrice), num(recap.doPrice));
+    const duePreMan = from ? (useBankingBasis ? addBankingDays(from, dueBank) : addDays(from, dueBank)) : null;
+    const dueMan = useBankingBasis ? moveOffWeekend(duePreMan) : duePreMan;
+    rows.push({ key, name: `${ordinal(n)} Hire`, account: owners, from, to, onHire, offHire, amount, due: dueMan, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross, offHireValue, cumulativeOffHireEvents });
     manualFrom = to;
     n += 1;
   }
 
   // Drop installments the user has soft-deleted via the row checkboxes.
   rows = rows.filter((r) => stateOf(r.key).deleted !== true);
-  
-  // Apply cumulative payments deduction: subtract all previously approved/paid hires from each row
-  // This ensures Current Hire Payable = Net Cumulative - Prior Approved Payments
-  for (let i = 0; i < rows.length; i++) {
-    const priorRows = rows.slice(0, i);
-    const priorPayments = priorRows.reduce((s, r) => {
-      const status = stateOf(r.key).status as HireStatus;
-      // Include payments that are approved/sent or paid (not draft)
-      if (status === 'Draft') return s;
-      return s + r.amount;
-    }, 0);
-    rows[i].amount = Math.max(0, rows[i].amount - priorPayments);
-  }
-    // Ballast bonus: only when CP terms include it (Ballast Bonus / Both). Single installment
+
+  // Ballast bonus: only when CP terms include it (Ballast Bonus / Both). Single installment
   // (default 1st), user-selectable or off. Not shown/applied when terms are Bunkers or None.
   const ballastOff = stateOf('1').ballastPayOff === true;
   let ballastPayIdx = rows.findIndex((r) => stateOf(r.key).ballast);
   if (ballastPayIdx < 0 && !ballastOff && firstInclBallast) ballastPayIdx = 0;
   if (ballastOff || !firstInclBallast) ballastPayIdx = -1;
   rows.forEach((r, i) => { r.ballast = i === ballastPayIdx; });
-  if (ballastPayIdx >= 0) rows[ballastPayIdx].amount += ballastBonusAmt;
-  
+  // ILOHC is a single global value (recap.ilohc) gated by a per-hire checkbox — carried forward
+  // from the first hire it was switched on, same as BOD/BB. Computed here (ahead of the bunker
+  // block) since the BOR auto-placement simulation below needs it.
+  const ilohcPayIdx = rows.findIndex((r) => stateOf(r.key).ilohcOn === true);
+
   // Bunkers (only when the Hire Payment clause includes them): BOD is charged to owners on the
-  // BOD hire (default 1st, movable). The estimated BOR is reversed to charterers on the
-  // BOR settlement hire (default last, movable).
+  // BOD hire (default 1st, movable). The estimated BOR is reversed to charterers on whichever
+  // hire settles to redelivery (auto-picked below, or movable by ticking a specific hire's BOR
+  // box) — that hire absorbs every remaining day up to redelivery, so no installments follow it.
   const bodValue = num(recap.etaPlan.startRobVlsfo) * num(recap.foPrice) + num(recap.etaPlan.startRobMgo) * num(recap.doPrice);
   const borEstValue = borRob.v * num(recap.foPrice) + borRob.m * num(recap.doPrice);
   let bunkerPayIdx = -1;
   let bunkerSettleIdx = -1;
-  let bunkerRefund = 0;
+  const bunkerRefund = 0; // BOR is fully absorbed in the cumulative method
   if (firstInclBunkers && rows.length) {
     bunkerPayIdx = rows.findIndex((r) => stateOf(r.key).bunkerPay);
     if (bunkerPayIdx < 0) bunkerPayIdx = 0;
-    // Add BOD to the designated BOD hire
-    rows[bunkerPayIdx].amount += bodValue;
-
+    // The full on-hire span if a hire absorbed every day from delivery to actual redelivery —
+    // the same for any candidate row, since it's just the voyage's total on-hire span.
+    const grandOnHire = (expectedRedelivery && start) ? Math.max(0, (expectedRedelivery.getTime() - start.getTime()) / 86_400_000) : total;
+    const grandGross = hd * grandOnHire;
     bunkerSettleIdx = rows.findIndex((r) => stateOf(r.key).bunkerRev);
     if (bunkerSettleIdx < 0) {
-      // Default BOR settlement: last hire (since cumulative means it has the most to absorb BOR)
-      bunkerSettleIdx = rows.length - 1;
+      // Walk the hires in order (each still on its own normal clause period so far); at each one,
+      // test the scenario where THIS hire instead absorbed every remaining day up to redelivery
+      // and carried the BOR credit. Keep advancing while that scenario still comes out non-
+      // negative — the last row for which it does is the closest-to-zero settlement point. Any
+      // further row would push the remainder below zero. Locked hires are skipped as candidates
+      // (frozen to their saved snapshot regardless of where the credit lands). Falls back to the
+      // last hire if even the very first one would go negative.
+      let priorNormal = 0;
+      let bestIdx = -1;
+      rows.forEach((r, i) => {
+        const e = stateOf(r.key);
+        const rowLocked = hireLocked(e.status as HireStatus);
+        const carryBodSim = bunkerPayIdx >= 0 && i >= bunkerPayIdx ? bodValue : 0;
+        const carryBbSim = ballastPayIdx >= 0 && i >= ballastPayIdx ? ballastBonusAmt : 0;
+        const carryIlohcSim = ilohcPayIdx >= 0 && i >= ilohcPayIdx ? num(recap.ilohc) : 0;
+        const sideExtrasSim = cumulativeExtrasFor(stateOf, i);
+        const carryRest = carryBodSim + carryBbSim + sideExtrasSim.extrasOwners - sideExtrasSim.extrasCharterers - carryIlohcSim - sideExtrasSim.jointOn / 2 - sideExtrasSim.jointOff / 2;
+        // This hire's own normal (short clause-period) amount — accumulates what's already
+        // been billed before any candidate settlement point.
+        const normalDue = (r.cumulativeGross ?? 0) * (1 - dedPct / 100)
+          + (num(recap.cve) / 30) * (r.cumulativeOnHire ?? 0)
+          - (r.offHireValue ?? 0) + carryRest;
+        const normalAmount = rowLocked && typeof e.amount === 'number' ? e.amount : normalDue - priorNormal;
+        if (!rowLocked) {
+          const extendedDue = grandGross * (1 - dedPct / 100)
+            + (num(recap.cve) / 30) * grandOnHire
+            - (r.offHireValue ?? 0) + carryRest;
+          const remainder = extendedDue - borEstValue - priorNormal;
+          if (remainder >= -0.005) bestIdx = i;
+        }
+        priorNormal += normalAmount;
+      });
+      bunkerSettleIdx = bestIdx >= 0 ? bestIdx : rows.length - 1;
     }
-    // Subtract BOR from the settlement hire
-    rows[bunkerSettleIdx].amount -= borEstValue;
-    bunkerRefund = 0; // BOR is fully absorbed in cumulative method
-    
-    // Set bunker display values per maritime charter logic:
-    // BOD (Bunkers on Delivery) shown in ALL hire SOAs for reference
-    // BOR (Bunkers on Redelivery) shown only on BOR settlement hire where it's reversed
-    rows.forEach((row, idx) => {
-      row.bunkers = bodValue;  // Always show full BOD for reference
-      if (idx === bunkerSettleIdx) {
-        row.bunkerCredit = borEstValue;
-      } else {
-        row.bunkerCredit = 0;
+    // The settlement hire absorbs every remaining day to redelivery — nothing follows it.
+    if (bunkerSettleIdx < rows.length - 1) rows = rows.slice(0, bunkerSettleIdx + 1);
+    const settleRow = rows[bunkerSettleIdx];
+    const settleLocked = settleRow ? hireLocked(stateOf(settleRow.key).status as HireStatus) : true;
+    // A manually-edited "to" date on the settlement row (set via the SOA popup) already has its
+    // own correct from-loop figures and must win over the auto redelivery-snap below.
+    const settleManual = settleRow ? stateOf(settleRow.key).toManual === true : false;
+    if (settleRow && !settleLocked && !settleManual) {
+      const redeliveryValidHere = expectedRedelivery && settleRow.from && expectedRedelivery.getTime() > settleRow.from.getTime();
+      if (redeliveryValidHere) {
+        settleRow.to = expectedRedelivery;
+        settleRow.onHire = settleRow.from ? Math.max(0, (expectedRedelivery.getTime() - settleRow.from.getTime()) / 86_400_000) : settleRow.onHire;
       }
+      settleRow.cumulativeOnHire = grandOnHire;
+      settleRow.cumulativeGross = grandGross;
+    }
+    // Bunker display values: BOD shown in full on every SOA for reference; BOR carried forward
+    // (shown) from the settlement hire onward, same as BOD/BB.
+    rows.forEach((row, idx) => {
+      row.bunkers = bodValue;
+      row.bunkerCredit = idx >= bunkerSettleIdx ? borEstValue : 0;
     });
-    
-    // Do not filter rows — all hires should be displayed since cumulative logic doesn't need to hide trailing hires
   } else {
-    // When bunkers clause is NOT included:
     rows.forEach((row) => {
       row.bunkers = bodValue;
       row.bunkerCredit = borEstValue;
     });
   }
-  const finalIdx = bunkerSettleIdx >= 0 ? bunkerSettleIdx : autoCount - 1; // cumulative final-settlement hire
-  // Apply any saved redelivery date from the settlement hire's SOA (saved by the user as actual redelivery).
+  // The settlement hire (bunkerSettleIdx, or the structural last hire when bunkers aren't part of
+  // the clause) is where a saved redelivery-time override applies once it's locked.
+  const finalIdx = bunkerSettleIdx >= 0 ? bunkerSettleIdx : rows.length - 1;
+  // Apply a saved actual-redelivery date on the settlement hire's SOA only once it's locked (Sent
+  // For Payment / Paid & Locked) — otherwise a stale saved value shouldn't override a still-Draft
+  // hire's live, clause-computed date.
   const finalEntry = stateOf(rows[finalIdx].key);
-  if (finalEntry.to) {
+  if (hireLocked(finalEntry.status as HireStatus) && finalEntry.to) {
     const savedTo = parseDMY(finalEntry.to);
     if (savedTo) rows[finalIdx].to = savedTo;
   }
   // Apply user-set name overrides; all hires default to their ordinal (1st, 2nd, …).
   rows.forEach((r) => { const en = stateOf(r.key).name; if (en) r.name = en; });
+
+  // CUMULATIVE-THEN-DEDUCT (per the Hire Payment clause): each hire's payable = the FULL cumulative
+  // amount from Delivery to its own Hire-To-Date (hire + CVE, net of cumulative off-hire, plus
+  // BOD/BB/BOR carried forward from whichever hire they're first charged on, not just that one
+  // hire) MINUS the sum of all earlier hires' own final amounts. Locked (Sent For Payment / Paid &
+  // Locked) hires are frozen to their saved snapshot and contribute that frozen value to the
+  // running total, so settled history never shifts; unlocked hires keep recalculating live.
+  let priorPaymentsTotal = 0;
+  rows.forEach((r, i) => {
+    const carryBod = bunkerPayIdx >= 0 && i >= bunkerPayIdx ? bodValue : 0;
+    const carryBb = ballastPayIdx >= 0 && i >= ballastPayIdx ? ballastBonusAmt : 0;
+    const carryBor = bunkerSettleIdx >= 0 && i >= bunkerSettleIdx ? borEstValue : 0;
+    const carryIlohc = ilohcPayIdx >= 0 && i >= ilohcPayIdx ? num(recap.ilohc) : 0;
+    const sideExtras = cumulativeExtrasFor(stateOf, i);
+    r.cumulativeIlohc = carryIlohc;
+    r.cumulativeJointOn = sideExtras.jointOn;
+    r.cumulativeJointOff = sideExtras.jointOff;
+    r.cumulativeExtrasOwners = sideExtras.extrasOwners;
+    r.cumulativeExtrasCharterers = sideExtras.extrasCharterers;
+    r.cumulativeExtrasList = sideExtras.extrasList;
+    r.cumulativeAmountDue = (r.cumulativeGross ?? 0) * (1 - dedPct / 100)
+      + (num(recap.cve) / 30) * (r.cumulativeOnHire ?? 0)
+      - (r.offHireValue ?? 0) + carryBod + carryBb - carryBor
+      + sideExtras.extrasOwners - sideExtras.extrasCharterers - carryIlohc - sideExtras.jointOn / 2 - sideExtras.jointOff / 2;
+    const e = stateOf(r.key);
+    const locked = hireLocked(e.status as HireStatus);
+    if (locked && typeof e.amount === 'number') {
+      r.amount = e.amount;
+      if (e.due) { const d = parseDMY(e.due); if (d) r.due = d; }
+    } else {
+      r.amount = r.cumulativeAmountDue - priorPaymentsTotal;
+    }
+    priorPaymentsTotal += r.amount;
+  });
   const totalPayable = rows.reduce((s, r) => s + r.amount, 0);
   const totalOnHireDays = rows.reduce((s, r) => s + r.onHire, 0);
   const totalOffHireDays = rows.reduce((s, r) => s + r.offHire, 0);
@@ -4166,6 +6173,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const charterIncl = recap.charterFirstHireInclude || 'None';
   const charterInclBallast = charterIncl === 'Ballast Bonus' || charterIncl === 'Both';
   const charterInclBunkers = charterIncl === 'Bunkers' || charterIncl === 'Both';
+  const charterUseBankingBasis = /banking/i.test(recap.charterFirstHireBasis || 'Banking Days');
   const [charterManualExtra, setCharterManualExtra] = useState(0);
 
   let charterRows: HireRow[] = [];
@@ -4176,88 +6184,137 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
     const e = charterStateOf(key);
     const status = e.status as HireStatus;
     const periodLen = charterN === 1 ? charterFirstPeriod : charterSubPeriod;
-    const days = Math.min(periodLen, total - charterCovered);
+    const normalDays = Math.min(periodLen, total - charterCovered);
     const locked = hireLocked(status);
     const from = (locked && e.from) ? parseDMY(e.from) : (start ? addDays(start, charterCovered) : null);
-    const to = (locked && e.to) ? parseDMY(e.to) : (start ? addDays(start, charterCovered + days) : null);
+    const manualTo = (!locked && e.toManual && e.to) ? parseDMY(e.to) : null;
+    const isLastRow = !manualTo && charterCovered + normalDays >= total - 0.01;
+    const redeliveryValid = isLastRow && expectedRedelivery && from && expectedRedelivery.getTime() > from.getTime();
+    const to = (locked && e.to) ? parseDMY(e.to)
+      : manualTo ? manualTo
+      : redeliveryValid ? expectedRedelivery
+      : (start ? addDays(start, charterCovered + normalDays) : null);
+    const days = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : normalDays;
     const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : days;
     const offHire = (e.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
-    const duePre = charterN === 1 ? (start ? addBankingDays(start, charterDueBank) : null) : from;
-    const due = moveOffWeekend(duePre);
+    const duePre = from ? (charterUseBankingBasis ? addBankingDays(from, charterDueBank) : addDays(from, charterDueBank)) : null;
+    const due = charterUseBankingBasis ? moveOffWeekend(duePre) : duePre;
     let cumulativeOffHire = 0;
+    const cumulativeOffHireEvents: OffHireRow[] = [];
     for (let k = 0; k < charterN; k++) {
       const rKey = String(k + 1);
       const rEntry = charterStateOf(rKey);
       const offHireList = rEntry.offHire ?? [];
       cumulativeOffHire += offHireList.reduce((s, o) => s + offHireDays(o), 0);
+      cumulativeOffHireEvents.push(...offHireList);
     }
     const cumulativeOnHire = to && start ? Math.max(0, (to.getTime() - start.getTime()) / 86_400_000) : 0;
     const cumulativeGross = charterHd * cumulativeOnHire;
     const cumulativeNett = Math.max(0, cumulativeOnHire - cumulativeOffHire);
     const cumulativeCve = (num(recap.cve) / 30) * cumulativeNett;
     const amount = cumulativeGross * (1 - dedPct / 100) + cumulativeCve;
-    charterRows.push({ key, name: `${ordinal(charterN)} Hire`, account: charterAccount, from, to, onHire, offHire, amount, due, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross });
+    const offHireValue = offHireValueFor(recap.etaPlan.perf, cumulativeOffHireEvents, cumulativeOffHire, charterHd, dedPct, num(recap.cve), num(recap.foPrice), num(recap.doPrice));
+    charterRows.push({ key, name: `${ordinal(charterN)} Hire`, account: charterAccount, from, to, onHire, offHire, amount, due, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross, offHireValue, cumulativeOffHireEvents });
     charterCovered += days;
     charterN += 1;
   }
-  const charterAutoCount = charterRows.length;
   let charterManualFrom: Date | null = charterRows.length ? charterRows[charterRows.length - 1].to : start;
   for (let m = 0; showDualHire && m < charterManualExtra && charterN <= 200; m++) {
     const key = String(charterN);
     const e = charterStateOf(key);
     const status = e.status as HireStatus;
     const from = e.from ? parseDMY(e.from) : charterManualFrom;
-    const to = e.to ? parseDMY(e.to) : (from ? addDays(from, charterSubPeriod) : null);
+    const isLastManRow = m === charterManualExtra - 1;
+    const redeliveryValidMan = isLastManRow && expectedRedelivery && from && expectedRedelivery.getTime() > from.getTime();
+    const to = e.to ? parseDMY(e.to) : redeliveryValidMan ? expectedRedelivery : (from ? addDays(from, charterSubPeriod) : null);
     const onHire = from && to ? Math.max(0, (to.getTime() - from.getTime()) / 86_400_000) : charterSubPeriod;
     const offHire = (e.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
     const cumulativeOnHire = to && start ? Math.max(0, (to.getTime() - start.getTime()) / 86_400_000) : 0;
     let cumulativeOffHire = 0;
+    const cumulativeOffHireEvents: OffHireRow[] = [];
     for (let k = 1; k <= charterRows.length + m + 1; k++) {
       const rKey = String(k);
       const rEntry = charterStateOf(rKey);
       const offHireList = rEntry.offHire ?? [];
       cumulativeOffHire += offHireList.reduce((s, o) => s + offHireDays(o), 0);
+      cumulativeOffHireEvents.push(...offHireList);
     }
     const cumulativeGross = charterHd * cumulativeOnHire;
     const cumulativeNett = Math.max(0, cumulativeOnHire - cumulativeOffHire);
     const cumulativeCve = (num(recap.cve) / 30) * cumulativeNett;
     const amount = cumulativeGross * (1 - dedPct / 100) + cumulativeCve;
-    const dueMan = moveOffWeekend(from);
-    charterRows.push({ key, name: `${ordinal(charterN)} Hire`, account: charterAccount, from, to, onHire, offHire, amount, due: dueMan, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross });
+    const offHireValue = offHireValueFor(recap.etaPlan.perf, cumulativeOffHireEvents, cumulativeOffHire, charterHd, dedPct, num(recap.cve), num(recap.foPrice), num(recap.doPrice));
+    const duePreMan = from ? (charterUseBankingBasis ? addBankingDays(from, charterDueBank) : addDays(from, charterDueBank)) : null;
+    const dueMan = charterUseBankingBasis ? moveOffWeekend(duePreMan) : duePreMan;
+    charterRows.push({ key, name: `${ordinal(charterN)} Hire`, account: charterAccount, from, to, onHire, offHire, amount, due: dueMan, status, ballast: false, bunkers: 0, bunkerCredit: 0, cumulativeOnHire, cumulativeOffHire, cumulativeGross, offHireValue, cumulativeOffHireEvents });
     charterManualFrom = to;
     charterN += 1;
   }
 
   charterRows = charterRows.filter((r) => charterStateOf(r.key).deleted !== true);
-  for (let i = 0; i < charterRows.length; i++) {
-    const priorRows = charterRows.slice(0, i);
-    const priorPayments = priorRows.reduce((s, r) => {
-      const status = charterStateOf(r.key).status as HireStatus;
-      if (status === 'Draft') return s;
-      return s + r.amount;
-    }, 0);
-    charterRows[i].amount = Math.max(0, charterRows[i].amount - priorPayments);
-  }
 
   const charterBallastOff = charterStateOf('1').ballastPayOff === true;
   let charterBallastPayIdx = charterRows.findIndex((r) => charterStateOf(r.key).ballast);
   if (charterBallastPayIdx < 0 && !charterBallastOff && charterInclBallast) charterBallastPayIdx = 0;
   if (charterBallastOff || !charterInclBallast) charterBallastPayIdx = -1;
   charterRows.forEach((r, i) => { r.ballast = i === charterBallastPayIdx; });
-  if (charterBallastPayIdx >= 0) charterRows[charterBallastPayIdx].amount += ballastBonusAmt;
+  // Computed ahead of the bunker block since the BOR auto-placement simulation needs it.
+  const charterIlohcPayIdx = charterRows.findIndex((r) => charterStateOf(r.key).ilohcOn === true);
 
   let charterBunkerPayIdx = -1;
   let charterBunkerSettleIdx = -1;
   if (charterInclBunkers && charterRows.length) {
     charterBunkerPayIdx = charterRows.findIndex((r) => charterStateOf(r.key).bunkerPay);
     if (charterBunkerPayIdx < 0) charterBunkerPayIdx = 0;
-    charterRows[charterBunkerPayIdx].amount += bodValue;
+    const grandOnHire = (expectedRedelivery && start) ? Math.max(0, (expectedRedelivery.getTime() - start.getTime()) / 86_400_000) : total;
+    const grandGross = charterHd * grandOnHire;
     charterBunkerSettleIdx = charterRows.findIndex((r) => charterStateOf(r.key).bunkerRev);
-    if (charterBunkerSettleIdx < 0) charterBunkerSettleIdx = charterRows.length - 1;
-    charterRows[charterBunkerSettleIdx].amount -= borEstValue;
+    if (charterBunkerSettleIdx < 0) {
+      // Auto-pick the settlement hire the same way as the owner side (see rationale above): walk
+      // hires in order, testing the scenario where each one absorbed every remaining day to
+      // redelivery and carried the BOR credit, and stop at the last one that stays non-negative.
+      let priorNormal = 0;
+      let bestIdx = -1;
+      charterRows.forEach((r, i) => {
+        const e = charterStateOf(r.key);
+        const rowLocked = hireLocked(e.status as HireStatus);
+        const carryBodSim = charterBunkerPayIdx >= 0 && i >= charterBunkerPayIdx ? bodValue : 0;
+        const carryBbSim = charterBallastPayIdx >= 0 && i >= charterBallastPayIdx ? ballastBonusAmt : 0;
+        const carryIlohcSim = charterIlohcPayIdx >= 0 && i >= charterIlohcPayIdx ? num(recap.ilohc) : 0;
+        const sideExtrasSim = cumulativeExtrasFor(charterStateOf, i);
+        const carryRest = carryBodSim + carryBbSim + sideExtrasSim.extrasOwners - sideExtrasSim.extrasCharterers - carryIlohcSim - sideExtrasSim.jointOn / 2 - sideExtrasSim.jointOff / 2;
+        const normalDue = (r.cumulativeGross ?? 0) * (1 - dedPct / 100)
+          + (num(recap.cve) / 30) * (r.cumulativeOnHire ?? 0)
+          - (r.offHireValue ?? 0) + carryRest;
+        const normalAmount = rowLocked && typeof e.amount === 'number' ? e.amount : normalDue - priorNormal;
+        if (!rowLocked) {
+          const extendedDue = grandGross * (1 - dedPct / 100)
+            + (num(recap.cve) / 30) * grandOnHire
+            - (r.offHireValue ?? 0) + carryRest;
+          const remainder = extendedDue - borEstValue - priorNormal;
+          if (remainder >= -0.005) bestIdx = i;
+        }
+        priorNormal += normalAmount;
+      });
+      charterBunkerSettleIdx = bestIdx >= 0 ? bestIdx : charterRows.length - 1;
+    }
+    // The settlement hire absorbs every remaining day to redelivery — nothing follows it.
+    if (charterBunkerSettleIdx < charterRows.length - 1) charterRows = charterRows.slice(0, charterBunkerSettleIdx + 1);
+    const settleRow = charterRows[charterBunkerSettleIdx];
+    const settleLocked = settleRow ? hireLocked(charterStateOf(settleRow.key).status as HireStatus) : true;
+    const settleManual = settleRow ? charterStateOf(settleRow.key).toManual === true : false;
+    if (settleRow && !settleLocked && !settleManual) {
+      const redeliveryValidHere = expectedRedelivery && settleRow.from && expectedRedelivery.getTime() > settleRow.from.getTime();
+      if (redeliveryValidHere) {
+        settleRow.to = expectedRedelivery;
+        settleRow.onHire = settleRow.from ? Math.max(0, (expectedRedelivery.getTime() - settleRow.from.getTime()) / 86_400_000) : settleRow.onHire;
+      }
+      settleRow.cumulativeOnHire = grandOnHire;
+      settleRow.cumulativeGross = grandGross;
+    }
     charterRows.forEach((row, idx) => {
       row.bunkers = bodValue;
-      row.bunkerCredit = idx === charterBunkerSettleIdx ? borEstValue : 0;
+      row.bunkerCredit = idx >= charterBunkerSettleIdx ? borEstValue : 0;
     });
   } else {
     charterRows.forEach((row) => {
@@ -4266,24 +6323,80 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
     });
   }
 
-  const charterFinalIdx = charterBunkerSettleIdx >= 0 ? charterBunkerSettleIdx : charterAutoCount - 1;
+  const charterFinalIdx = charterBunkerSettleIdx >= 0 ? charterBunkerSettleIdx : charterRows.length - 1;
   if (charterRows[charterFinalIdx]) {
     const finalEntryCharter = charterStateOf(charterRows[charterFinalIdx].key);
-    if (finalEntryCharter.to) {
+    if (hireLocked(finalEntryCharter.status as HireStatus) && finalEntryCharter.to) {
       const savedTo = parseDMY(finalEntryCharter.to);
       if (savedTo) charterRows[charterFinalIdx].to = savedTo;
     }
   }
   charterRows.forEach((r) => { const en = charterStateOf(r.key).name; if (en) r.name = en; });
+  // Cumulative-then-deduct (see owner-side rationale above).
+  let charterPriorPaymentsTotal = 0;
+  charterRows.forEach((r, i) => {
+    const carryBod = charterBunkerPayIdx >= 0 && i >= charterBunkerPayIdx ? bodValue : 0;
+    const carryBb = charterBallastPayIdx >= 0 && i >= charterBallastPayIdx ? ballastBonusAmt : 0;
+    const carryBor = charterBunkerSettleIdx >= 0 && i >= charterBunkerSettleIdx ? borEstValue : 0;
+    const carryIlohc = charterIlohcPayIdx >= 0 && i >= charterIlohcPayIdx ? num(recap.ilohc) : 0;
+    const sideExtras = cumulativeExtrasFor(charterStateOf, i);
+    r.cumulativeIlohc = carryIlohc;
+    r.cumulativeJointOn = sideExtras.jointOn;
+    r.cumulativeJointOff = sideExtras.jointOff;
+    r.cumulativeExtrasOwners = sideExtras.extrasOwners;
+    r.cumulativeExtrasCharterers = sideExtras.extrasCharterers;
+    r.cumulativeExtrasList = sideExtras.extrasList;
+    r.cumulativeAmountDue = (r.cumulativeGross ?? 0) * (1 - dedPct / 100)
+      + (num(recap.cve) / 30) * (r.cumulativeOnHire ?? 0)
+      - (r.offHireValue ?? 0) + carryBod + carryBb - carryBor
+      + sideExtras.extrasOwners - sideExtras.extrasCharterers - carryIlohc - sideExtras.jointOn / 2 - sideExtras.jointOff / 2;
+    const e = charterStateOf(r.key);
+    const locked = hireLocked(e.status as HireStatus);
+    if (locked && typeof e.amount === 'number') {
+      r.amount = e.amount;
+      if (e.due) { const d = parseDMY(e.due); if (d) r.due = d; }
+    } else {
+      r.amount = r.cumulativeAmountDue - charterPriorPaymentsTotal;
+    }
+    charterPriorPaymentsTotal += r.amount;
+  });
   const charterTotalPayable = charterRows.reduce((s, r) => s + r.amount, 0);
   const charterTotalOnHireDays = charterRows.reduce((s, r) => s + r.onHire, 0);
   const charterTotalOffHireDays = charterRows.reduce((s, r) => s + r.offHire, 0);
 
+  // Persist the fully computed schedule (dates/amounts/due per installment) into the recap so
+  // the backend can read real numbers for fleet-wide hire reporting without re-deriving them.
+  // Locked rows are already frozen above; unlocked rows refresh here every time days/clauses change.
+  useEffect(() => {
+    const toSnapshot = (list: typeof rows): HireScheduleRow[] => list.map((r) => ({
+      key: r.key, name: r.name, account: r.account, from: fmtDate(r.from), to: fmtDate(r.to),
+      onHire: r.onHire, offHire: r.offHire, amount: r.amount, due: fmtDate(r.due), status: r.status,
+      ballast: r.ballast, bunkers: r.bunkers, bunkerCredit: r.bunkerCredit, deleted: false,
+    }));
+    const ownerSnap = toSnapshot(rows);
+    const charterSnap = showDualHire ? toSnapshot(charterRows) : [];
+    const ownerChanged = JSON.stringify(ownerSnap) !== JSON.stringify(recap.hireScheduleSnapshot ?? []);
+    const charterChanged = JSON.stringify(charterSnap) !== JSON.stringify(recap.charterHireScheduleSnapshot ?? []);
+    if (!ownerChanged && !charterChanged) return;
+    setRecap((r) => ({
+      ...r,
+      hireScheduleSnapshot: ownerChanged ? ownerSnap : (r.hireScheduleSnapshot ?? ownerSnap),
+      charterHireScheduleSnapshot: charterChanged ? charterSnap : (r.charterHireScheduleSnapshot ?? charterSnap),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, charterRows, showDualHire]);
+
   // Workflow transitions: Operations requests approval; only managers approve;
   // the payable is created when Operations sends an approved hire to Accounts.
   const advance = (key: string, to: HireStatus) => {
-    setState(key, { status: to });
     const row = rows.find((r) => r.key === key);
+    // Locking an installment snapshots its current computed from/to/amount/due so it stops
+    // moving with later edits to the clause, off-hire or bunkers upstream (see freeze pass above).
+    if (row && hireLocked(to)) {
+      setState(key, { status: to, from: fmtDate(row.from), to: fmtDate(row.to), amount: row.amount, due: fmtDate(row.due) });
+    } else {
+      setState(key, { status: to });
+    }
     if (!row) return;
     if (to === 'Sent For Approval') {
       addNotification(`Hire payment ${row.name} for ${recap.vesselName} is ready for manager review and approval. Vessel: ${recap.vesselName}; Voyage: ${voyage.id}.`, 'Manager');
@@ -4318,13 +6431,13 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
 
   const addClaim = () => {
-    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Requested', paymentStatus: 'Pending', attachments: [] };
+    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Raised', paymentStatus: 'Pending', attachments: [] };
     setSettlement({ claims: [...settlement.claims, row] });
     setClaimId(row.id);
   };
   const saveClaim = (id: string, patch: Partial<ClaimRow>) => setSettlement({ claims: settlement.claims.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
   const deleteSelClaims = () => { setSettlement({ claims: settlement.claims.filter((x) => !selClaims.has(x.id)) }); setSelClaims(new Set()); };
-  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Requested', paymentStatus: 'Pending' }))] }); setSelClaims(new Set()); };
+  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Raised', paymentStatus: 'Pending' }))] }); setSelClaims(new Set()); };
   const updateSelClaimStatus = () => {
     setClaimStatusValue('Under Review');
     setClaimStatusOpen(true);
@@ -4410,22 +6523,37 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const duplicateSelected = () => {
     if (selectedKeys.size === 0) return;
     const sel = rows.filter((r) => selectedKeys.has(r.key));
-    const snapshots: HireDuplicate[] = sel.map((row) => ({
-      id: uid('dup'),
-      name: `${row.name} (copy)`,
-      account: row.account,
-      from: fmtDT(start),
-      to: fmtDT(row.to),
-      onHire: row.cumulativeOnHire ?? row.onHire,
-      offHire: row.offHire,
-      amount: row.amount,
-      due: fmtDate(row.due),
-      status: row.status,
-    }));
+    const snapshots: HireDuplicate[] = sel.map((row) => {
+      const e = stateOf(row.key);
+      const base: HireDuplicate = {
+        id: uid('dup'),
+        name: `${row.name} (copy)`,
+        account: row.account,
+        from: fmtDT(start),
+        to: fmtDT(row.to),
+        onHire: 0, offHire: 0, amount: 0, bunkers: 0, bunkerCredit: 0,
+        due: fmtDate(row.due),
+        status: row.status,
+        ballast: row.ballast,
+        hirePerDay: recap.hirePerDay, adcom: recap.adcom, brokerage: recap.brokerage,
+        foPrice: recap.foPrice, doPrice: recap.doPrice, cve: recap.cve, ilohc: recap.ilohc, ballastBonus: recap.ballastBonus,
+        delV: recap.etaPlan.startRobVlsfo, delM: recap.etaPlan.startRobMgo,
+        borV: e.borV ?? '', borM: e.borM ?? '', borFo: e.borFo ?? '', borDo: e.borDo ?? '',
+        offHireEvents: row.cumulativeOffHireEvents ?? e.offHire ?? [],
+        extraExpenses: row.cumulativeExtrasList ?? e.extraExpenses ?? [],
+        jointOn: String(row.cumulativeJointOn ?? num(e.jointOn ?? '0')),
+        jointOff: String(row.cumulativeJointOff ?? num(e.jointOff ?? '0')),
+        ilohcOn: e.ilohcOn ?? false,
+      };
+      return recomputeDuplicate(base, recap.etaPlan.perf);
+    });
     setRecap((r) => ({ ...r, hireDuplicates: [...(r.hireDuplicates ?? []), ...snapshots] }));
     setSelectedKeys(new Set());
   };
   const deleteDuplicate = (id: string) => setRecap((r) => ({ ...r, hireDuplicates: (r.hireDuplicates ?? []).filter((d) => d.id !== id) }));
+  const setDuplicate = (id: string, patch: Partial<HireDuplicate>) =>
+    setRecap((r) => ({ ...r, hireDuplicates: (r.hireDuplicates ?? []).map((d) => (d.id === id ? recomputeDuplicate({ ...d, ...patch }, r.etaPlan.perf) : d)) }));
+  const [dupSoaId, setDupSoaId] = useState<string | null>(null);
   const exportSelectedPdf = () => {
     const sel = rows.filter((r) => selectedKeys.has(r.key));
     if (sel.length === 0) return;
@@ -4433,7 +6561,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
     if (!w) return;
     const p2 = (x: number) => String(x).padStart(2, '0');
     const today = new Date();
-    const body = sel.map((r) => `<tr><td>${r.name}</td><td>${r.account}</td><td>${fmtDT(start)}</td><td>${fmtDT(r.to)}</td><td class="r">${fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td><td class="r">${fmt(r.offHire, 2)}</td><td class="r">${money(r.amount)}</td><td>${fmtDate(r.due)}</td><td>${r.status}</td></tr>`).join('');
+    const body = sel.map((r) => `<tr><td>${r.name}</td><td>${r.account}</td><td>${fmtDT(r.from)}</td><td>${fmtDT(r.to)}</td><td class="r">${fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td><td class="r">${fmt(r.offHire, 2)}</td><td class="r">${money(r.amount)}</td><td>${fmtDate(r.due)}</td><td>${r.status}</td></tr>`).join('');
     const totalAmt = sel.reduce((s, r) => s + r.amount, 0);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Hire Payments — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
@@ -4455,8 +6583,12 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   };
 
   const advanceCharter = (key: string, to: HireStatus) => {
-    setCharterState(key, { status: to });
     const row = charterRows.find((r) => r.key === key);
+    if (row && hireLocked(to)) {
+      setCharterState(key, { status: to, from: fmtDate(row.from), to: fmtDate(row.to), amount: row.amount, due: fmtDate(row.due) });
+    } else {
+      setCharterState(key, { status: to });
+    }
     if (!row) return;
     if (to === 'Sent For Approval') {
       addNotification(`Charterers hire payment ${row.name} for ${recap.vesselName} is ready for manager review and approval. Vessel: ${recap.vesselName}; Voyage: ${voyage.id}.`, 'Manager');
@@ -4481,22 +6613,37 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const duplicateSelectedCharter = () => {
     if (charterSelectedKeys.size === 0) return;
     const sel = charterRows.filter((r) => charterSelectedKeys.has(r.key));
-    const snapshots: HireDuplicate[] = sel.map((row) => ({
-      id: uid('dup'),
-      name: `${row.name} (copy)`,
-      account: row.account,
-      from: fmtDT(start),
-      to: fmtDT(row.to),
-      onHire: row.cumulativeOnHire ?? row.onHire,
-      offHire: row.offHire,
-      amount: row.amount,
-      due: fmtDate(row.due),
-      status: row.status,
-    }));
+    const snapshots: HireDuplicate[] = sel.map((row) => {
+      const e = charterStateOf(row.key);
+      const base: HireDuplicate = {
+        id: uid('dup'),
+        name: `${row.name} (copy)`,
+        account: row.account,
+        from: fmtDT(start),
+        to: fmtDT(row.to),
+        onHire: 0, offHire: 0, amount: 0, bunkers: 0, bunkerCredit: 0,
+        due: fmtDate(row.due),
+        status: row.status,
+        ballast: row.ballast,
+        hirePerDay: recap.charterHirePerDay || recap.hirePerDay, adcom: recap.adcom, brokerage: recap.brokerage,
+        foPrice: recap.foPrice, doPrice: recap.doPrice, cve: recap.cve, ilohc: recap.ilohc, ballastBonus: recap.ballastBonus,
+        delV: recap.etaPlan.startRobVlsfo, delM: recap.etaPlan.startRobMgo,
+        borV: e.borV ?? '', borM: e.borM ?? '', borFo: e.borFo ?? '', borDo: e.borDo ?? '',
+        offHireEvents: row.cumulativeOffHireEvents ?? e.offHire ?? [],
+        extraExpenses: row.cumulativeExtrasList ?? e.extraExpenses ?? [],
+        jointOn: String(row.cumulativeJointOn ?? num(e.jointOn ?? '0')),
+        jointOff: String(row.cumulativeJointOff ?? num(e.jointOff ?? '0')),
+        ilohcOn: e.ilohcOn ?? false,
+      };
+      return recomputeDuplicate(base, recap.etaPlan.perf);
+    });
     setRecap((r) => ({ ...r, charterHireDuplicates: [...(r.charterHireDuplicates ?? []), ...snapshots] }));
     setCharterSelectedKeys(new Set());
   };
   const deleteCharterDuplicate = (id: string) => setRecap((r) => ({ ...r, charterHireDuplicates: (r.charterHireDuplicates ?? []).filter((d) => d.id !== id) }));
+  const setCharterDuplicate = (id: string, patch: Partial<HireDuplicate>) =>
+    setRecap((r) => ({ ...r, charterHireDuplicates: (r.charterHireDuplicates ?? []).map((d) => (d.id === id ? recomputeDuplicate({ ...d, ...patch }, r.etaPlan.perf) : d)) }));
+  const [charterDupSoaId, setCharterDupSoaId] = useState<string | null>(null);
   const exportSelectedCharterPdf = () => {
     const sel = charterRows.filter((r) => charterSelectedKeys.has(r.key));
     if (sel.length === 0) return;
@@ -4504,7 +6651,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
     if (!w) return;
     const p2 = (x: number) => String(x).padStart(2, '0');
     const today = new Date();
-    const body = sel.map((r) => `<tr><td>${r.name}</td><td>${r.account}</td><td>${fmtDT(start)}</td><td>${fmtDT(r.to)}</td><td class="r">${fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td><td class="r">${fmt(r.offHire, 2)}</td><td class="r">${money(r.amount)}</td><td>${fmtDate(r.due)}</td><td>${r.status}</td></tr>`).join('');
+    const body = sel.map((r) => `<tr><td>${r.name}</td><td>${r.account}</td><td>${fmtDT(r.from)}</td><td>${fmtDT(r.to)}</td><td class="r">${fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td><td class="r">${fmt(r.offHire, 2)}</td><td class="r">${money(r.amount)}</td><td>${fmtDate(r.due)}</td><td>${r.status}</td></tr>`).join('');
     const totalAmt = sel.reduce((s, r) => s + r.amount, 0);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Charterers Hire Payments — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
@@ -4605,10 +6752,10 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
                     </div>
                   </td>
                   <td>{r.account}</td>
-                  <td className="fv-ops__eta-dt">{fmtDT(start)}</td>
+                  <td className="fv-ops__eta-dt">{fmtDT(r.from)}</td>
                   <td className="fv-ops__eta-dt">{fmtDT(r.to)}</td>
-                  <td className="fv-ops__r">{fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td>
-                  <td className="fv-ops__r">{fmt(r.offHire, 2)}</td>
+                  <td className="fv-ops__r">{fmt(r.cumulativeOnHire ?? r.onHire, 2)} <span className="fv-ops__soa-muted">({fmt(r.onHire, 2)})</span></td>
+                  <td className="fv-ops__r">{fmt(r.cumulativeOffHire ?? r.offHire, 2)} <span className="fv-ops__soa-muted">({fmt(r.offHire, 2)})</span></td>
                   <td className="fv-ops__r">{money(r.amount)}</td>
                   <td>{fmtDate(r.due)}</td>
                   <td>
@@ -4738,10 +6885,10 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
                       </div>
                     </td>
                     <td>{r.account}</td>
-                    <td className="fv-ops__eta-dt">{fmtDT(start)}</td>
+                    <td className="fv-ops__eta-dt">{fmtDT(r.from)}</td>
                     <td className="fv-ops__eta-dt">{fmtDT(r.to)}</td>
-                    <td className="fv-ops__r">{fmt(r.cumulativeOnHire ?? r.onHire, 2)}</td>
-                    <td className="fv-ops__r">{fmt(r.offHire, 2)}</td>
+                    <td className="fv-ops__r">{fmt(r.cumulativeOnHire ?? r.onHire, 2)} <span className="fv-ops__soa-muted">({fmt(r.onHire, 2)})</span></td>
+                    <td className="fv-ops__r">{fmt(r.cumulativeOffHire ?? r.offHire, 2)} <span className="fv-ops__soa-muted">({fmt(r.offHire, 2)})</span></td>
                     <td className="fv-ops__r">{money(r.amount)}</td>
                     <td>{fmtDate(r.due)}</td>
                     <td>
@@ -4857,7 +7004,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
             <tbody>
               {(recap.hireDuplicates ?? []).map((d) => (
                 <tr key={d.id}>
-                  <td>{d.name}</td>
+                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setDupSoaId(d.id)} title="Open Statement of Account">{d.name}</button></td>
                   <td>{d.account}</td>
                   <td className="fv-ops__eta-dt">{d.from}</td>
                   <td className="fv-ops__eta-dt">{d.to}</td>
@@ -4872,9 +7019,69 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
             </tbody>
           </table>
         </div>
-        <p className="fv-ops__hint">Independent snapshots created from the schedule above. These do not affect the live hire calculations or the next-hire addition.</p>
+        <p className="fv-ops__hint">Independent snapshots created from the schedule above — click a name to open its own Statement of Account, fully editable, same as a real hire. These never affect the live hire calculations or the next-hire addition.</p>
       </Card>
     )}
+    {dupSoaId && (recap.hireDuplicates ?? []).find((d) => d.id === dupSoaId) && (() => {
+      const d = (recap.hireDuplicates ?? []).find((x) => x.id === dupSoaId)!;
+      const dRow = {
+        key: d.id, name: d.name, from: parseDMY(d.from), to: parseDMY(d.to), onHire: d.onHire, offHire: d.offHire, amount: d.amount,
+        ballast: d.ballast, status: d.status, bunkers: d.bunkers, bunkerCredit: d.bunkerCredit, cumulativeAmountDue: d.amount,
+        cumulativeIlohc: d.ilohcOn ? num(d.ilohc) : 0, cumulativeJointOn: num(d.jointOn), cumulativeJointOff: num(d.jointOff),
+        cumulativeExtrasOwners: d.extraExpenses.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0),
+        cumulativeExtrasCharterers: d.extraExpenses.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0),
+        cumulativeExtrasList: d.extraExpenses, cumulativeOffHireEvents: d.offHireEvents,
+      };
+      const dEntry: HirePayEntry = {
+        status: d.status, ballast: d.ballast, name: d.name, from: d.from, to: d.to, amount: d.amount, due: d.due,
+        offHire: d.offHireEvents, jointOn: d.jointOn, jointOff: d.jointOff, ilohcOn: d.ilohcOn,
+        borV: d.borV, borM: d.borM, borFo: d.borFo, borDo: d.borDo, extraExpenses: d.extraExpenses, ownersClaimIds: [],
+      };
+      return (
+        <HireSoaModal
+          row={dRow}
+          entry={dEntry}
+          allRows={[]}
+          claims={settlement.claims}
+          recap={{ ...recap, hirePerDay: d.hirePerDay, adcom: d.adcom, brokerage: d.brokerage, foPrice: d.foPrice, doPrice: d.doPrice, cve: d.cve, ilohc: d.ilohc, ballastBonus: d.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: d.delV, startRobMgo: d.delM } }}
+          borRobV={borRob.v}
+          borRobM={borRob.m}
+          isLast={true}
+          cumulative={true}
+          bodCharged={true}
+          ballastCarried={d.ballast}
+          borReversedToHere={d.bunkerCredit}
+          priorOffHireDays={0}
+          onSave={(recapPatch, entryPatch) => {
+            setDuplicate(d.id, {
+              hirePerDay: recapPatch.hirePerDay ?? d.hirePerDay,
+              adcom: recapPatch.adcom ?? d.adcom,
+              brokerage: recapPatch.brokerage ?? d.brokerage,
+              foPrice: recapPatch.foPrice ?? d.foPrice,
+              doPrice: recapPatch.doPrice ?? d.doPrice,
+              cve: recapPatch.cve ?? d.cve,
+              ilohc: recapPatch.ilohc ?? d.ilohc,
+              ballastBonus: recapPatch.ballastBonus ?? d.ballastBonus,
+              delV: recapPatch.etaPlan?.startRobVlsfo ?? d.delV,
+              delM: recapPatch.etaPlan?.startRobMgo ?? d.delM,
+              from: entryPatch.from ?? d.from,
+              to: entryPatch.to ?? d.to,
+              offHireEvents: entryPatch.offHire ?? d.offHireEvents,
+              ballast: entryPatch.ballast ?? d.ballast,
+              jointOn: entryPatch.jointOn ?? d.jointOn,
+              jointOff: entryPatch.jointOff ?? d.jointOff,
+              ilohcOn: entryPatch.ilohcOn ?? d.ilohcOn,
+              borV: entryPatch.borV ?? d.borV,
+              borM: entryPatch.borM ?? d.borM,
+              borFo: entryPatch.borFo ?? d.borFo,
+              borDo: entryPatch.borDo ?? d.borDo,
+              extraExpenses: entryPatch.extraExpenses ?? d.extraExpenses,
+            });
+          }}
+          onClose={() => setDupSoaId(null)}
+        />
+      );
+    })()}
     {showDualHire && (recap.charterHireDuplicates ?? []).length > 0 && (
       <Card title="Duplicated Charterers Hire Payments" icon="fa-copy" right={
         <div className="fv-ops__card-controls">
@@ -4900,7 +7107,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
             <tbody>
               {(recap.charterHireDuplicates ?? []).map((d) => (
                 <tr key={d.id}>
-                  <td>{d.name}</td>
+                  <td><button type="button" className="fv-ops__hire-namebtn" onClick={() => setCharterDupSoaId(d.id)} title="Open Statement of Account">{d.name}</button></td>
                   <td>{d.account}</td>
                   <td className="fv-ops__eta-dt">{d.from}</td>
                   <td className="fv-ops__eta-dt">{d.to}</td>
@@ -4915,9 +7122,70 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
             </tbody>
           </table>
         </div>
-        <p className="fv-ops__hint">Independent snapshots created from the charterers schedule above. These do not affect the live hire calculations or the next-hire addition.</p>
+        <p className="fv-ops__hint">Independent snapshots created from the charterers schedule above — click a name to open its own Statement of Account, fully editable, same as a real hire. These never affect the live hire calculations or the next-hire addition.</p>
       </Card>
     )}
+    {charterDupSoaId && (recap.charterHireDuplicates ?? []).find((d) => d.id === charterDupSoaId) && (() => {
+      const d = (recap.charterHireDuplicates ?? []).find((x) => x.id === charterDupSoaId)!;
+      const dRow = {
+        key: d.id, name: d.name, from: parseDMY(d.from), to: parseDMY(d.to), onHire: d.onHire, offHire: d.offHire, amount: d.amount,
+        ballast: d.ballast, status: d.status, bunkers: d.bunkers, bunkerCredit: d.bunkerCredit, cumulativeAmountDue: d.amount,
+        cumulativeIlohc: d.ilohcOn ? num(d.ilohc) : 0, cumulativeJointOn: num(d.jointOn), cumulativeJointOff: num(d.jointOff),
+        cumulativeExtrasOwners: d.extraExpenses.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0),
+        cumulativeExtrasCharterers: d.extraExpenses.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0),
+        cumulativeExtrasList: d.extraExpenses, cumulativeOffHireEvents: d.offHireEvents,
+      };
+      const dEntry: HirePayEntry = {
+        status: d.status, ballast: d.ballast, name: d.name, from: d.from, to: d.to, amount: d.amount, due: d.due,
+        offHire: d.offHireEvents, jointOn: d.jointOn, jointOff: d.jointOff, ilohcOn: d.ilohcOn,
+        borV: d.borV, borM: d.borM, borFo: d.borFo, borDo: d.borDo, extraExpenses: d.extraExpenses, ownersClaimIds: [],
+      };
+      return (
+        <HireSoaModal
+          row={dRow}
+          entry={dEntry}
+          allRows={[]}
+          claims={settlement.claims}
+          recap={{ ...recap, charterHirePerDay: d.hirePerDay, adcom: d.adcom, brokerage: d.brokerage, foPrice: d.foPrice, doPrice: d.doPrice, cve: d.cve, ilohc: d.ilohc, ballastBonus: d.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: d.delV, startRobMgo: d.delM } }}
+          borRobV={borRob.v}
+          borRobM={borRob.m}
+          isLast={true}
+          cumulative={true}
+          bodCharged={true}
+          ballastCarried={d.ballast}
+          borReversedToHere={d.bunkerCredit}
+          priorOffHireDays={0}
+          mode="charterers"
+          onSave={(recapPatch, entryPatch) => {
+            setCharterDuplicate(d.id, {
+              hirePerDay: recapPatch.charterHirePerDay ?? d.hirePerDay,
+              adcom: recapPatch.adcom ?? d.adcom,
+              brokerage: recapPatch.brokerage ?? d.brokerage,
+              foPrice: recapPatch.foPrice ?? d.foPrice,
+              doPrice: recapPatch.doPrice ?? d.doPrice,
+              cve: recapPatch.cve ?? d.cve,
+              ilohc: recapPatch.ilohc ?? d.ilohc,
+              ballastBonus: recapPatch.ballastBonus ?? d.ballastBonus,
+              delV: recapPatch.etaPlan?.startRobVlsfo ?? d.delV,
+              delM: recapPatch.etaPlan?.startRobMgo ?? d.delM,
+              from: entryPatch.from ?? d.from,
+              to: entryPatch.to ?? d.to,
+              offHireEvents: entryPatch.offHire ?? d.offHireEvents,
+              ballast: entryPatch.ballast ?? d.ballast,
+              jointOn: entryPatch.jointOn ?? d.jointOn,
+              jointOff: entryPatch.jointOff ?? d.jointOff,
+              ilohcOn: entryPatch.ilohcOn ?? d.ilohcOn,
+              borV: entryPatch.borV ?? d.borV,
+              borM: entryPatch.borM ?? d.borM,
+              borFo: entryPatch.borFo ?? d.borFo,
+              borDo: entryPatch.borDo ?? d.borDo,
+              extraExpenses: entryPatch.extraExpenses ?? d.extraExpenses,
+            });
+          }}
+          onClose={() => setCharterDupSoaId(null)}
+        />
+      );
+    })()}
     {soaRow !== null && rows[soaRow] && (
       <HireSoaModal
         key={rows[soaRow].key}
@@ -4930,12 +7198,17 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
         borRobM={borRob.m}
         isLast={soaRow === rows.length - 1}
         cumulative={true}
-        bodCharged={bunkerPayIdx >= 0 && soaRow === bunkerPayIdx}
+        bodCharged={bunkerPayIdx >= 0 && soaRow >= bunkerPayIdx}
+        ballastCarried={ballastPayIdx >= 0 && soaRow >= ballastPayIdx}
         borReversedToHere={rows[soaRow].bunkerCredit}
         priorOffHireDays={rows.slice(0, soaRow).reduce((s, r) => s + r.offHire, 0)}
         onSave={(recapPatch, entryPatch) => {
           const key = rows[soaRow].key;
-          setRecap((r) => ({ ...r, ...recapPatch, hirePayState: { ...r.hirePayState, [key]: { ...stateOfRaw(r, key), ...entryPatch } } }));
+          setRecap((r) => {
+            let next = { ...r, ...recapPatch };
+            if (recapPatch.foPrice !== undefined || recapPatch.doPrice !== undefined) next = applyGlobalBunkerPrices(next, next.foPrice, next.doPrice);
+            return { ...next, hirePayState: { ...next.hirePayState, [key]: { ...stateOfRaw(r, key), ...entryPatch } } };
+          });
         }}
         onClose={() => setSoaRow(null)}
       />
@@ -4952,13 +7225,18 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
         borRobM={borRob.m}
         isLast={charterSoaRow === charterRows.length - 1}
         cumulative={true}
-        bodCharged={charterBunkerPayIdx >= 0 && charterSoaRow === charterBunkerPayIdx}
+        bodCharged={charterBunkerPayIdx >= 0 && charterSoaRow >= charterBunkerPayIdx}
+        ballastCarried={charterBallastPayIdx >= 0 && charterSoaRow >= charterBallastPayIdx}
         borReversedToHere={charterRows[charterSoaRow].bunkerCredit}
         priorOffHireDays={charterRows.slice(0, charterSoaRow).reduce((s, r) => s + r.offHire, 0)}
         mode="charterers"
         onSave={(recapPatch, entryPatch) => {
           const key = charterRows[charterSoaRow].key;
-          setRecap((r) => ({ ...r, ...recapPatch, charterHirePayState: { ...r.charterHirePayState, [key]: { ...charterStateOfRaw(r, key), ...entryPatch } } }));
+          setRecap((r) => {
+            let next = { ...r, ...recapPatch };
+            if (recapPatch.foPrice !== undefined || recapPatch.doPrice !== undefined) next = applyGlobalBunkerPrices(next, next.foPrice, next.doPrice);
+            return { ...next, charterHirePayState: { ...next.charterHirePayState, [key]: { ...charterStateOfRaw(r, key), ...entryPatch } } };
+          });
         }}
         onClose={() => setCharterSoaRow(null)}
       />
@@ -5009,7 +7287,7 @@ export function OpsClaimsCard({ recap, setRecap, voyage }: { recap: Recap; setRe
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
   const fl = valid ? (stored as FreightLaytimeData) : seedFreightLaytime(recap);
-  const seededSettlement = useMemo(() => seedFreightSettlement(voyage), [voyage.id, voyage.portFrom, voyage.portTo]);
+  const seededSettlement = useMemo(() => seedFreightSettlement(voyage, recap), [voyage.id, voyage.portFrom, voyage.portTo, recap.loadPort, recap.dischargePort]);
   const settlement = fl.settlement ?? seededSettlement;
   const setFL = (patch: Partial<FreightLaytimeData>) =>
     setRecap((r) => {
@@ -5039,13 +7317,13 @@ export function OpsClaimsCard({ recap, setRecap, voyage }: { recap: Recap; setRe
   const openFirstSelected = (ids: Set<string>) => Array.from(ids)[0] ?? null;
 
   const addClaim = () => {
-    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Open', attachments: [] };
+    const row: ClaimRow = { id: uid('clm'), type: '', reference: '', chargeTo: '', owner: '', due: '', currency: 'USD', amount: 0, settlement: 0, status: 'Raised', attachments: [] };
     setSettlement({ claims: [...settlement.claims, row] });
     setClaimId(row.id);
   };
   const saveClaim = (id: string, patch: Partial<ClaimRow>) => setSettlement({ claims: settlement.claims.map((x) => (x.id === id ? { ...x, ...patch } : x)) });
   const deleteSelClaims = () => { setSettlement({ claims: settlement.claims.filter((x) => !selClaims.has(x.id)) }); setSelClaims(new Set()); };
-  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Open' }))] }); setSelClaims(new Set()); };
+  const copySelClaims = () => { setSettlement({ claims: [...settlement.claims, ...settlement.claims.filter((x) => selClaims.has(x.id)).map((x) => ({ ...x, id: uid('clm'), status: 'Raised' }))] }); setSelClaims(new Set()); };
   const updateSelClaimStatus = () => { setClaimStatusValue('Under Review'); setClaimStatusOpen(true); };
   const applyClaimStatus = () => { setSettlement({ claims: settlement.claims.map((x) => (selClaims.has(x.id) ? { ...x, status: claimStatusValue } : x)) }); setClaimStatusOpen(false); };
   const pdfSelClaims = () => {
@@ -5121,12 +7399,12 @@ export function OpsClaimsCard({ recap, setRecap, voyage }: { recap: Recap; setRe
   );
 }
 
-function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, isLast, cumulative, bodCharged, borReversedToHere, priorOffHireDays, mode = 'owners', onSave, onClose }: {
-  row: { key: string; name: string; from: Date | null; to: Date | null; onHire: number; offHire: number; amount: number; ballast: boolean; status: string; bunkers: number; bunkerCredit: number };
+function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, isLast, cumulative, bodCharged, ballastCarried, borReversedToHere, priorOffHireDays, mode = 'owners', onSave, onClose }: {
+  row: { key: string; name: string; from: Date | null; to: Date | null; onHire: number; offHire: number; amount: number; ballast: boolean; status: string; bunkers: number; bunkerCredit: number; cumulativeAmountDue?: number; cumulativeIlohc?: number; cumulativeJointOn?: number; cumulativeJointOff?: number; cumulativeExtrasOwners?: number; cumulativeExtrasCharterers?: number; cumulativeExtrasList?: ExtraExpense[]; cumulativeOffHireEvents?: OffHireRow[] };
   entry: HirePayEntry;
   allRows: { key: string; name: string; amount: number; status: string }[];
   claims: ClaimRow[];
-  recap: Recap; borRobV: number; borRobM: number; isLast: boolean; cumulative: boolean; bodCharged: boolean; borReversedToHere: number; priorOffHireDays: number;
+  recap: Recap; borRobV: number; borRobM: number; isLast: boolean; cumulative: boolean; bodCharged: boolean; ballastCarried: boolean; borReversedToHere: number; priorOffHireDays: number;
   mode?: 'owners' | 'charterers';
   onSave: (recapPatch: Partial<Recap>, entryPatch: Partial<HirePayEntry>) => void;
   onClose: () => void;
@@ -5147,13 +7425,17 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
     ballastBonus: recap.ballastBonus,
     delV: recap.etaPlan.startRobVlsfo, delM: recap.etaPlan.startRobMgo,
     borV: entry.borV ?? '', borM: entry.borM ?? '', borFo: entry.borFo ?? '', borDo: entry.borDo ?? '',
-    // Interim hires always start from clause-computed row dates; only the cumulative final hire
-    // may have a user-saved redelivery time stored in entry.from/to.
-    from: (cumulative ? entry.from : null) ?? dmyOf(row.from),
-    to: (cumulative ? entry.to : null) ?? dmyOf(row.to),
+    // Interim hires always start from clause-computed row dates; only a LOCKED hire (Sent For
+    // Payment / Paid & Locked) may have a user-saved actual redelivery time stored in entry.from/to
+    // — a Draft hire's saved from/to (if any, e.g. leftover from an earlier edit) must not override
+    // the live, clause-computed dates.
+    from: (hireLocked(row.status as HireStatus) ? entry.from : null) ?? dmyOf(row.from),
+    to: (hireLocked(row.status as HireStatus) ? entry.to : null) ?? dmyOf(row.to),
     offHire: entry.offHire ?? [], extras: entry.extraExpenses ?? [],
     ownersClaimIds: entry.ownersClaimIds ?? [],
-    jointOn: entry.jointOn ?? '0', jointOff: entry.jointOff ?? '0',
+    // Joint Survey starts out showing the cascaded total inherited from earlier hires (not 0) —
+    // this hire hasn't set its own override yet, so it's just carrying the prior value forward.
+    jointOn: entry.jointOn ?? String(row.cumulativeJointOn ?? 0), jointOff: entry.jointOff ?? String(row.cumulativeJointOff ?? 0),
     ilohcOn: entry.ilohcOn ?? isLast, ballastOn: row.ballast,
   });
   const [editing, setEditing] = useState(false);
@@ -5163,29 +7445,25 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
   const offRows = draft.offHire;
   const setOff = (i: number, patch: Partial<OffHireRow>) => setD({ offHire: offRows.map((o, idx) => (idx === i ? { ...o, ...patch } : o)) });
   const addOff = () => setD({ offHire: [...offRows, { cat: OFFHIRE_CATS[0], from: '', to: '', pct: '100', remark: '', robStartV: '', robStartM: '', robEndV: '', robEndM: '' }] });
+  // Derived from the `entry` PROP (the last-SAVED state), not the live `draft` — adding/removing
+  // this hire's OWN off-hire events while editing must not shift how many of the cumulative list's
+  // items count as "historical" (earlier hires'), or already-shown historical rows would
+  // disappear/reappear mid-edit. `entry` only changes after a real Save (stable while editing,
+  // refreshes correctly afterward — unlike a mount-frozen ref, which would go stale across repeat
+  // saves in the same still-open popup session).
+  const ownOffHireCount = entry.offHire?.length ?? 0;
+  // Earlier hires' own off-hire events, carried forward here as a read-only reference (so this
+  // hire's Statement of Off-Hire shows the full picture back to delivery, not just its own events).
+  const historicalOffHire = (row.cumulativeOffHireEvents ?? []).slice(0, Math.max(0, (row.cumulativeOffHireEvents ?? []).length - ownOffHireCount));
   // Per-category daily consumption (VLSFO from main engine, MGO from aux) for off-hire bunkers.
   const mnCons = recap.etaPlan.perf.mainNormal;
   const snCons = recap.etaPlan.perf.subNormal;
   const foType = mnCons.type || 'VLSFO';
   const doType = snCons.type || 'MGO';
-  const catRate = (cat: string): { v: number; m: number } => {
-    if (cat.startsWith('A')) return { v: num(mnCons.work), m: num(snCons.work) };
-    if (cat.startsWith('B')) return { v: num(mnCons.idle), m: num(snCons.idle) };
-    return { v: num(mnCons.laden), m: num(snCons.sea) }; // C (sea) & D (weather): steaming rates
-  };
   // Auto ROB end = start − (category rate × off-hire time); a manual entry is used as-is (no % applied).
-  const offBunker = (o: OffHireRow) => {
-    const r = catRate(o.cat);
-    const d = offHireDays(o);
-    const startV = num(o.robStartV ?? '0'); const startM = num(o.robStartM ?? '0');
-    const manualV = (o.robEndV ?? '').trim() !== ''; const manualM = (o.robEndM ?? '').trim() !== '';
-    const endV = manualV ? num(o.robEndV ?? '0') : startV - r.v * d;
-    const endM = manualM ? num(o.robEndM ?? '0') : startM - r.m * d;
-    const consV = manualV ? startV - endV : r.v * d;
-    const consM = manualM ? startM - endM : r.m * d;
-    return { startV, startM, endV, endM, consV, consM };
-  };
-  const offConsTotal = offRows.reduce((a, o) => { const b = offBunker(o); return { v: a.v + b.consV, m: a.m + b.consM }; }, { v: 0, m: 0 });
+  const offBunker = (o: OffHireRow) => offHireBunker(recap.etaPlan.perf, o);
+  // Cumulative bunker consumption across historical + this hire's own off-hire events.
+  const offConsTotal = [...historicalOffHire, ...offRows].reduce((a, o) => { const b = offBunker(o); return { v: a.v + b.consV, m: a.m + b.consM }; }, { v: 0, m: 0 });
   const delOff = (i: number) => setD({ offHire: offRows.filter((_, idx) => idx !== i) });
   const offTotal = offRows.reduce((s, o) => s + offHireDays(o), 0);
 
@@ -5197,12 +7475,14 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
   const periodFromD = parseDMY(draft.from);
   const fromD = cumulative ? deliveryD : periodFromD;
   const onHire = fromD && toD ? Math.max(0, (toD.getTime() - fromD.getTime()) / 86_400_000) : row.onHire;
+  // This hire's own period length (From → To), live-recomputed from the edited date — used only
+  // for the "This Hire Period" reference line, distinct from the cumulative `onHire` above.
+  const ownPeriodDays = periodFromD && toD ? Math.max(0, (toD.getTime() - periodFromD.getTime()) / 86_400_000) : row.onHire;
   const cumOffHire = cumulative ? priorOffHireDays + offTotal : offTotal;
   const nett = Math.max(0, onHire - cumOffHire);
   const perDay = num(draft.hirePerDay);
   const addrPct = num(draft.adcom);
   const brkgPct = num(draft.brokerage);
-  const dedPct = addrPct + brkgPct;
   const foP = num(draft.foPrice);
   const doP = num(draft.doPrice);
   const delV = num(draft.delV);
@@ -5216,37 +7496,51 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
   const borFullValue = borV * borFo + borM * borDo;
   const bunkRedelivery = borReversedToHere;
   const borCredited = borReversedToHere > 0.01;
-  // CUMULATIVE CALCULATION FOR MODAL
-  // Recalculate from delivery date to this hire's end date (mirroring main table logic)
-  const deliveryDt = recap.deliveryDateTime ? parseDMY(recap.deliveryDateTime) : row.from;
-  const hireTo = row.to || new Date();
-  const cumulativeOnHireCalc = deliveryDt && hireTo ? Math.max(0, (hireTo.getTime() - deliveryDt.getTime()) / 86_400_000) : 0;
-  
-  // Cumulative off-hire: use priorOffHireDays + this hire's off-hire
-  const thisHireOffHire = (entry?.offHire ?? []).reduce((s, o) => s + offHireDays(o), 0);
-  const cumulativeOffHireCalc = priorOffHireDays + thisHireOffHire;
-  
-  // CUMULATIVE METHODOLOGY: Hire is calculated GROSS from delivery date (all cumulative on-hire days)
-  // Off-hire deduction is applied separately in the balance calculation
-  const hireAmtGross = perDay * cumulativeOnHireCalc;
-  const bb = draft.ballastOn ? num(draft.ballastBonus) : 0;
-  const address = ((hireAmtGross + bb) * addrPct) / 100;
-  const brokerage = (hireAmtGross * brkgPct) / 100;
+
+  // SIMPLIFIED METHODOLOGY: Hire (and everything derived from it — commission, CVE) is calculated
+  // directly on NETT days (cumulative on-hire less cumulative off-hire) — no separate "gross then
+  // deduct" step needed, since the off-hire time is already excluded up front.
+  const hireAmtNett = perDay * nett;
+  // While read-only, trust the schedule's own cascading carry-forward (`ballastCarried`, computed
+  // from the main table's BB tick + ballastPayIdx — existing BB logic, untouched). While actively
+  // editing, nothing's saved yet, so preview live from the draft's own checkbox/amount instead —
+  // otherwise ticking/typing in the popup never moves the figures until after Save.
+  const ballastOnEff = editing ? draft.ballastOn : ballastCarried;
+  const bb = ballastOnEff ? num(draft.ballastBonus) : 0;
+  const address = ((hireAmtNett + bb) * addrPct) / 100;
+  const brokerage = (hireAmtNett * brkgPct) / 100;
+  // Off-hire bunkers consumed (historical + this hire's own events), valued at CP price — the
+  // ONLY off-hire deduction needed now that Hire/CVE are already nett-days-based above.
   const offBunkerCost = offConsTotal.v * foP + offConsTotal.m * doP;
-  const cve = (num(draft.cve) / 30) * cumulativeOnHireCalc;
-  // Off-hire value deduction: cumulative off-hire days × (hire rate net of commission + CVE) + bunker cost during off-hire
-  const offHirePart = cumulativeOffHireCalc * perDay * (1 - dedPct / 100) + (num(draft.cve) / 30) * cumulativeOffHireCalc + offBunkerCost;
-  const hireAmt = hireAmtGross;
-  // Value of this hire's off-hire: hire lost (net of commission) + CVE for the off-hire days + off-hire bunkers.
-  const offHireValue = offTotal * perDay * (1 - dedPct / 100) + (num(draft.cve) / 30) * offTotal + offBunkerCost;
-  const ilohc = draft.ilohcOn ? num(draft.ilohc) : 0;
-  const surveys = num(draft.jointOn) / 2 + num(draft.jointOff) / 2;
+  const cve = (num(draft.cve) / 30) * nett;
+  const hireAmt = hireAmtNett;
+  // Same editing-live-preview pattern as `bb` above — `row.cumulativeIlohc` is the schedule's own
+  // cascading carry-forward (existing ILOHC logic, untouched) used while read-only; while editing,
+  // preview live from the draft's own checkbox/amount so ticking/typing updates immediately.
+  const ilohc = editing ? (draft.ilohcOn ? num(draft.ilohc) : 0) : (row.cumulativeIlohc ?? (draft.ilohcOn ? num(draft.ilohc) : 0));
+  // Joint Survey is a single running figure, not additive: whichever hire last explicitly set its
+  // own amount becomes the new total from that hire onward (`cumulativeJointOn`/`Off`, computed by
+  // the schedule via override-cascade — see `cumulativeExtrasFor`), so editing it here only ever
+  // affects this hire and later ones, never hires before it.
+  const cumJointOn = editing ? num(draft.jointOn) : (row.cumulativeJointOn ?? num(draft.jointOn));
+  const cumJointOff = editing ? num(draft.jointOff) : (row.cumulativeJointOff ?? num(draft.jointOff));
+  const surveys = cumJointOn / 2 + cumJointOff / 2;
+
+  // This hire's own editable "Other Expense" lines; earlier hires' lines are carried forward
+  // below as read-only reference rows (not retroactively shown on hires before they existed).
   const extras = draft.extras;
+  // Derived from the `entry` PROP — same reasoning as `ownOffHireCount` above, for Other Expenses.
+  const ownExtrasCount = entry.extraExpenses?.length ?? 0;
+  const historicalExtras = (row.cumulativeExtrasList ?? []).slice(0, Math.max(0, (row.cumulativeExtrasList ?? []).length - ownExtrasCount));
   const setExtra = (i: number, patch: Partial<ExtraExpense>) => setD({ extras: extras.map((e, idx) => (idx === i ? { ...e, ...patch } : e)) });
   const addExtra = () => setD({ extras: [...extras, { desc: '', amount: '0', due: 'Owners' }] });
   const delExtra = (i: number) => setD({ extras: extras.filter((_, idx) => idx !== i) });
-  const extrasOwners = extras.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0);
-  const extrasCharterers = extras.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0);
+  const priorExtrasOwners = historicalExtras.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0);
+  const priorExtrasCharterers = historicalExtras.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0);
+  const liveExtrasOwners = priorExtrasOwners + extras.reduce((s, e) => s + (e.due === 'Owners' ? num(e.amount) : 0), 0);
+  const liveExtrasCharterers = priorExtrasCharterers + extras.reduce((s, e) => s + (e.due !== 'Owners' ? num(e.amount) : 0), 0);
+  const extrasOwners = editing ? liveExtrasOwners : (row.cumulativeExtrasOwners ?? liveExtrasOwners);
+  const extrasCharterers = editing ? liveExtrasCharterers : (row.cumulativeExtrasCharterers ?? liveExtrasCharterers);
   const claimRowsOwners = claims.filter((c) => draft.ownersClaimIds.includes(c.id) && claimForOwners(c));
   const claimsOwnersValue = claimRowsOwners.reduce((s, c) => s + claimOutstanding(c), 0);
   const ownerClaimsChoices = claims.filter((c) => claimForOwners(c));
@@ -5259,30 +7553,50 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
   };
   const removeOwnerClaim = (id: string) => setD({ ownersClaimIds: draft.ownersClaimIds.filter((x) => x !== id) });
 
-  // The column Sums must match the bunker values shown in the rows (full BOD / BOR), so they
-  // cancel for the estimate. bunkDelivery / bunkRedelivery remain for the settlement notes only.
-  const owners = hireAmt + bb + row.bunkers + cve + extrasOwners;
-  const charterers = address + brokerage + row.bunkerCredit + ilohc + surveys + extrasCharterers + claimsOwnersValue;
-  const totalPayable = owners - charterers;
+  // BOD counts on the OWNERS side only once charged (bodCharged, carried forward from that hire
+  // onward); BOR credit (row.bunkerCredit) is likewise carried forward from the settle hire.
+  const owners = hireAmt + bb + (bodCharged ? row.bunkers : 0) + cve + extrasOwners;
+  // Off-hire bunkers consumed is a credit due to Charterers — the only off-hire deduction needed
+  // now that Hire/CVE are already nett-days-based above (see "Off-Hire Bunkers" line item).
+  const charterers = address + brokerage + row.bunkerCredit + ilohc + surveys + extrasCharterers + claimsOwnersValue + offBunkerCost;
+  // While read-only, trust the schedule's own `row.cumulativeAmountDue`/`row.amount` as the single
+  // source of truth (matches the main Hire Payment Schedule table exactly, no drift). While
+  // actively editing, nothing's been saved yet, so these must recompute live from the draft
+  // (hireTo/toD above) — otherwise an edited date never moves "Total Payable"/"Balance Due".
+  const liveTotalPayable = owners - charterers;
+  const totalPayable = editing ? liveTotalPayable : (row.cumulativeAmountDue ?? liveTotalPayable);
 
-  // Current Hire Payable = Net Cumulative Hire - all prior hire statements (paid or draft).
+  // Current Hire Payable = the cumulative-then-deduct amount already computed by the schedule
+  // (row.amount) — single source of truth, shared with the main Hire Payment Schedule table.
   const currentIndex = allRows.findIndex((x) => x.key === row.key);
   const priorRows = currentIndex > 0 ? allRows.slice(0, currentIndex) : [];
   const paidTotal = priorRows.reduce((s, x) => s + x.amount, 0);
-  // Balance Due to (or from) Owners = Total Payable - Off-Hire Value - Prior Hire Statements.
-  const balanceDue = totalPayable - offHirePart - paidTotal;
+  const balanceDue = editing ? totalPayable - paidTotal : row.amount;
 
   const save = () => {
-    // Only persist from/to for the final (cumulative) hire where the user may set the actual
-    // redelivery time. Interim hires always derive dates from the clause, so saving them back
-    // would lock them and prevent the clause from re-computing on future renders.
-    const datePatch = cumulative ? { from: draft.from, to: draft.to } : {};
+    // Any hire — including the final/settlement one — only persists its "to" if the user
+    // actually changed it here (flagged `toManual` so it isn't confused with stale/leftover
+    // data, and so it correctly overrides the auto redelivery-snap on the final row too). The
+    // schedule then shifts every later installment to follow from this new date, re-applying
+    // the normal clause period length and BOR logic from there.
+    const toEdited = draft.to !== dmyOf(row.to);
+    const datePatch = toEdited ? { from: draft.from, to: draft.to, toManual: true } : {};
+    // Joint Survey only persists an explicit override if the user actually changed it from the
+    // cascaded value it was showing — otherwise every unrelated save (e.g. just the hire rate)
+    // would freeze this hire with a spurious override and break the cascade for every later hire.
+    const jointOnEdited = draft.jointOn !== (entry.jointOn ?? String(row.cumulativeJointOn ?? 0));
+    const jointOffEdited = draft.jointOff !== (entry.jointOff ?? String(row.cumulativeJointOff ?? 0));
     const recapPatch = isCharterMode
       ? { charterHirePerDay: draft.hirePerDay, adcom: draft.adcom, brokerage: draft.brokerage, foPrice: draft.foPrice, doPrice: draft.doPrice, cve: draft.cve, ilohc: draft.ilohc, ballastBonus: draft.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: draft.delV, startRobMgo: draft.delM } }
       : { hirePerDay: draft.hirePerDay, adcom: draft.adcom, brokerage: draft.brokerage, foPrice: draft.foPrice, doPrice: draft.doPrice, cve: draft.cve, ilohc: draft.ilohc, ballastBonus: draft.ballastBonus, etaPlan: { ...recap.etaPlan, startRobVlsfo: draft.delV, startRobMgo: draft.delM } };
     onSave(
       recapPatch,
-      { ...datePatch, offHire: draft.offHire, ballast: draft.ballastOn, jointOn: draft.jointOn, jointOff: draft.jointOff, ilohcOn: draft.ilohcOn, borV: draft.borV, borM: draft.borM, borFo: draft.borFo, borDo: draft.borDo, extraExpenses: draft.extras, ownersClaimIds: draft.ownersClaimIds },
+      {
+        ...datePatch, offHire: draft.offHire, ballast: draft.ballastOn,
+        jointOn: jointOnEdited ? draft.jointOn : entry.jointOn,
+        jointOff: jointOffEdited ? draft.jointOff : entry.jointOff,
+        ilohcOn: draft.ilohcOn, borV: draft.borV, borM: draft.borM, borFo: draft.borFo, borDo: draft.borDo, extraExpenses: draft.extras, ownersClaimIds: draft.ownersClaimIds,
+      },
     );
     setEditing(false);
   };
@@ -5293,26 +7607,38 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
     if (!w) return;
     const li = (no: number | string, desc: string, o: number, c: number) => `<tr><td>${no}</td><td>${desc}</td><td class="r">${o ? money(o) : ''}</td><td class="r">${c ? money(c) : ''}</td></tr>`;
     const body = [
-      li(1, `Hire — ${fmt(onHire, 2)} days × ${money(perDay)}/day`, hireAmt, 0),
+      li(1, `Hire — ${fmt(nett, 2)} days (nett) × ${money(perDay)}/day`, hireAmt, 0),
       li(2, `Ballast Bonus (LSUM)${draft.ballastOn ? '' : ' — n/a'}`, bb, 0),
       li(3, `Address Commission @ ${fmt(addrPct, 3)}%`, 0, address),
       li(4, `Brokerage @ ${fmt(brkgPct, 3)}%`, 0, brokerage),
-      li(5, `Bunker on Delivery — VLSFO ${fmt(delV, 2)}mt @ ${foP} · LSMGO ${fmt(delM, 2)}mt @ ${doP}${bodCharged ? '' : ' (charged on BOD hire)'}`, row.bunkers, 0),
+      li(5, `Bunker on Delivery — VLSFO ${fmt(delV, 2)}mt @ ${foP} · LSMGO ${fmt(delM, 2)}mt @ ${doP}${bodCharged ? '' : ' (charged on BOD hire)'}`, bodCharged ? row.bunkers : 0, 0),
       li(6, `Bunker on Redelivery — VLSFO ${fmt(borV, 2)}mt @ ${fmt(borFo, 2)} · LSMGO ${fmt(borM, 2)}mt @ ${fmt(borDo, 2)}${borCredited ? '' : ' (reversed on BOR hire)'}`, 0, row.bunkerCredit),
-      li(7, `Cable/Victualing/Entertainment — ${money(num(draft.cve))}/mo × ${fmt(onHire, 2)}d`, cve, 0),
-      li(8, `ILOHC${draft.ilohcOn ? '' : ' — n/a'}`, 0, ilohc),
-      li(9, 'Joint On-Hire Survey (÷2)', 0, num(draft.jointOn) / 2),
-      li(10, 'Joint Off-Hire Survey (÷2)', 0, num(draft.jointOff) / 2),
-      ...extras.map((ex, i) => li(11 + i, ex.desc || 'Other expense', ex.due === 'Owners' ? num(ex.amount) : 0, ex.due !== 'Owners' ? num(ex.amount) : 0)),
-      ...claimRowsOwners.map((c, i) => li(11 + extras.length + i, `Claim (${claimChargeTo(c)}): ${c.reference || c.type || 'Claim'}`, 0, claimOutstanding(c))),
+      li(7, `Off-Hire Bunkers — ${foType} ${fmt(offConsTotal.v, 2)}mt @ ${foP} · ${doType} ${fmt(offConsTotal.m, 2)}mt @ ${doP}`, 0, offBunkerCost),
+      li(8, `Cable/Victualing/Entertainment — ${money(num(draft.cve))}/mo × ${fmt(nett, 2)}d (nett)`, cve, 0),
+      li(9, `ILOHC${draft.ilohcOn ? '' : ' — n/a'}`, 0, ilohc),
+      li(10, 'Joint On-Hire Survey (÷2)', 0, cumJointOn / 2),
+      li(11, 'Joint Off-Hire Survey (÷2)', 0, cumJointOff / 2),
+      ...historicalExtras.map((ex, i) => li(12 + i, `${ex.desc || 'Other expense'} · carried forward`, ex.due === 'Owners' ? num(ex.amount) : 0, ex.due !== 'Owners' ? num(ex.amount) : 0)),
+      ...extras.map((ex, i) => li(12 + historicalExtras.length + i, ex.desc || 'Other expense', ex.due === 'Owners' ? num(ex.amount) : 0, ex.due !== 'Owners' ? num(ex.amount) : 0)),
+      ...claimRowsOwners.map((c, i) => li(12 + historicalExtras.length + extras.length + i, `Claim (${claimChargeTo(c)}): ${c.reference || c.type || 'Claim'}`, 0, claimOutstanding(c))),
     ].join('');
     const allPriorHtml = priorRows.map((x) => `<tr><td>Less: ${x.name} — ${x.status}</td><td class="r">-${money(x.amount)}</td></tr>`).join('');
+    // Statement of Off-Hire — same event rows + bunker ROB/consumed figures shown in the popup.
+    // Time and bunker quantities only — the $ values are covered by the line items above.
+    const offHireRowsHtml = offRows.length === 0
+      ? `<tr><td colspan="6">No off-hire recorded.</td></tr>`
+      : offRows.map((o) => {
+          const b = offBunker(o);
+          return `<tr><td>${o.cat}</td><td>${o.from || '—'}</td><td>${o.to || '—'}</td><td class="r">${o.pct}</td><td class="r">${fmt(offHireDays(o), 3)}</td><td>${o.remark || '—'}</td></tr>
+            <tr class="rob"><td colspan="2">Bunker ROB — Start: ${foType} ${fmt(b.startV, 2)} · ${doType} ${fmt(b.startM, 2)}</td><td colspan="2">End: ${foType} ${fmt(b.endV, 2)} · ${doType} ${fmt(b.endM, 2)}</td><td colspan="2">Consumed: ${foType} ${fmt(b.consV, 2)} · ${doType} ${fmt(b.consM, 2)}</td></tr>`;
+        }).join('');
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>SOA ${row.name} — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
-      h1{font-size:16px;margin:0 0 2px} .sub{color:#555;margin:0 0 14px;font-size:11px}
+      h1{font-size:16px;margin:0 0 2px} h2{font-size:13px;margin:16px 0 2px} .sub{color:#555;margin:0 0 14px;font-size:11px}
       table{border-collapse:collapse;width:100%;margin:8px 0}
       th,td{border:1px solid #bbb;padding:4px 7px;text-align:left}
       th.r,td.r{text-align:right} tfoot td{font-weight:700;background:#f2f2f2}
+      tr.rob td{color:#555;font-size:11px;background:#fafafa}
       .tot{font-size:13px}
     </style></head><body>${pdfCompanyHeader()}
       <h1>Statement of Account — ${row.name}</h1>
@@ -5322,7 +7648,11 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
       <tbody>${body}</tbody>
       <tfoot><tr><td colspan="2">Sum</td><td class="r">${money(owners)}</td><td class="r">${money(charterers)}</td></tr>
       <tr class="tot"><td colspan="2">Total Payable to Owners</td><td class="r" colspan="2">${money(totalPayable)}</td></tr></tfoot></table>
-      <table><tbody><tr><td>Total Payable to Owners</td><td class="r">${money(totalPayable)}</td></tr>${offHirePart > 0.01 ? `<tr><td>Less: Off-Hire (${fmt(cumOffHire, 2)} days)</td><td class="r">-${money(offHirePart)}</td></tr>` : ''}${allPriorHtml}</tbody>
+      <h2>Statement of Off-Hire</h2>
+      <table><thead><tr><th>Category</th><th>From</th><th>To</th><th class="r">%</th><th class="r">Days</th><th>Remarks</th></tr></thead>
+      <tbody>${offHireRowsHtml}</tbody>
+      <tfoot><tr><td colspan="4">Total Off-Hire (A + B + C + D)</td><td class="r">${fmt(offTotal, 3)}d</td><td>Bunkers · ${foType} ${fmt(offConsTotal.v, 2)} · ${doType} ${fmt(offConsTotal.m, 2)}</td></tr></tfoot></table>
+      <table><tbody><tr><td>Total Cumulative Amount Due</td><td class="r">${money(totalPayable)}</td></tr>${allPriorHtml}</tbody>
       <tfoot>${priorRows.length > 0 ? `<tr><td>Total payment expected to be paid till date (${priorRows.length})</td><td class="r">-${money(paidTotal)}</td></tr>` : ''}<tr class="tot"><td>Balance Due ${balanceDue >= 0 ? 'to' : 'from'} Owners</td><td class="r">${money(Math.abs(balanceDue))}</td></tr></tfoot></table>
       <p class="sub">*E&amp;OE.</p>
     </body></html>`);
@@ -5362,7 +7692,7 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
             <div><span>Days On-Hire</span><b>{fmt(onHire, 2)}</b></div>
             <div><span>Days Off-Hire</span><b>{fmt(cumOffHire, 2)}</b></div>
             <div><span>Nett Days On-Hire</span><b className="fv-ops__pos">{fmt(nett, 2)}</b></div>
-            {cumulative && <div><span>This Hire Period</span><b className="fv-ops__soa-muted">{fmtDT(periodFromD)} → {fmtDT(toD)} · {fmt(row.onHire, 2)}d</b></div>}
+            {cumulative && <div><span>This Hire Period</span><b className="fv-ops__soa-muted">{fmtDT(periodFromD)} → {fmtDT(toD)} · {fmt(ownPeriodDays, 2)}d</b></div>}
           </div>
 
           <table className="fv-ops__soa-tbl">
@@ -5370,19 +7700,29 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
               <tr><th>No</th><th>Description</th><th className="fv-ops__r">Due to Owners</th><th className="fv-ops__r">Due to Charterers</th></tr>
             </thead>
             <tbody>
-              <tr><td>1</td><td>Hire — {fmt(cumulativeOnHireCalc, 2)} days × {editing ? nIn(draft.hirePerDay, (v) => setD({ hirePerDay: v })) : money(perDay)}/day</td><td className="fv-ops__r">{money(hireAmtGross)}</td><td className="fv-ops__r" /></tr>
+              <tr><td>1</td><td>Hire — {fmt(nett, 2)} days (nett) × {editing ? nIn(draft.hirePerDay, (v) => setD({ hirePerDay: v })) : money(perDay)}/day</td><td className="fv-ops__r">{money(hireAmtNett)}</td><td className="fv-ops__r" /></tr>
               <tr><td>2</td><td><label className="fv-ops__soa-chk"><input type="checkbox" checked={draft.ballastOn} disabled={!editing} onChange={(e) => setD({ ballastOn: e.target.checked })} /> Ballast Bonus (LSUM)</label> {editing && nIn(draft.ballastBonus, (v) => setD({ ballastBonus: v }))}</td><td className="fv-ops__r">{oCol(bb)}</td><td className="fv-ops__r" /></tr>
               <tr><td>3</td><td>Address Commission @ {editing ? nIn(draft.adcom, (v) => setD({ adcom: v }), 56) : fmt(addrPct, 3)}%</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(address)}</td></tr>
               <tr><td>4</td><td>Brokerage @ {editing ? nIn(draft.brokerage, (v) => setD({ brokerage: v }), 56) : fmt(brkgPct, 3)}%</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(brokerage)}</td></tr>
-              <tr><td>5</td><td>Bunker on Delivery — VLSFO {editing ? nIn(draft.delV, (v) => setD({ delV: v }), 64) : `${fmt(delV, 2)}mt`} @ {editing ? nIn(draft.foPrice, (v) => setD({ foPrice: v }), 60) : foP} · LSMGO {editing ? nIn(draft.delM, (v) => setD({ delM: v }), 64) : `${fmt(delM, 2)}mt`} @ {editing ? nIn(draft.doPrice, (v) => setD({ doPrice: v }), 60) : doP}{!bodCharged ? <span className="fv-ops__soa-muted"> · charged on the BOD hire</span> : ''}</td><td className="fv-ops__r">{oCol(row.bunkers)}</td><td className="fv-ops__r" /></tr>
+              <tr><td>5</td><td>Bunker on Delivery — VLSFO {editing ? nIn(draft.delV, (v) => setD({ delV: v }), 64) : `${fmt(delV, 2)}mt`} @ {editing ? nIn(draft.foPrice, (v) => setD({ foPrice: v }), 60) : foP} · LSMGO {editing ? nIn(draft.delM, (v) => setD({ delM: v }), 64) : `${fmt(delM, 2)}mt`} @ {editing ? nIn(draft.doPrice, (v) => setD({ doPrice: v }), 60) : doP}{!bodCharged ? <span className="fv-ops__soa-muted"> · charged on the BOD hire</span> : ''}</td><td className="fv-ops__r">{oCol(bodCharged ? row.bunkers : 0)}</td><td className="fv-ops__r" /></tr>
               <tr><td>6</td><td>Bunker on Redelivery — VLSFO {editing ? nIn(draft.borV.trim() !== '' ? draft.borV : fmt(borRobV, 2), (v) => setD({ borV: v }), 64) : `${fmt(borV, 2)}mt`} @ {editing ? nIn(draft.borFo.trim() !== '' ? draft.borFo : fmt(foP, 2), (v) => setD({ borFo: v }), 60) : fmt(borFo, 2)} · LSMGO {editing ? nIn(draft.borM.trim() !== '' ? draft.borM : fmt(borRobM, 2), (v) => setD({ borM: v }), 64) : `${fmt(borM, 2)}mt`} @ {editing ? nIn(draft.borDo.trim() !== '' ? draft.borDo : fmt(doP, 2), (v) => setD({ borDo: v }), 60) : fmt(borDo, 2)}{!borCredited ? <span className="fv-ops__soa-muted"> · reversed nearer redelivery</span> : (bunkRedelivery < borFullValue - 0.01 ? <span className="fv-ops__soa-muted"> · {money(bunkRedelivery)} of {money(borFullValue)} reversed to date</span> : '')}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(row.bunkerCredit)}</td></tr>
-              <tr><td>7</td><td>Cable / Victualing / Entertainment — {editing ? nIn(draft.cve, (v) => setD({ cve: v })) : money(num(draft.cve))}/mo × {fmt(onHire, 2)}d</td><td className="fv-ops__r">{oCol(cve)}</td><td className="fv-ops__r" /></tr>
-              <tr><td>8</td><td><label className="fv-ops__soa-chk"><input type="checkbox" checked={draft.ilohcOn} disabled={!editing} onChange={(e) => setD({ ilohcOn: e.target.checked })} /> ILOHC</label> {editing && nIn(draft.ilohc, (v) => setD({ ilohc: v }))}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(ilohc)}</td></tr>
-              <tr><td>9</td><td>Joint On-Hire Survey (÷2) {editing ? <span className="fv-ops__soa-in">{nIn(draft.jointOn, (v) => setD({ jointOn: v }))}</span> : money(num(draft.jointOn))}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(num(draft.jointOn) / 2)}</td></tr>
-              <tr><td>10</td><td>Joint Off-Hire Survey (÷2) {editing ? <span className="fv-ops__soa-in">{nIn(draft.jointOff, (v) => setD({ jointOff: v }))}</span> : money(num(draft.jointOff))}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(num(draft.jointOff) / 2)}</td></tr>
+              <tr><td>7</td><td>Off-Hire Bunkers — {foType} {fmt(offConsTotal.v, 2)}mt @ {foP} · {doType} {fmt(offConsTotal.m, 2)}mt @ {doP}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(offBunkerCost)}</td></tr>
+              <tr><td>8</td><td>Cable / Victualing / Entertainment — {editing ? nIn(draft.cve, (v) => setD({ cve: v })) : money(num(draft.cve))}/mo × {fmt(nett, 2)}d (nett)</td><td className="fv-ops__r">{oCol(cve)}</td><td className="fv-ops__r" /></tr>
+              <tr><td>9</td><td><label className="fv-ops__soa-chk"><input type="checkbox" checked={draft.ilohcOn} disabled={!editing} onChange={(e) => setD({ ilohcOn: e.target.checked })} /> ILOHC</label> {editing && nIn(draft.ilohc, (v) => setD({ ilohc: v }))}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(ilohc)}</td></tr>
+              <tr><td>10</td><td>Joint On-Hire Survey (÷2) {editing ? nIn(draft.jointOn, (v) => setD({ jointOn: v })) : money(cumJointOn)}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(cumJointOn / 2)}</td></tr>
+              <tr><td>11</td><td>Joint Off-Hire Survey (÷2) {editing ? nIn(draft.jointOff, (v) => setD({ jointOff: v })) : money(cumJointOff)}</td><td className="fv-ops__r" /><td className="fv-ops__r">{cCol(cumJointOff / 2)}</td></tr>
+              {historicalExtras.map((ex, i) => (
+
+                <tr key={`hex-${i}`}>
+                  <td>{12 + i}</td>
+                  <td>{ex.desc || 'Other expense'} <span className="fv-ops__soa-muted">· carried forward</span></td>
+                  <td className="fv-ops__r">{ex.due === 'Owners' ? oCol(num(ex.amount)) : ''}</td>
+                  <td className="fv-ops__r">{ex.due !== 'Owners' ? cCol(num(ex.amount)) : ''}</td>
+                </tr>
+              ))}
               {extras.map((ex, i) => (
                 <tr key={`ex-${i}`}>
-                  <td>{11 + i}</td>
+                  <td>{12 + historicalExtras.length + i}</td>
                   <td>
                     {editing ? (
                       <span className="fv-ops__soa-extra">
@@ -5399,7 +7739,7 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
               ))}
               {claimRowsOwners.map((c, i) => (
                 <tr key={`clm-own-${c.id}`}>
-                  <td>{11 + extras.length + i}</td>
+                  <td>{12 + historicalExtras.length + extras.length + i}</td>
                   <td>
                     Claim ({claimChargeTo(c)}): {c.reference || c.type || 'Claim'}
                     {editing && (
@@ -5441,12 +7781,34 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
           {/* Statement of off-hire */}
           <div className="fv-ops__soa-section">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-hourglass-half" aria-hidden="true" /> Statement of Off-Hire {editing && <button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addOff}><i className="fas fa-plus" aria-hidden="true" /> Event</button>}</div>
-            <table className="fv-ops__soa-tbl">
+            <table className="fv-ops__soa-tbl fv-ops__soa-tbl--offhire">
               <thead>
                 <tr><th>Category</th><th>From</th><th>To</th><th className="fv-ops__r">%</th><th className="fv-ops__r">Days</th><th>Remarks</th>{editing && <th aria-label="Remove" />}</tr>
               </thead>
               <tbody>
-                {offRows.length === 0 && <tr><td colSpan={editing ? 7 : 6} className="fv-ops__vd-empty">No off-hire recorded.{editing ? ' Use “Event” to add working / idle / sea / weather off-hire.' : ''}</td></tr>}
+                {historicalOffHire.length === 0 && offRows.length === 0 && <tr><td colSpan={editing ? 7 : 6} className="fv-ops__vd-empty">No off-hire recorded.{editing ? ' Use “Event” to add working / idle / sea / weather off-hire.' : ''}</td></tr>}
+                {historicalOffHire.map((o, i) => {
+                  const b = offBunker(o);
+                  return (
+                  <Fragment key={`hoff-${i}`}>
+                  <tr>
+                    <td>{o.cat} <span className="fv-ops__soa-muted">· carried forward</span></td>
+                    <td>{o.from || '—'}</td>
+                    <td>{o.to || '—'}</td>
+                    <td className="fv-ops__r">{o.pct}</td>
+                    <td className="fv-ops__r fv-ops__stw-calc">{fmt(offHireDays(o), 3)}</td>
+                    <td>{o.remark || '—'}</td>
+                    {editing && <td />}
+                  </tr>
+                  <tr className="fv-ops__soa-robrow">
+                    <td className="fv-ops__soa-roblbl">Bunker ROB</td>
+                    <td className="fv-ops__soa-robcell"><span className="fv-ops__soa-robsub">Start</span> {foType} {fmt(b.startV, 2)} · {doType} {fmt(b.startM, 2)}</td>
+                    <td className="fv-ops__soa-robcell"><span className="fv-ops__soa-robsub">End</span> {foType} {fmt(b.endV, 2)} · {doType} {fmt(b.endM, 2)}</td>
+                    <td colSpan={editing ? 4 : 3} className="fv-ops__soa-muted">Consumed · {foType} {fmt(b.consV, 2)} · {doType} {fmt(b.consM, 2)}</td>
+                  </tr>
+                  </Fragment>
+                  );
+                })}
                 {offRows.map((o, i) => {
                   const b = offBunker(o);
                   return (
@@ -5471,20 +7833,18 @@ function HireSoaModal({ row, entry, allRows, claims, recap, borRobV, borRobM, is
                 })}
               </tbody>
               <tfoot>
-                <tr className="fv-ops__soa-sum"><td colSpan={editing ? 7 : 6}><div className="fv-ops__soa-offsum"><span>Total Off-Hire (A + B + C + D)</span><span className="fv-ops__soa-offsum-d">{fmt(offTotal, 3)} days</span><span className="fv-ops__soa-offsum-b">Bunkers · {foType} {fmt(offConsTotal.v, 2)} · {doType} {fmt(offConsTotal.m, 2)}</span><span className="fv-ops__soa-offsum-val">{money(offHireValue)}</span></div></td></tr>
+                <tr className="fv-ops__soa-sum"><td colSpan={editing ? 7 : 6}><div className="fv-ops__soa-offsum"><span>Total Off-Hire (A + B + C + D)</span><span className="fv-ops__soa-offsum-d">{fmt(cumOffHire, 3)} days</span><span className="fv-ops__soa-offsum-b">Bunkers · {foType} {fmt(offConsTotal.v, 2)} · {doType} {fmt(offConsTotal.m, 2)}</span></div></td></tr>
               </tfoot>
             </table>
           </div>
 
-          {/* Balance due to owners — Total Payable less off-hire and (on the final hire) payments made */}
+          {/* Balance due to owners — full cumulative amount from Delivery to this hire's own end,
+              less all previously-paid hires, leaving just this period's own new amount */}
           <div className="fv-ops__soa-section">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-scale-balanced" aria-hidden="true" /> Balance Due to Owners</div>
               <table className="fv-ops__soa-tbl fv-ops__soa-prior">
                 <tbody>
-                  <tr className="fv-ops__soa-sum"><td>Total Payable to Owners</td><td className="fv-ops__r">{money(totalPayable)}</td></tr>
-                  {offHirePart > 0.01 && (
-                    <tr><td>Less: Off-Hire ({fmt(cumOffHire, 2)} days)</td><td className="fv-ops__r">-{money(offHirePart)}</td></tr>
-                  )}
+                  <tr className="fv-ops__soa-sum"><td>Total Cumulative Amount Due</td><td className="fv-ops__r">{money(totalPayable)}</td></tr>
                   {priorRows.map((x) => (
                     <tr key={x.key}>
                       <td>Less: {x.name} <span className={`fv-ops__pill fv-ops__pill--${hireStatusPill(x.status as HireStatus)}`}>{x.status}</span></td>
@@ -5520,6 +7880,10 @@ function buildHireCashflowRows({
   firstPeriod,
   everyPeriod,
   label,
+  start,
+  dueBank,
+  banking,
+  idBase,
 }: {
   days: number;
   perDay: number;
@@ -5527,15 +7891,28 @@ function buildHireCashflowRows({
   firstPeriod: number;
   everyPeriod: number;
   label: string;
+  start: Date | null;
+  dueBank: number;
+  banking: boolean;
+  idBase: string;
 }): CashflowRow[] {
   const rows: CashflowRow[] = [];
   let covered = 0;
   let n = 1;
   while (covered < days - 0.01 && n <= 60) {
     const d = Math.min(n === 1 ? firstPeriod : everyPeriod, days - covered);
+    // Due date mirrors the hire schedule: 1st installment payable within `dueBank`
+    // days of delivery, each subsequent one in advance at the start of its period.
+    let date = '';
+    if (start) {
+      const from = addDaysDate(start, covered);
+      const duePre = n === 1 ? (banking ? addBankingDaysDate(start, dueBank) : addDaysDate(start, dueBank)) : from;
+      const due = banking ? moveOffWeekendDate(duePre) : duePre;
+      date = fmtShortDate(due);
+    }
     rows.push({
-      id: uid('cfp'),
-      date: '',
+      id: `${idBase}-${n}`,
+      date,
       label: `${ordinal(n)} ${label}`,
       amount: String(Math.round(perDay * d * (1 - dedPct / 100))),
     });
@@ -5554,9 +7931,55 @@ function seedCashflow(recap: Recap): CashflowData {
   const outIsTime = outType === 'TCOUT' || outType === 'TCTOUT';
   const outIsVoyage = outType === 'VOUT';
 
+  const start = parseDMY(recap.deliveryDateTime);
+  const redelivery = parseDMY(recap.redeliveryDateTime);
+
+  // Port-call arrival & completion dates from the itinerary (completion = arrival + port days).
+  const legs = recap.etaPlan?.legs ?? [];
+  const computed = projectEtaLegs(recap.etaPlan);
+  const norm = (s: string) => (s || '').trim().toLowerCase();
+  const portCall = (pred: (l: EtaLeg) => boolean): { arr: Date | null; complete: Date | null } => {
+    for (let i = 0; i < legs.length; i += 1) {
+      if (legs[i].kind === 'port' && pred(legs[i])) {
+        const a = computed[i]?.arr ?? null;
+        return { arr: a, complete: a ? addDaysDate(a, num(legs[i].portDays)) : null };
+      }
+    }
+    return { arr: null, complete: null };
+  };
+  const findCall = (typeRe: RegExp, portName: string) => {
+    const byType = portCall((l) => typeRe.test(l.type || ''));
+    return byType.arr ? byType : portCall((l) => norm(l.to) === norm(portName));
+  };
+  const loadCall = findCall(/load/i, recap.loadPort);
+  const dischCall = findCall(/disch/i, recap.dischargePort);
+  const bunkerCall = (() => { const b = portCall((l) => num(l.supVlsfo) + num(l.supMgo) > 0); return b.arr ? b : loadCall; })();
+
+  // Actual data (invoice due dates, PDA due dates, laytime completion) takes precedence;
+  // the itinerary-based rules below are used only as fallbacks when it isn't available yet.
+  const invoices = recap.freightLaytime?.invoices ?? [];
+  const pdaRows = recap.freightLaytime?.settlement?.pda ?? [];
+  const pdaDueFor = (portName: string) => {
+    const hit = pdaRows.find((p) => p.due && norm(p.port) === norm(portName));
+    return hit?.due || '';
+  };
+  const freightInvDue = invoices.find((i) => i.kind === 'Freight' && i.dueDate)?.dueDate || '';
+  const demInvDue = invoices.find((i) => i.kind === 'Demurrage' && i.dueDate)?.dueDate || '';
+  const dischCompletedActual = parseFlexibleDate(recap.freightLaytime?.laytimes?.find((p) => p.op === 'Discharge' && p.completed)?.completed || '');
+
+  const freightDue = freightInvDue || computeFreightDue(recap);
+  // Port DA — actual PDA due date if entered, else remitted ~2 days before the vessel's ETA.
+  const loadDaDate = pdaDueFor(recap.loadPort) || (loadCall.arr ? fmtShortDate(addDaysDate(loadCall.arr, -2)) : '');
+  const dischDaDate = pdaDueFor(recap.dischargePort) || (dischCall.arr ? fmtShortDate(addDaysDate(dischCall.arr, -2)) : '');
+  // Bunkers are settled ~30 days after the supply (stem) date.
+  const bunkerDate = bunkerCall.arr ? fmtShortDate(addDaysDate(bunkerCall.arr, 30)) : '';
+  // Demurrage — actual invoice due date, else within 15 days of (actual) completion of discharge.
+  const demComplete = dischCompletedActual || dischCall.complete;
+  const demDate = demInvDue || (demComplete ? fmtShortDate(addDaysDate(demComplete, 15)) : freightDue);
+
   const receivables: CashflowRow[] = [];
   if (outIsVoyage) {
-    receivables.push({ id: uid('cfr'), date: '', label: `Freight (${recap.charterers || 'Charterers'})`, amount: String(Math.round(pnl.freight)) });
+    receivables.push({ id: 'cf-freight', date: freightDue, label: `Freight (${recap.charterers || 'Charterers'})`, amount: String(Math.round(pnl.freight)) });
   }
   if (outIsTime) {
     const charterHd = num(recap.charterHirePerDay || recap.hirePerDay);
@@ -5571,36 +7994,99 @@ function seedCashflow(recap: Recap): CashflowData {
         firstPeriod: first,
         everyPeriod: every,
         label: 'Sub-Hire',
+        start,
+        dueBank: Math.max(0, num(recap.charterFirstHireDays) || 3),
+        banking: /banking/i.test(recap.charterFirstHireBasis || 'Banking Days'),
+        idBase: 'cf-subhire',
       }),
     );
   }
-  if (outIsVoyage && pnl.demDespatch > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Demurrage', amount: String(Math.round(pnl.demDespatch)) });
-  if (pnl.miscIncome > 0) receivables.push({ id: uid('cfr'), date: '', label: 'Misc Income', amount: String(Math.round(pnl.miscIncome)) });
+  if (outIsVoyage && pnl.demDespatch > 0) receivables.push({ id: 'cf-demurrage', date: demDate, label: 'Demurrage', amount: String(Math.round(pnl.demDespatch)) });
+  if (pnl.miscIncome > 0) receivables.push({ id: 'cf-misc', date: '', label: 'Misc Income', amount: String(Math.round(pnl.miscIncome)) });
 
   const payables: CashflowRow[] = [];
+  let lastHireDate = '';
   if (inIsTime) {
     const hd = num(recap.hirePerDay);
     const dedPct = num(recap.adcom) + num(recap.brokerage);
     const first = Math.max(1, num(recap.firstHirePeriodDays) || 15);
     const every = Math.max(1, num(recap.hireEveryDays) || 15);
-    payables.push(
-      ...buildHireCashflowRows({
-        days: pnl.days,
-        perDay: hd,
-        dedPct,
-        firstPeriod: first,
-        everyPeriod: every,
-        label: 'Hire',
-      }),
-    );
+    const hireRows = buildHireCashflowRows({
+      days: pnl.days,
+      perDay: hd,
+      dedPct,
+      firstPeriod: first,
+      everyPeriod: every,
+      label: 'Hire',
+      start,
+      dueBank: Math.max(0, num(recap.firstHireDays) || 3),
+      banking: /banking/i.test(recap.firstHireBasis || 'Banking Days'),
+      idBase: 'cf-hire',
+    });
+    payables.push(...hireRows);
+    lastHireDate = hireRows.length ? hireRows[hireRows.length - 1].date : '';
   }
-  if (pnl.portLoad > 0) payables.push({ id: uid('cfp'), date: '', label: 'Load Port DA', amount: String(Math.round(pnl.portLoad)) });
-  if (pnl.portDisch > 0) payables.push({ id: uid('cfp'), date: '', label: 'Disch Port DA', amount: String(Math.round(pnl.portDisch)) });
-  if (pnl.bunkerCost > 0) payables.push({ id: uid('cfp'), date: '', label: 'Bunker Payment', amount: String(Math.round(pnl.bunkerCost)) });
-  if (pnl.cveTotal > 0) payables.push({ id: uid('cfp'), date: '', label: 'C.V.E.', amount: String(Math.round(pnl.cveTotal)) });
-  if (pnl.ilohc > 0) payables.push({ id: uid('cfp'), date: '', label: 'ILOHC', amount: String(Math.round(pnl.ilohc)) });
-  if (pnl.otherCost > 0) payables.push({ id: uid('cfp'), date: '', label: 'Other Cost', amount: String(Math.round(pnl.otherCost)) });
+  // CVE & ILOHC settle together with the final hire payment (else on redelivery).
+  const cveIlohcDate = lastHireDate || (redelivery ? fmtShortDate(redelivery) : (start ? fmtShortDate(start) : ''));
+  if (pnl.portLoad > 0) payables.push({ id: 'cf-load-da', date: loadDaDate, label: 'Load Port DA', amount: String(Math.round(pnl.portLoad)) });
+  if (pnl.portDisch > 0) payables.push({ id: 'cf-disch-da', date: dischDaDate, label: 'Disch Port DA', amount: String(Math.round(pnl.portDisch)) });
+  if (pnl.bunkerCost > 0) payables.push({ id: 'cf-bunker', date: bunkerDate, label: 'Bunker Payment', amount: String(Math.round(pnl.bunkerCost)) });
+  if (pnl.cveTotal > 0) payables.push({ id: 'cf-cve', date: cveIlohcDate, label: 'C.V.E.', amount: String(Math.round(pnl.cveTotal)) });
+  if (pnl.ilohc > 0) payables.push({ id: 'cf-ilohc', date: cveIlohcDate, label: 'ILOHC', amount: String(Math.round(pnl.ilohc)) });
+  if (pnl.otherCost > 0) payables.push({ id: 'cf-other', date: '', label: 'Other Cost', amount: String(Math.round(pnl.otherCost)) });
+
+  // Settlement invoices the user has added: agent invoices, broker/vendor service
+  // invoices, and claims — each an expected payment (outstanding balance + due date).
+  payables.push(...settlementCashflowRows(recap));
   return { receivables, payables };
+}
+
+/**
+ * A cash-flow row is "derived" (auto-seeded from the voyage) when its id is prefixed
+ * `cf-`, or — for legacy rows seeded before stable ids — when its label matches a known
+ * derived line. Genuinely manual rows (custom labels) are preserved by the reconciler.
+ */
+const DERIVED_CF_LABEL_RE = /^(Freight\b|Demurrage$|Misc Income$|Load Port DA$|Disch Port DA$|Bunker Payment$|C\.V\.E\.$|ILOHC$|Other Cost$|\d+(?:st|nd|rd|th)\s+(?:Sub-)?Hire$|Agent Invoice\b|Claim:\s)/i;
+const isDerivedCashflowRow = (row: CashflowRow) => row.id.startsWith('cf-') || DERIVED_CF_LABEL_RE.test(row.label || '');
+
+/**
+ * Live payable rows derived from the Freight & Laytime settlement — agent invoices,
+ * broker/vendor service invoices, and claims. Stable ids (`cf-agi/srv/clm-<id>`) let
+ * the cash-flow card keep them in sync as items are added, edited, or removed.
+ */
+function settlementCashflowRows(recap: Recap): CashflowRow[] {
+  const settlement = recap.freightLaytime?.settlement;
+  if (!settlement) return [];
+  const rows: CashflowRow[] = [];
+  // Agent / service invoices without an actual due date default to 15 days after the
+  // vessel departs the relevant port (the last port when the item has no port).
+  const fallbackDue = (portName?: string) => {
+    const dep = portDepartureDate(recap, portName || '') || lastDepartureDate(recap);
+    return dep ? fmtShortDate(addDaysDate(dep, 15)) : '';
+  };
+  (settlement.agentInvoices ?? []).forEach((inv) => {
+    const outstanding = (inv.approved || inv.amount) - inv.paid;
+    if (outstanding <= 0) return;
+    if (/closed|settled/i.test(inv.status || '') || /paid/i.test(inv.accounts || '')) return;
+    const who = inv.vendor || inv.port || '';
+    rows.push({ id: `cf-agi-${inv.id}`, date: inv.due || fallbackDue(inv.port), label: `Agent Invoice ${inv.invoiceNo || ''}${who ? ` — ${who}` : ''}`.trim(), amount: String(Math.round(outstanding)) });
+  });
+  (settlement.services ?? []).forEach((s) => {
+    const amt = (s.cost || 0) + (s.tax || 0);
+    if (amt <= 0) return;
+    if (/closed|settled|paid/i.test(s.status || '')) return;
+    const name = s.service || s.vendor || 'Service';
+    rows.push({ id: `cf-srv-${s.id}`, date: fallbackDue(), label: `${name}${s.invoice ? ` (${s.invoice})` : ''}`.trim(), amount: String(Math.round(amt)) });
+  });
+  (settlement.claims ?? []).forEach((c) => {
+    const outstanding = claimOutstanding(c);
+    if (outstanding <= 0) return;
+    if (/settled|closed|rejected/i.test(c.status || '')) return;
+    const ref = c.reference || c.type || 'Claim';
+    const to = claimChargeTo(c);
+    rows.push({ id: `cf-clm-${c.id}`, date: c.due || '', label: `Claim: ${ref}${to ? ` (${to})` : ''}`, amount: String(Math.round(outstanding)) });
+  });
+  return rows;
 }
 
 /** Estimated voyage cash-flow card — inward (receivables) vs outward (payables), with Excel / PDF export. */
@@ -5608,20 +8094,31 @@ function VoyageCashflowCard({ recap, setRecap }: { recap: Recap; setRecap: Dispa
   const stored = recap.cashflow;
   const valid = !!stored && Array.isArray(stored.receivables) && Array.isArray(stored.payables);
   const cf = valid ? (stored as CashflowData) : seedCashflow(recap);
-  const lastVoyageTypeRef = useRef(recap.voyageFixType || '');
 
   useEffect(() => {
     if (!valid) setRecap((r) => ({ ...r, cashflow: seedCashflow(r) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [valid]);
 
+  // Keep all derived cash-flow rows (hire, freight, port DA, bunkers, CVE/ILOHC, demurrage,
+  // and settlement invoices/claims) live: re-seed on any voyage change and reconcile, while
+  // preserving rows the user added manually (their ids are not prefixed `cf-`).
   useEffect(() => {
-    const nowType = recap.voyageFixType || '';
-    if (nowType === lastVoyageTypeRef.current) return;
-    lastVoyageTypeRef.current = nowType;
-    // Voyage type changes can switch between Hire/Freight/Service cashflow logic.
-    setRecap((r) => ({ ...r, cashflow: seedCashflow(r) }));
-  }, [recap.voyageFixType, setRecap]);
+    if (!valid) return;
+    setRecap((r) => {
+      const cur = r.cashflow;
+      if (!cur || !Array.isArray(cur.receivables) || !Array.isArray(cur.payables)) return r;
+      const seeded = seedCashflow(r);
+      const manualR = cur.receivables.filter((x) => !isDerivedCashflowRow(x));
+      const manualP = cur.payables.filter((x) => !isDerivedCashflowRow(x));
+      const nextR = [...seeded.receivables, ...manualR];
+      const nextP = [...seeded.payables, ...manualP];
+      const same = (a: CashflowRow[], b: CashflowRow[]) =>
+        a.length === b.length && a.every((x, i) => b[i] && b[i].id === x.id && b[i].date === x.date && b[i].label === x.label && b[i].amount === x.amount);
+      if (same(nextR, cur.receivables) && same(nextP, cur.payables)) return r;
+      return { ...r, cashflow: { receivables: nextR, payables: nextP } };
+    });
+  }, [recap, valid, setRecap]);
 
   const setCF = (patch: Partial<CashflowData>) => setRecap((r) => ({ ...r, cashflow: { ...(r.cashflow ?? seedCashflow(r)), ...patch } }));
   const setRow = (side: 'receivables' | 'payables', id: string, patch: Partial<CashflowRow>) =>
@@ -5837,7 +8334,7 @@ function calcLaytime(port: LaytimePort): LaytimeResult {
   const onDemurrage = balance < 0;
   const demurrageDays = onDemurrage ? -balance : 0;
   const despatchDays = onDemurrage ? 0 : balance;
-  const demurrageStart = onDemurrage ? laytimeReachDate(port, allowed) : null;
+  const demurrageStart = parseDMY(port.demurrageStarts ?? '') ?? (onDemurrage ? laytimeReachDate(port, allowed) : null);
   return {
     allowed, used, gross, deductions, balance, onDemurrage, demurrageDays, despatchDays,
     demurrageAmt: demurrageDays * num(port.demurrageRate),
@@ -5868,8 +8365,61 @@ function calcLaytimeCombined(ports: LaytimePort[], rateFrom: LaytimePort): Omit<
     allowed, used, gross, deductions, balance, onDemurrage, demurrageDays, despatchDays,
     demurrageAmt: demurrageDays * num(rateFrom.demurrageRate),
     despatchAmt: despatchDays * num(rateFrom.despatchRate),
-    demurrageStart,
+    demurrageStart: parseDMY(rateFrom.demurrageStarts ?? '') ?? demurrageStart,
   };
+}
+
+/**
+ * Freight invoice due date from the freight payment clause: reference is the BL
+ * issue date (else the load port's completed date), plus `freightPaymentDays`,
+ * counted as banking days when the basis is Banking, otherwise calendar days.
+ */
+function computeFreightDue(r: Recap): string {
+  const loadComplete = r.freightLaytime?.laytimes?.find((p) => p.op === 'Load' && p.completed)?.completed;
+  const ref = parseFlexibleDate(r.blIssueDate) || parseFlexibleDate(loadComplete || '') || loadingCompleteFromItinerary(r);
+  if (!ref) return '';
+  const days = Math.max(1, num(r.freightPaymentDays) || 1);
+  const due = /banking/i.test(r.freightPaymentBasis || '') ? addBankingDaysDate(ref, days) : new Date(ref.getTime() + days * 86_400_000);
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  return `${p2(due.getDate())}-${p2(due.getMonth() + 1)}-${due.getFullYear()}`;
+}
+
+/** Loading-complete date derived from the itinerary: departure from the load port (arrival + port days). */
+function loadingCompleteFromItinerary(r: Recap): Date | null {
+  const legs = r.etaPlan?.legs ?? [];
+  const computed = projectEtaLegs(r.etaPlan);
+  const norm = (s: string) => (s || '').trim().toLowerCase();
+  const idx = legs.findIndex((l) => l.kind === 'port' && (/load/i.test(l.type || '') || norm(l.to) === norm(r.loadPort)));
+  if (idx < 0) return null;
+  const c = computed[idx];
+  if (!c?.arr) return null;
+  return new Date(c.arr.getTime() + num(legs[idx].portDays) * 86_400_000);
+}
+
+/** Vessel departure (arrival + port days) from the itinerary port whose name matches `portName`. */
+function portDepartureDate(r: Recap, portName: string): Date | null {
+  if (!portName) return null;
+  const legs = r.etaPlan?.legs ?? [];
+  const computed = projectEtaLegs(r.etaPlan);
+  const norm = (s: string) => (s || '').trim().toLowerCase();
+  for (let i = 0; i < legs.length; i += 1) {
+    if (legs[i].kind === 'port' && norm(legs[i].to) === norm(portName)) {
+      const a = computed[i]?.arr;
+      return a ? addDaysDate(a, num(legs[i].portDays)) : null;
+    }
+  }
+  return null;
+}
+
+/** Vessel departure from the final itinerary port (fallback when a settlement item has no port). */
+function lastDepartureDate(r: Recap): Date | null {
+  const legs = r.etaPlan?.legs ?? [];
+  const computed = projectEtaLegs(r.etaPlan);
+  for (let i = legs.length - 1; i >= 0; i -= 1) {
+    const a = computed[i]?.arr;
+    if (a) return legs[i].kind === 'port' ? addDaysDate(a, num(legs[i].portDays)) : a;
+  }
+  return null;
 }
 
 /** Build a default freight-invoice + laytime dataset from the recap voyage figures. */
@@ -5909,15 +8459,13 @@ function seedFreightLaytime(recap: Recap): FreightLaytimeData {
       invoiceNo: '1',
       invoiceDate: '',
       invoiceTo: recap.charterers,
-      paymentTerms: recap.frtPaymentTerms,
-      dueDate: '',
+      paymentTerms: freightPaymentClause(recap),
+      dueDate: computeFreightDue(recap),
       status: 'Draft',
       freightType: 'Initial',
       freightDifferential: '0',
       pctFreightDue: '100',
       initialFreightReceived: '0',
-      loadPortDA: String(num(recap.portDaLoad)),
-      dischPortDA: String(num(recap.portDaDisch)),
       includeDemurrage: false,
       claimIds: [],
     }],
@@ -5925,48 +8473,53 @@ function seedFreightLaytime(recap: Recap): FreightLaytimeData {
   };
 }
 
-function seedFreightSettlement(voyage: Voyage): FreightSettlementData {
-  const load = voyage.portFrom || 'Richards Bay';
-  const disch = voyage.portTo || 'Qingdao';
+function seedFreightSettlement(voyage: Voyage, recap?: Recap): FreightSettlementData {
+  // PDA rows are derived from the actual voyage port rotation with zero amounts,
+  // so any figure entered here is a real actual (not demo) and can safely drive
+  // the Voyage Details PDA fields and the Live P&L port cost.
+  const loadPorts = recap ? splitPorts(recap.loadPort) : splitPorts(voyage.portFrom || '');
+  const dischPorts = recap ? splitPorts(recap.dischargePort) : splitPorts(voyage.portTo || '');
+  const ports = [...loadPorts, ...dischPorts].filter(Boolean);
+  const mkPda = (port: string): PdaRow => ({
+    id: uid('pda'), port, agent: '', due: '', currency: 'USD',
+    estimated: 0, advance: 0, fdaFinal: 0,
+    status: 'Requested', fdaStatus: 'Requested', paymentStatus: 'Pending', approval: 'Pending', attachments: [],
+  });
   return {
-    pda: [
-      { id: uid('pda'), port: load, agent: 'Sturrock Grindrod', due: '', currency: 'USD', estimated: 128500, advance: 120000, fdaFinal: 131240, status: 'Received', fdaStatus: 'Received', paymentStatus: 'Partially Paid', approval: 'Approved', attachments: [] },
-      { id: uid('pda'), port: 'Singapore (Bunker)', agent: 'Inchcape', due: '', currency: 'USD', estimated: 18400, advance: 18400, fdaFinal: 17950, status: 'Received', fdaStatus: 'Received', paymentStatus: 'Paid', approval: 'Approved', attachments: [] },
-      { id: uid('pda'), port: disch, agent: 'Wilhelmsen', due: '', currency: 'USD', estimated: 96200, advance: 90000, fdaFinal: 0, status: 'Approved', fdaStatus: 'Requested', paymentStatus: 'Partially Paid', approval: 'Pending', attachments: [] },
-    ],
-    agentInvoices: [
-      { id: uid('agi'), invoiceNo: 'AGT-24118', vendor: 'Sturrock Grindrod', category: 'FDA - Port', port: load, due: '18 Jul 2026', currency: 'USD', amount: 131240, approved: 131240, paid: 120000, dept: 'Approved', accounts: 'Pending', status: 'Received', paymentStatus: 'Partially Paid', attachments: [] },
-      { id: uid('agi'), invoiceNo: 'AGT-24119', vendor: 'Inchcape', category: 'FDA - Bunker Port', port: 'Singapore', due: '19 Jul 2026', currency: 'USD', amount: 17950, approved: 17950, paid: 18400, dept: 'Approved', accounts: 'Paid', status: 'Settled', paymentStatus: 'Paid', attachments: [] },
-      { id: uid('agi'), invoiceNo: 'SRV-5521', vendor: 'Ocean Towage', category: 'Towage', port: disch, due: '20 Jul 2026', currency: 'USD', amount: 14800, approved: 0, paid: 0, dept: 'Pending', accounts: '-', status: 'Requested', paymentStatus: 'Pending', attachments: [] },
-    ],
-    services: [
-      { id: uid('srv'), service: 'Launch Boat', vendor: 'Harbour Craft', invoice: 'LB-771', currency: 'USD', cost: 2400, tax: 0, reason: 'Crew & stores transfer at anchorage', status: 'Approved', paymentStatus: 'Paid', attachments: [] },
-      { id: uid('srv'), service: 'Fresh Water', vendor: 'Aqua Marine', invoice: 'FW-210', currency: 'USD', cost: 1850, tax: 0, reason: '120 MT fresh water supply', status: 'Approved', paymentStatus: 'Paid', attachments: [] },
-      { id: uid('srv'), service: 'Crew Change', vendor: 'Wilhelmsen', invoice: 'CC-455', currency: 'USD', cost: 8600, tax: 430, reason: '3 officers sign off / on', status: 'Requested', paymentStatus: 'Pending', attachments: [] },
-    ],
-    claims: [
-      { id: uid('clm'), type: 'Demurrage Claim', reference: 'DEM-2606-01', chargeTo: 'Charterers', owner: 'Charterer', due: '', currency: 'USD', amount: 96600, settlement: 0, status: 'Under Review', paymentStatus: 'Pending', attachments: [] },
-      { id: uid('clm'), type: 'Cargo Claim', reference: 'CGO-2606-04', chargeTo: 'Receiver', owner: 'Receiver', due: '', currency: 'USD', amount: 22000, settlement: 0, status: 'Requested', paymentStatus: 'Pending', attachments: [] },
-      { id: uid('clm'), type: 'Offhire Claim', reference: 'OFF-2606-02', chargeTo: 'Owners', owner: 'Owner', due: '', currency: 'USD', amount: 14500, settlement: 12000, status: 'Settled', paymentStatus: 'Paid', attachments: [] },
-    ],
+    pda: ports.map(mkPda),
+    agentInvoices: [],
+    services: [],
+    claims: [],
   };
 }
 
-interface InvoiceLine { desc: string; amount: number; sign: 1 | -1 }
+interface InvoiceLine { desc: string; amount: number; sign: 1 | -1; adjustmentId?: string }
 interface InvoiceResult { lines: InvoiceLine[]; total: number }
+
+function freightPaymentClause(recap: Recap): string {
+  const days = Math.max(1, num(recap.freightPaymentDays) || 1);
+  const basis = recap.freightPaymentBasis || 'Banking Days';
+  return `Within ${days} ${basis} after loading / BL`;
+}
 
 /** Compute an invoice's line items and total from the recap + laytime results. */
 function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[], claims?: ClaimRow[]): InvoiceResult {
-  const results = laytimes.map((p) => calcLaytime(p));
-  const totalDemurrage = results.reduce((s, r) => s + r.demurrageAmt, 0);
-  const totalDespatch = results.reduce((s, r) => s + r.despatchAmt, 0);
+  const invoiceLaytimes = inv.kind === 'Demurrage' && inv.includedPortOps
+    ? laytimes.filter((port) => inv.includedPortOps?.includes(port.op))
+    : laytimes;
+  const results = invoiceLaytimes.map((p) => calcLaytime(p));
+  const demurrageRate = num(recap.demDespatch);
+  const despatchRate = /no\s*despatch|free\s*despatch/i.test(recap.despatchTerm) ? 0 : /half\s*despatch/i.test(recap.despatchTerm) ? demurrageRate / 2 : demurrageRate;
+  const totalDemurrage = results.reduce((s, r) => s + r.demurrageDays * demurrageRate, 0);
+  const totalDespatch = results.reduce((s, r) => s + r.despatchDays * despatchRate, 0);
   const adcomPct = (inv.adcomOverride?.trim() ? num(inv.adcomOverride) : num(recap.adcom)) / 100;
   const lines: InvoiceLine[] = [];
   if (inv.kind === 'Demurrage') {
-    laytimes.forEach((p) => {
+    invoiceLaytimes.forEach((p) => {
       const r = calcLaytime(p);
-      if (r.demurrageAmt > 0) lines.push({ desc: `${p.name} (${p.op}) — Demurrage ${fmt(r.demurrageDays, 3)}d × ${money(num(p.demurrageRate))}/day`, amount: r.demurrageAmt, sign: 1 });
-      if (r.despatchAmt > 0) lines.push({ desc: `${p.name} (${p.op}) — Despatch ${fmt(r.despatchDays, 3)}d × ${money(num(p.despatchRate))}/day`, amount: r.despatchAmt, sign: -1 });
+      const portName = p.op === 'Load' ? (recap.loadPort || p.name) : (recap.dischargePort || p.name);
+      if (r.demurrageDays > 0) lines.push({ desc: `${portName} (${p.op}) — Demurrage ${fmt(r.demurrageDays, 3)}d × ${money(demurrageRate)}/day`, amount: r.demurrageDays * demurrageRate, sign: 1 });
+      if (r.despatchDays > 0) lines.push({ desc: `${portName} (${p.op}) — Despatch ${fmt(r.despatchDays, 3)}d × ${money(despatchRate)}/day`, amount: r.despatchDays * despatchRate, sign: -1 });
     });
     const adcomDem = totalDemurrage * adcomPct;
     if (adcomDem > 0) lines.push({ desc: `Less: Address commission on demurrage @ ${fmt(adcomPct * 100, 3)}%`, amount: adcomDem, sign: -1 });
@@ -5974,6 +8527,14 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[],
     linked.forEach((c) => {
       const amt = claimOutstanding(c);
       if (amt > 0) lines.push({ desc: `Add: Claim (${claimChargeTo(c)}) ${c.reference || c.type || 'Claim'}`, amount: amt, sign: 1 });
+    });
+    (inv.adjustments ?? []).forEach((adjustment) => {
+      lines.push({
+        desc: `${adjustment.direction === 'Deduct' ? 'Less' : 'Add'}: ${adjustment.description || 'Other adjustment'}`,
+        amount: Math.abs(num(adjustment.amount)),
+        sign: adjustment.direction === 'Deduct' ? -1 : 1,
+        adjustmentId: adjustment.id,
+      });
     });
     const total = lines.reduce((s, l) => s + l.sign * l.amount, 0);
     return { lines, total };
@@ -5991,8 +8552,6 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[],
   if (inv.freightType === 'Final' && diffFreight !== 0) lines.push({ desc: `Freight differential: ${fmt(blQty, 0)} MT × ${money(diffRate)} PMT`, amount: diffFreight, sign: 1 });
   if (pctDue !== 1) lines.push({ desc: `% of total freight due — ${fmt(pctDue * 100, 2)}%`, amount: freightDue - (grossFreight + diffFreight), sign: 1 });
   lines.push({ desc: `Less: Address commission @ ${fmt(adcomPct * 100, 3)}%`, amount: adcomFreight, sign: -1 });
-  lines.push({ desc: 'Less: Load port D/A', amount: num(inv.loadPortDA), sign: -1 });
-  lines.push({ desc: 'Less: Discharge port D/A', amount: num(inv.dischPortDA), sign: -1 });
   if (inv.includeDemurrage) {
     if (totalDemurrage > 0) lines.push({ desc: 'Add: Total demurrage (all ports)', amount: totalDemurrage, sign: 1 });
     const adcomDem = totalDemurrage * adcomPct;
@@ -6004,6 +8563,14 @@ function calcInvoice(inv: FreightInvoice, recap: Recap, laytimes: LaytimePort[],
   linked.forEach((c) => {
     const amt = claimOutstanding(c);
     if (amt > 0) lines.push({ desc: `Add: Claim (${claimChargeTo(c)}) ${c.reference || c.type || 'Claim'}`, amount: amt, sign: 1 });
+  });
+  (inv.adjustments ?? []).forEach((adjustment) => {
+    lines.push({
+      desc: `${adjustment.direction === 'Deduct' ? 'Less' : 'Add'}: ${adjustment.description || 'Other adjustment'}`,
+      amount: Math.abs(num(adjustment.amount)),
+      sign: adjustment.direction === 'Deduct' ? -1 : 1,
+      adjustmentId: adjustment.id,
+    });
   });
   const total = lines.reduce((s, l) => s + l.sign * l.amount, 0);
   return { lines, total };
@@ -6056,16 +8623,16 @@ function companyAccountBoxHtml(label = 'Our Company Account Details'): string {
 /** HTML body for one invoice (used by the modal and bulk PDF export). */
 function invoicePdfSection(inv: FreightInvoice, recap: Recap, voyage: Voyage, laytimes: LaytimePort[], claims?: ClaimRow[]): string {
   const { lines, total } = calcInvoice(inv, recap, laytimes, claims);
-  const rows = lines.map((l) => `<tr><td>${l.desc}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
+  const rows = lines.map((l) => `<tr><td>${pdfEsc(l.desc)}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
   const payerBank = findClientBankByName(inv.invoiceTo);
   return `<section>
     <h1>${inv.kind === 'Freight' ? `${inv.freightType} Freight Invoice` : inv.title}</h1>
-    <p class="sub">${recap.vesselName} · IMO ${voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
+    <p class="sub">${recap.vesselName} · IMO ${recap.vesselImo || voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
     <div class="meta">
       <div><span>Invoice To:</span> ${inv.invoiceTo || '—'}</div>
       <div><span>Invoice No.:</span> ${inv.invoiceNo || '—'}</div>
       <div><span>Invoice Date:</span> ${inv.invoiceDate || '—'}</div>
-      <div><span>Payment Terms:</span> ${inv.paymentTerms || '—'}</div>
+      <div><span>Payment Terms:</span> ${pdfEsc(freightPaymentClause(recap))}</div>
       <div><span>Due Date:</span> ${inv.dueDate || '—'}</div>
       <div><span>Voyage:</span> ${recap.loadPort} → ${recap.dischargePort}</div>
       <div><span>Cargo:</span> ${recap.cargoName}</div>
@@ -6425,11 +8992,14 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
       id: uid('inv'), kind,
       title: kind === 'Freight' ? 'Freight Invoice' : 'Demurrage / Despatch Invoice',
       invoiceNo: String(n), invoiceDate: '', invoiceTo: recap.charterers,
-      paymentTerms: recap.frtPaymentTerms, dueDate: '', status: 'Draft',
+      paymentTerms: freightPaymentClause(recap), dueDate: computeFreightDue(recap), status: 'Draft',
       freightType: kind === 'Freight' ? 'Final' : 'Initial',
       freightDifferential: '0', pctFreightDue: '100', initialFreightReceived: '0',
-      loadPortDA: String(num(recap.portDaLoad)), dischPortDA: String(num(recap.portDaDisch)),
       includeDemurrage: kind === 'Demurrage',
+      includedPortOps: kind === 'Demurrage' ? [
+        ...(recap.loadPort ? ['Load' as const] : []),
+        ...(recap.dischargePort ? ['Discharge' as const] : []),
+      ] : undefined,
       claimIds: [],
     };
     setFL({ invoices: [...fl.invoices, inv] });
@@ -6528,7 +9098,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
   const openInvoice = fl.invoices.find((x) => x.id === invoiceId) ?? null;
   const openLaytime = fl.laytimes.find((x) => x.id === laytimeId) ?? null;
 
-  const seededSettlement = useMemo(() => seedFreightSettlement(voyage), [voyage.id, voyage.portFrom, voyage.portTo]);
+  const seededSettlement = useMemo(() => seedFreightSettlement(voyage, recap), [voyage.id, voyage.portFrom, voyage.portTo, recap.loadPort, recap.dischargePort]);
   const settlement = fl.settlement ?? seededSettlement;
   useEffect(() => {
     if (!fl.settlement) setFL({ settlement: seededSettlement });
@@ -6540,6 +9110,8 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
   const [selPda, setSelPda] = useState<Set<string>>(new Set());
   const [selAgentInv, setSelAgentInv] = useState<Set<string>>(new Set());
   const [selServices, setSelServices] = useState<Set<string>>(new Set());
+  const [agentServiceCreateType, setAgentServiceCreateType] = useState<'invoice' | 'service' | null>(null);
+  useEffect(() => { setAgentServiceCreateType(null); }, [voyage.id]);
   const [pdaId, setPdaId] = useState<string | null>(null);
   const [agentInvId, setAgentInvId] = useState<string | null>(null);
   const [serviceId, setServiceId] = useState<string | null>(null);
@@ -6599,10 +9171,8 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
 
   const hasAgentServiceSelection = selAgentInv.size > 0 || selServices.size > 0;
   const addAgentService = () => {
-    const picked = window.prompt('Create new row in: Agent Invoices or Services?', 'Agent Invoices');
-    if (!picked) return;
-    if (/service/i.test(picked)) addService();
-    else addAgentInv();
+    if (agentServiceCreateType === 'service') addService();
+    else if (agentServiceCreateType === 'invoice') addAgentInv();
   };
   const editAgentService = () => {
     if (selAgentInv.size > 0) { setAgentInvId(openFirstSelected(selAgentInv)); return; }
@@ -6948,7 +9518,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
         wide
         right={(
           <span className="fv-ops__frl-secbtns">
-            <button type="button" className="fv-ops__btn" onClick={addAgentService}><i className="fas fa-plus" aria-hidden="true" /> New</button>
+            <button type="button" className="fv-ops__btn" onClick={addAgentService} disabled={!agentServiceCreateType}><i className="fas fa-plus" aria-hidden="true" /> New</button>
             <button type="button" className="fv-ops__btn" onClick={editAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>
             <button type="button" className="fv-ops__btn" onClick={copyAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-copy" aria-hidden="true" /> Copy</button>
             <button type="button" className="fv-ops__btn" onClick={deleteAgentService} disabled={!hasAgentServiceSelection}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
@@ -6962,7 +9532,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
           <div className="fv-ops__frl-box-title">Agent Invoices</div>
           <table className="fv-ops__table">
           <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all agent invoices" checked={settlement.agentInvoices.length > 0 && settlement.agentInvoices.every((x) => selAgentInv.has(x.id))} ref={(el) => { if (el) el.indeterminate = selAgentInv.size > 0 && !settlement.agentInvoices.every((x) => selAgentInv.has(x.id)); }} onChange={(e) => setSelAgentInv(e.target.checked ? new Set(settlement.agentInvoices.map((x) => x.id)) : new Set())} /></th><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Approved</th><th className="fv-ops__r">Paid</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Dept</th><th>Accounts</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all agent invoices" checked={agentServiceCreateType === 'invoice' || (settlement.agentInvoices.length > 0 && settlement.agentInvoices.every((x) => selAgentInv.has(x.id)))} ref={(el) => { if (el) el.indeterminate = agentServiceCreateType !== 'invoice' && selAgentInv.size > 0 && !settlement.agentInvoices.every((x) => selAgentInv.has(x.id)); }} onChange={(e) => { setAgentServiceCreateType(e.target.checked ? 'invoice' : null); setSelAgentInv(e.target.checked ? new Set(settlement.agentInvoices.map((x) => x.id)) : new Set()); if (e.target.checked) setSelServices(new Set()); }} /></th><th>Invoice</th><th>Vendor</th><th>Category</th><th>Port</th><th>Due</th><th className="fv-ops__r">Amount</th><th className="fv-ops__r">Approved</th><th className="fv-ops__r">Paid</th><th className="fv-ops__r">Outstanding</th><th>Attachment</th><th>Dept</th><th>Accounts</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
           </thead>
           <tbody>
             {settlement.agentInvoices.map((i) => {
@@ -6995,7 +9565,7 @@ export function FreightTab({ recap, setRecap, voyage, section = 'all', module = 
           <div className="fv-ops__frl-box-title">Services</div>
           <table className="fv-ops__table">
           <thead>
-            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all services" checked={settlement.services.length > 0 && settlement.services.every((x) => selServices.has(x.id))} ref={(el) => { if (el) el.indeterminate = selServices.size > 0 && !settlement.services.every((x) => selServices.has(x.id)); }} onChange={(e) => setSelServices(e.target.checked ? new Set(settlement.services.map((x) => x.id)) : new Set())} /></th><th>Service</th><th>Vendor</th><th>Invoice</th><th>Reason</th><th className="fv-ops__r">Cost</th><th className="fv-ops__r">Tax</th><th className="fv-ops__r">Total</th><th>Attachment</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
+            <tr><th className="fv-ops__hire-selcol"><input type="checkbox" aria-label="Select all services" checked={agentServiceCreateType === 'service' || (settlement.services.length > 0 && settlement.services.every((x) => selServices.has(x.id)))} ref={(el) => { if (el) el.indeterminate = agentServiceCreateType !== 'service' && selServices.size > 0 && !settlement.services.every((x) => selServices.has(x.id)); }} onChange={(e) => { setAgentServiceCreateType(e.target.checked ? 'service' : null); setSelServices(e.target.checked ? new Set(settlement.services.map((x) => x.id)) : new Set()); if (e.target.checked) setSelAgentInv(new Set()); }} /></th><th>Service</th><th>Vendor</th><th>Invoice</th><th>Reason</th><th className="fv-ops__r">Cost</th><th className="fv-ops__r">Tax</th><th className="fv-ops__r">Total</th><th>Attachment</th><th>Status</th><th>Payment Status</th><th>Action</th></tr>
           </thead>
           <tbody>
             {settlement.services.map((s) => (
@@ -7172,12 +9742,20 @@ function StatusPickerModal({
   );
 }
 
-function AttachmentEditor({ attachments, onChange }: { attachments: SettlementAttachment[]; onChange: (next: SettlementAttachment[]) => void }) {
+function AttachmentEditor({ attachments, onChange, kind, onExtract, onBusyChange, disabled }: {
+  attachments: SettlementAttachment[]; onChange: (next: SettlementAttachment[]) => void;
+  kind?: InvoiceDocumentKind; onExtract?: (fields: InvoiceDocumentFields) => void;
+  onBusyChange?: (busy: boolean) => void; disabled?: boolean;
+}) {
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const addFiles = (files: FileList | null) => {
-    if (!files || files.length === 0) return;
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [documentKind, setDocumentKind] = useState(kind);
+  const addFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0 || busy || disabled) return;
+    const uploaded = Array.from(files);
     const now = new Date().toISOString();
-    const added = Array.from(files).map((f) => ({
+    const added = uploaded.map((f) => ({
       id: uid('att'),
       name: f.name,
       sizeKb: Math.max(1, Math.round(f.size / 1024)),
@@ -7185,17 +9763,40 @@ function AttachmentEditor({ attachments, onChange }: { attachments: SettlementAt
     }));
     onChange([...attachments, ...added]);
     if (fileRef.current) fileRef.current.value = '';
+    if (!onExtract || !documentKind) return;
+    setBusy(true);
+    onBusyChange?.(true);
+    const results: string[] = [];
+    try {
+      for (const file of uploaded) {
+        try {
+          setMessage(`Reading ${file.name}`);
+          const fields = await extractInvoiceDocument(file, documentKind, (progress) => setMessage(`${file.name}: ${progress}`));
+          const count = Object.keys(fields).length;
+          if (count) onExtract(fields);
+          results.push(`${file.name}: ${count ? `${count} fields filled. Review before saving.` : 'No matching fields found; existing values unchanged.'}`);
+        } catch (error) {
+          results.push(`${file.name}: ${error instanceof Error ? error.message : 'Extraction failed; existing values unchanged.'}`);
+        }
+      }
+      setMessage(results.join(' '));
+    } finally {
+      setBusy(false);
+      onBusyChange?.(false);
+    }
   };
   const remove = (id: string) => onChange(attachments.filter((a) => a.id !== id));
 
   return (
     <div className="fv-ops__col">
       <div className="fv-ops__card-controls">
-        <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={() => fileRef.current?.click()}>
-          <i className="fas fa-paperclip" aria-hidden="true" /> Attach File
+        {(kind === 'PDA' || kind === 'FDA') && <select className="fv-ops__eta-sel" aria-label="Uploaded document type" value={documentKind} disabled={busy || disabled} onChange={(event) => setDocumentKind(event.target.value as InvoiceDocumentKind)}><option value="PDA">PDA</option><option value="FDA">FDA</option></select>}
+        <button type="button" className="fv-ops__btn fv-ops__btn--sm" disabled={busy || disabled} onClick={() => fileRef.current?.click()}>
+          <i className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-paperclip'}`} aria-hidden="true" /> {busy ? 'Reading...' : 'Attach File'}
         </button>
-        <input ref={fileRef} type="file" multiple hidden onChange={(e) => addFiles(e.target.files)} />
+        <input ref={fileRef} type="file" multiple hidden disabled={busy || disabled} onChange={(event) => { void addFiles(event.target.files); }} />
       </div>
+      {message && <div className="fv-ops__hint" role="status" aria-live="polite">{message}</div>}
       <table className="fv-ops__table">
         <thead>
           <tr><th>File</th><th className="fv-ops__r">Size (KB)</th><th aria-label="Remove" /></tr>
@@ -7206,7 +9807,7 @@ function AttachmentEditor({ attachments, onChange }: { attachments: SettlementAt
             <tr key={a.id}>
               <td>{a.name}</td>
               <td className="fv-ops__r">{a.sizeKb}</td>
-              <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" aria-label={`Remove ${a.name}`} onClick={() => remove(a.id)}><i className="fas fa-trash" aria-hidden="true" /></button></td>
+              <td className="fv-ops__r"><button type="button" className="fv-ops__bnk-rm" disabled={busy || disabled} aria-label={`Remove ${a.name}`} onClick={() => remove(a.id)}><i className="fas fa-trash" aria-hidden="true" /></button></td>
             </tr>
           ))}
         </tbody>
@@ -7222,6 +9823,7 @@ function PdaModal({ row, onSave, onDelete, onClose }: {
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<PdaRow>(row);
+  const [extracting, setExtracting] = useState(false);
   const setD = (patch: Partial<PdaRow>) => setDraft((d) => ({ ...d, ...patch }));
   const outstanding = draft.estimated - draft.advance;
   const variance = draft.fdaFinal - draft.estimated;
@@ -7235,7 +9837,7 @@ function PdaModal({ row, onSave, onDelete, onClose }: {
             <span className="fv-ops__soa-sub">{draft.port || 'Port'} · {draft.agent || 'Agent'} · {draft.currency}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
-            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" disabled={extracting} onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
             <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
             <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
           </div>
@@ -7256,7 +9858,7 @@ function PdaModal({ row, onSave, onDelete, onClose }: {
           </div>
           <div className="fv-ops__vd-sub">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
-            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} kind="PDA" onExtract={setD} onBusyChange={setExtracting} />
           </div>
           <div className="fv-ops__frl-voy">
             <span><b>Outstanding:</b> {money(outstanding)}</span>
@@ -7276,6 +9878,7 @@ function AgentInvoiceModal({ row, onSave, onDelete, onClose }: {
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<AgentInvoiceRow>(row);
+  const [extracting, setExtracting] = useState(false);
   const setD = (patch: Partial<AgentInvoiceRow>) => setDraft((d) => ({ ...d, ...patch }));
   const outstanding = (draft.approved || draft.amount) - draft.paid;
   return (
@@ -7287,7 +9890,7 @@ function AgentInvoiceModal({ row, onSave, onDelete, onClose }: {
             <span className="fv-ops__soa-sub">{draft.invoiceNo || 'Invoice'} · {draft.vendor || 'Vendor'} · {draft.currency}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
-            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" disabled={extracting} onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
             <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
             <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
           </div>
@@ -7310,7 +9913,7 @@ function AgentInvoiceModal({ row, onSave, onDelete, onClose }: {
           </div>
           <div className="fv-ops__vd-sub">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
-            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} kind="Agent" onExtract={setD} onBusyChange={setExtracting} />
           </div>
           <div className="fv-ops__frl-voy">
             <span><b>Outstanding:</b> {money(outstanding)}</span>
@@ -7328,6 +9931,7 @@ function ServiceModal({ row, onSave, onDelete, onClose }: {
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<ServiceRow>(row);
+  const [extracting, setExtracting] = useState(false);
   const setD = (patch: Partial<ServiceRow>) => setDraft((d) => ({ ...d, ...patch }));
   const total = draft.cost + draft.tax;
   return (
@@ -7339,7 +9943,7 @@ function ServiceModal({ row, onSave, onDelete, onClose }: {
             <span className="fv-ops__soa-sub">{draft.service || 'Service'} · {draft.vendor || 'Vendor'} · {draft.currency}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
-            <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
+            <button type="button" className="fv-ops__btn fv-ops__btn--go" disabled={extracting} onClick={() => { onSave(draft); onClose(); }}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>
             <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
             <button type="button" className="fv-ops__icon-btn" onClick={onClose} aria-label="Close"><i className="fas fa-xmark" aria-hidden="true" /></button>
           </div>
@@ -7358,7 +9962,7 @@ function ServiceModal({ row, onSave, onDelete, onClose }: {
           </div>
           <div className="fv-ops__vd-sub">
             <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
-            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} />
+            <AttachmentEditor attachments={draft.attachments ?? []} onChange={(attachments) => setD({ attachments })} kind="Service" onExtract={setD} onBusyChange={setExtracting} />
           </div>
           <div className="fv-ops__frl-voy">
             <span><b>Total:</b> {money(total)}</span>
@@ -7375,7 +9979,7 @@ function ClaimModal({ row, onSave, onDelete, onClose }: {
   onDelete: () => void;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<ClaimRow>(row);
+  const [draft, setDraft] = useState<ClaimRow>({ ...row, status: claimStatusValue(row.status) });
   const setD = (patch: Partial<ClaimRow>) => setDraft((d) => ({ ...d, ...patch }));
   const balance = draft.amount - draft.settlement;
   const chargeToValue = draft.chargeTo || draft.owner || '';
@@ -7402,7 +10006,7 @@ function ClaimModal({ row, onSave, onDelete, onClose }: {
             <VdField label="Currency" value={draft.currency} onChange={(v) => setD({ currency: v })} />
             <VdField label="Amount" value={String(draft.amount)} onChange={(v) => setD({ amount: num(v) })} num />
             <VdField label="Settlement" value={String(draft.settlement)} onChange={(v) => setD({ settlement: num(v) })} num />
-            <VdSelect label="Status" value={settlementStatusValue(draft.status)} onChange={(v) => setD({ status: v })} options={STATUS_OPTIONS_CLAIMS} />
+            <VdSelect label="Status" value={claimStatusValue(draft.status)} onChange={(v) => setD({ status: v })} options={STATUS_OPTIONS_CLAIMS} />
             <VdSelect label="Payment Status" value={settlementPaymentValue(draft.paymentStatus)} onChange={(v) => setD({ paymentStatus: v })} options={PAYMENT_STATUS_OPTIONS} />
           </div>
           <div className="fv-ops__vd-sub">
@@ -7424,8 +10028,13 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
   onSave: (patch: Partial<FreightInvoice>) => void; onDelete: () => void; onClose: () => void;
 }) {
   const [editing, setEditing] = useState(true);
-  const [draft, setDraft] = useState<FreightInvoice>(inv);
+  const [draft, setDraft] = useState<FreightInvoice>(() => ({ ...inv, invoiceTo: inv.invoiceTo || recap.charterers, paymentTerms: freightPaymentClause(recap), dueDate: inv.dueDate || computeFreightDue(recap) }));
+  const [extracting, setExtracting] = useState(false);
   const accountTxns = useAccountTxns();
+  const clients = useClients();
+  const accountNames = useMemo(() => Array.from(new Set(clients
+    .filter((client) => (client.kind ?? 'Account') === 'Account' && client.category === 'Charterer' && client.name.trim())
+    .map((client) => client.name.trim()))).sort((a, b) => a.localeCompare(b)), [clients]);
   const setD = (patch: Partial<FreightInvoice>) => setDraft((d) => ({ ...d, ...patch }));
   const view = editing ? draft : inv;
   const accountPaymentStatus = (() => {
@@ -7440,18 +10049,40 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
   const effBlQty = view.blQtyOverride?.trim() ? num(view.blQtyOverride) : num(recap.finalQtyLoaded);
   const effFreight = view.freightRateOverride?.trim() ? num(view.freightRateOverride) : num(recap.freightPerMt);
   const effAdcom = view.adcomOverride?.trim() ? num(view.adcomOverride) : num(recap.adcom);
+  const demurrageRate = num(recap.demDespatch);
+  const despatchRate = /no\s*despatch|free\s*despatch/i.test(recap.despatchTerm) ? 0 : /half\s*despatch/i.test(recap.despatchTerm) ? demurrageRate / 2 : demurrageRate;
   const today = new Date();
   const p2 = (n: number) => String(n).padStart(2, '0');
 
   const save = () => {
-    onSave(draft);
+    onSave({ ...draft, paymentTerms: freightPaymentClause(recap) });
     setEditing(false);
   };
-  const discard = () => { setDraft(inv); setEditing(false); };
+  const discard = () => { setDraft({ ...inv, invoiceTo: inv.invoiceTo || recap.charterers, paymentTerms: freightPaymentClause(recap), dueDate: inv.dueDate || computeFreightDue(recap) }); setEditing(false); };
 
   const inp = (val: string, on: (v: string) => void, w?: number, ph?: string) => (
     <input className="fv-ops__vd-in" style={w ? { width: w } : undefined} value={val} placeholder={ph} disabled={!editing} onChange={(e) => on(e.target.value)} />
   );
+  const inpDate = (val: string, on: (v: string) => void, w?: number) => {
+    const toInput = (v: string) => { const m = (v || '').match(/(\d{1,2})-(\d{1,2})-(\d{4})/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
+    const fromInput = (iso: string) => { const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? `${m[3]}-${m[2]}-${m[1]}` : ''; };
+    return (
+      <input type="date" className="fv-ops__vd-in fv-ops__vd-in--dt" style={w ? { width: w } : undefined} value={toInput(val)} disabled={!editing} onChange={(e) => on(fromInput(e.target.value))} />
+    );
+  };
+  const addAdjustment = () => setD({ adjustments: [...(draft.adjustments ?? []), { id: uid('frtadj'), description: '', amount: '0', direction: 'Add' }] });
+  const updateAdjustment = (id: string, patch: Partial<FreightInvoiceAdjustment>) => setD({ adjustments: (draft.adjustments ?? []).map((adjustment) => adjustment.id === id ? { ...adjustment, ...patch } : adjustment) });
+  const removeAdjustment = (id: string) => setD({ adjustments: (draft.adjustments ?? []).filter((adjustment) => adjustment.id !== id) });
+  const invoicePortOptions: { op: 'Load' | 'Discharge'; name: string }[] = [
+    ...(recap.loadPort ? [{ op: 'Load' as const, name: recap.loadPort }] : []),
+    ...(recap.dischargePort ? [{ op: 'Discharge' as const, name: recap.dischargePort }] : []),
+  ];
+  const includedPortOps = view.includedPortOps ?? invoicePortOptions.map((port) => port.op);
+  const toggleInvoicePort = (op: 'Load' | 'Discharge', checked: boolean) => setD({
+    includedPortOps: checked
+      ? Array.from(new Set([...includedPortOps, op]))
+      : includedPortOps.filter((includedOp) => includedOp !== op),
+  });
   const linkedClaimIds = view.claimIds ?? [];
   const linkedClaims = linkedClaimIds.map((id) => claims.find((c) => c.id === id)).filter((c): c is ClaimRow => !!c && claimForCharterers(c));
   const claimChoices = claims.filter((c) => claimForCharterers(c) && !(view.claimIds ?? []).includes(c.id));
@@ -7466,7 +10097,7 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
   const exportPdf = () => {
     const w = window.open('', '_blank', 'width=900,height=1100');
     if (!w) return;
-    const rows = lines.map((l) => `<tr><td>${l.desc}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
+    const rows = lines.map((l) => `<tr><td>${pdfEsc(l.desc)}</td><td class="r">${l.sign < 0 ? '-' : ''}${money(l.amount)}</td></tr>`).join('');
     const payerBank = findClientBankByName(view.invoiceTo || recap.charterers);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${view.title} — ${recap.vesselName}</title><style>
       body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:28px;font-size:12px}
@@ -7477,12 +10108,12 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
       .meta{margin:0 0 12px;font-size:11px}.meta span{display:inline-block;min-width:130px;color:#555}
     </style></head><body>${pdfCompanyHeader()}
       <h1>${view.title || `${view.freightType} Freight Invoice`}</h1>
-      <p class="sub">${recap.vesselName} · IMO ${voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
+      <p class="sub">${recap.vesselName} · IMO ${recap.vesselImo || voyage.imo || '—'} · ${voyage.flag || '—'} · CP ${recap.cpDate || '—'}</p>
       <div class="meta">
         <div><span>Invoice To:</span> ${view.invoiceTo || '—'}</div>
         <div><span>Invoice No.:</span> ${view.invoiceNo || '—'}</div>
         <div><span>Invoice Date:</span> ${view.invoiceDate || '—'}</div>
-        <div><span>Payment Terms:</span> ${view.paymentTerms || '—'}</div>
+        <div><span>Payment Terms:</span> ${pdfEsc(freightPaymentClause(recap))}</div>
         <div><span>Due Date:</span> ${view.dueDate || '—'}</div>
         <div><span>Voyage:</span> ${recap.loadPort} → ${recap.dischargePort}</div>
         <div><span>Cargo:</span> ${recap.cargoName}</div>
@@ -7505,11 +10136,11 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
         <div className="fv-ops__soa-head">
           <div>
             <h2>{view.title || `${view.freightType} Freight Invoice`}</h2>
-            <span className="fv-ops__soa-sub">{recap.vesselName} · IMO {voyage.imo || '—'} · {view.invoiceTo || '—'} · No. {view.invoiceNo} · <span className={`fv-ops__pill fv-ops__pill--${freightStatusPill(view.status)}`}>{view.status}</span>{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
+            <span className="fv-ops__soa-sub">{recap.vesselName} · IMO {recap.vesselImo || voyage.imo || '—'} · {view.invoiceTo || '—'} · No. {view.invoiceNo} · <span className={`fv-ops__pill fv-ops__pill--${freightStatusPill(view.status)}`}>{view.status}</span>{editing && <span className="fv-ops__soa-editing"> · editing</span>}</span>
           </div>
           <div className="fv-ops__soa-headbtns">
             {!editing && <button type="button" className="fv-ops__btn" onClick={() => setEditing(true)}><i className="fas fa-pen" aria-hidden="true" /> Edit</button>}
-            {editing && <button type="button" className="fv-ops__btn fv-ops__btn--go" onClick={save}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>}
+            {editing && <button type="button" className="fv-ops__btn fv-ops__btn--go" disabled={extracting} onClick={save}><i className="fas fa-floppy-disk" aria-hidden="true" /> Save</button>}
             {editing && <button type="button" className="fv-ops__btn" onClick={discard}><i className="fas fa-rotate-left" aria-hidden="true" /> Discard</button>}
             <button type="button" className="fv-ops__btn" onClick={exportPdf}><i className="fas fa-file-pdf" aria-hidden="true" /> PDF</button>
             <button type="button" className="fv-ops__btn" onClick={onDelete}><i className="fas fa-trash" aria-hidden="true" /> Delete</button>
@@ -7520,10 +10151,12 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
           <div className="fv-ops__frl-invhead">
             <div className="fv-ops__frl-party">
               <div className="fv-ops__frl-lbl">Invoice To</div>
-              {inp(view.invoiceTo, (v) => setD({ invoiceTo: v }), undefined, 'Charterers')}
+              {editing
+                ? <VdAutocomplete value={view.invoiceTo} onChange={(v) => setD({ invoiceTo: v })} options={accountNames.map((name) => ({ value: name }))} inputClass="fv-ops__vd-in" inputLabel="Invoice To" placeholder="Search Account Details…" />
+                : inp(view.invoiceTo, (v) => setD({ invoiceTo: v }), undefined, 'Charterers')}
               <div className="fv-ops__frl-meta">
                 <span>Vessel</span><b>{recap.vesselName}</b>
-                <span>IMO</span><b>{voyage.imo || '—'}</b>
+                <span>IMO</span><b>{recap.vesselImo || voyage.imo || '—'}</b>
                 <span>Flag</span><b>{voyage.flag || '—'}</b>
                 <span>Type</span><b>{voyage.vesselType || '—'}</b>
                 <span>CP Dated</span><b>{recap.cpDate || '—'}</b>
@@ -7541,9 +10174,9 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
               )}
               <label>Invoice Name{inp(view.title, (v) => setD({ title: v }), 170, 'Invoice name')}</label>
               <label>Invoice No.{inp(view.invoiceNo, (v) => setD({ invoiceNo: v }), 90)}</label>
-              <label>Invoice Date{inp(view.invoiceDate, (v) => setD({ invoiceDate: v }), 110, 'dd-mm-yyyy')}</label>
-              <label>Payment Terms{inp(view.paymentTerms, (v) => setD({ paymentTerms: v }), 150)}</label>
-              <label>Due Date{inp(view.dueDate, (v) => setD({ dueDate: v }), 110, 'dd-mm-yyyy')}</label>
+              <label>Invoice Date{inpDate(view.invoiceDate, (v) => setD({ invoiceDate: v }), 140)}</label>
+              <label>Payment Terms<input className="fv-ops__vd-in" value={freightPaymentClause(recap)} readOnly /></label>
+              <label>Due Date{inpDate(view.dueDate, (v) => setD({ dueDate: v }), 140)}</label>
               <label>Status
                 <select className="fv-ops__eta-sel" value={view.status} disabled={!editing} onChange={(e) => setD({ status: e.target.value })}>
                   <option value="Draft">Draft</option>
@@ -7559,28 +10192,58 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
             </div>
           </div>
           <div className="fv-ops__frl-voy">
-            <span><b>Voyage:</b> {recap.loadPort} → {recap.dischargePort}</span>
-            <span><b>Cargo:</b> {recap.cargoName}</span>
-            {editing ? (
-              <>
-                <label className="fv-ops__frl-voyed"><span>B/L Qty (MT)</span>{inp(view.blQtyOverride ?? '', (v) => setD({ blQtyOverride: v }), 96, fmt(num(recap.finalQtyLoaded), 0))}</label>
-                <label className="fv-ops__frl-voyed"><span>Freight (PMT)</span>{inp(view.freightRateOverride ?? '', (v) => setD({ freightRateOverride: v }), 84, String(num(recap.freightPerMt)))}</label>
-                <label className="fv-ops__frl-voyed"><span>Address Comm (%)</span>{inp(view.adcomOverride ?? '', (v) => setD({ adcomOverride: v }), 76, String(num(recap.adcom)))}</label>
-              </>
-            ) : (
-              <>
-                <span><b>B/L Qty:</b> {fmt(effBlQty, 0)} MT</span>
-                <span><b>Freight:</b> {money(effFreight)} PMT</span>
-                <span><b>Address Comm:</b> {fmt(effAdcom, 3)}%</span>
-              </>
-            )}
+            <div className="fv-ops__frl-voyrow">
+              <span><b>Voyage:</b></span>
+              {view.kind === 'Demurrage' ? (
+                invoicePortOptions.length > 0 ? invoicePortOptions.map((port, idx) => (
+                  <Fragment key={port.op}>
+                    {idx > 0 && <span>→</span>}
+                    <label className="fv-ops__frl-chk fv-ops__frl-chk--inline">
+                      <input type="checkbox" checked={includedPortOps.includes(port.op)} disabled={!editing} onChange={(e) => toggleInvoicePort(port.op, e.target.checked)} />
+                      {port.name}
+                    </label>
+                  </Fragment>
+                )) : <span>—</span>
+              ) : (
+                <span>{recap.loadPort || '—'} → {recap.dischargePort || '—'}</span>
+              )}
+              <span><b>Cargo:</b> {recap.cargoName}</span>
+            </div>
+            <div className="fv-ops__frl-voyrow">
+              {editing ? (
+                <>
+                  {view.kind === 'Freight' ? (
+                    <>
+                      <label className="fv-ops__frl-voyed"><span>B/L Qty (MT)</span>{inp(view.blQtyOverride ?? '', (v) => setD({ blQtyOverride: v }), 96, fmt(num(recap.finalQtyLoaded), 0))}</label>
+                      <label className="fv-ops__frl-voyed"><span>Freight (PMT)</span>{inp(view.freightRateOverride ?? '', (v) => setD({ freightRateOverride: v }), 84, String(num(recap.freightPerMt)))}</label>
+                    </>
+                  ) : (
+                    <>
+                      <label className="fv-ops__frl-voyed"><span>Demurrage Rate (US$/day)</span><input className="fv-ops__vd-in" value={String(demurrageRate)} readOnly /></label>
+                      <label className="fv-ops__frl-voyed"><span>Despatch Rate (US$/day)</span><input className="fv-ops__vd-in" value={String(despatchRate)} readOnly /></label>
+                    </>
+                  )}
+                  <label className="fv-ops__frl-voyed"><span>Address Comm (%)</span>{inp(view.adcomOverride ?? '', (v) => setD({ adcomOverride: v }), 76, String(num(recap.adcom)))}</label>
+                  {view.kind === 'Freight' && <label className="fv-ops__frl-voyed"><span>% Freight Due</span>{inp(view.pctFreightDue, (v) => setD({ pctFreightDue: v }), 76, '100')}</label>}
+                </>
+              ) : (
+                <>
+                  {view.kind === 'Freight' ? <>
+                    <span><b>B/L Qty:</b> {fmt(effBlQty, 0)} MT</span>
+                    <span><b>Freight:</b> {money(effFreight)} PMT</span>
+                  </> : <>
+                    <span><b>Demurrage Rate:</b> {money(demurrageRate)}/day</span>
+                    <span><b>Despatch Rate:</b> {money(despatchRate)}/day</span>
+                  </>}
+                  <span><b>Address Comm:</b> {fmt(effAdcom, 3)}%</span>
+                  {view.kind === 'Freight' && <span><b>% Freight Due:</b> {fmt(num(view.pctFreightDue), 2)}%</span>}
+                </>
+              )}
+            </div>
           </div>
           {view.kind === 'Freight' && editing && (
             <div className="fv-ops__frl-adj">
               {view.freightType === 'Final' && <label>Freight Differential (PMT){inp(view.freightDifferential, (v) => setD({ freightDifferential: v }), 80)}</label>}
-              <label>% Freight Due{inp(view.pctFreightDue, (v) => setD({ pctFreightDue: v }), 64)}</label>
-              <label>Load Port D/A{inp(view.loadPortDA, (v) => setD({ loadPortDA: v }), 100)}</label>
-              <label>Discharge Port D/A{inp(view.dischPortDA, (v) => setD({ dischPortDA: v }), 100)}</label>
               {view.freightType === 'Final' && <label>Initial Freight Received{inp(view.initialFreightReceived, (v) => setD({ initialFreightReceived: v }), 120)}</label>}
               {view.freightType === 'Final' && <label className="fv-ops__frl-chk"><input type="checkbox" checked={view.includeDemurrage} onChange={(e) => setD({ includeDemurrage: e.target.checked })} /> Include demurrage / despatch</label>}
             </div>
@@ -7622,15 +10285,35 @@ function FreightInvoiceModal({ inv, recap, voyage, laytimes, claims, onSave, onD
               <tr><th>Description</th><th className="fv-ops__r">Amount (US$)</th></tr>
             </thead>
             <tbody>
-              {lines.map((l, i) => (
-                <tr key={i}><td>{l.desc}</td><td className={`fv-ops__r ${l.sign < 0 ? 'fv-ops__neg' : ''}`}>{l.sign < 0 ? '-' : ''}{money(l.amount)}</td></tr>
-              ))}
+              {lines.map((l, i) => {
+                const adjustment = l.adjustmentId ? (view.adjustments ?? []).find((item) => item.id === l.adjustmentId) : undefined;
+                return (
+                  <tr key={l.adjustmentId ?? i}>
+                    <td>{adjustment && editing ? (
+                      <span className="fv-ops__soa-extra">
+                        <input className="fv-ops__vd-in" value={adjustment.description} placeholder="Adjustment description" onChange={(e) => updateAdjustment(adjustment.id, { description: e.target.value })} />
+                        <select className="fv-ops__eta-sel" value={adjustment.direction} onChange={(e) => updateAdjustment(adjustment.id, { direction: e.target.value as 'Add' | 'Deduct' })}>
+                          <option value="Add">Add</option><option value="Deduct">Deduct</option>
+                        </select>
+                        <input className="fv-ops__eta-in" inputMode="decimal" value={adjustment.amount} onChange={(e) => updateAdjustment(adjustment.id, { amount: e.target.value })} />
+                        <button type="button" className="fv-ops__bnk-rm" aria-label="Remove adjustment" onClick={() => removeAdjustment(adjustment.id)}><i className="fas fa-xmark" aria-hidden="true" /></button>
+                      </span>
+                    ) : l.desc}</td>
+                    <td className={`fv-ops__r ${l.sign < 0 ? 'fv-ops__neg' : ''}`}>{l.sign < 0 ? '-' : ''}{money(l.amount)}</td>
+                  </tr>
+                );
+              })}
+              {editing && <tr><td colSpan={2}><button type="button" className="fv-ops__btn fv-ops__soa-add" onClick={addAdjustment}><i className="fas fa-plus" aria-hidden="true" /> Add adjustment</button></td></tr>}
             </tbody>
             <tfoot>
               <tr className="fv-ops__soa-total"><td>Total Payable Due to Owners</td><td className="fv-ops__r">{money(total)}</td></tr>
             </tfoot>
           </table>
-          <p className="fv-ops__hint">Freight, commissions and D/A are pulled from the voyage recap. {view.kind === 'Freight' && view.freightType === 'Final' ? 'Demurrage / despatch fold in from the laytime calculations when enabled.' : ''} Use <b>Edit</b> to adjust figures, <b>Save</b> to persist, <b>PDF</b> to print. *E&amp;OE.</p>
+          <div className="fv-ops__vd-sub">
+            <div className="fv-ops__vd-sub-head"><i className="fas fa-paperclip" aria-hidden="true" /> Attachments</div>
+            <AttachmentEditor attachments={view.attachments ?? []} onChange={(attachments) => setD({ attachments })} kind={view.kind} onExtract={setD} onBusyChange={setExtracting} disabled={!editing} />
+          </div>
+          <p className="fv-ops__hint">Freight and commissions are pulled from the voyage recap; payment terms follow the Charterers freight clause. {view.kind === 'Freight' && view.freightType === 'Final' ? 'Demurrage / despatch fold in from the laytime calculations when enabled.' : ''} Use <b>Add adjustment</b> for additional charges or deductions. Use <b>Save</b> to persist and <b>PDF</b> to print. *E&amp;OE.</p>
         </div>
       </div>
     </div>
@@ -7644,8 +10327,36 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<LaytimePort>(port);
-  const view = editing ? draft : port;
-  const setD = (patch: Partial<LaytimePort>) => setDraft((d) => ({ ...d, ...patch }));
+  const worldPorts = useWorldPorts();
+  const clients = useClients();
+  const cargoMaster = useCargoMaster();
+  const voyageRate = port.op === 'Load' ? recap.loadRate : recap.dischRate;
+  const voyageTerms = [...LAYTIME_TERMS_OPTIONS].sort((first, second) => second.length - first.length).find((term) => voyageRate.toUpperCase().includes(term.toUpperCase()));
+  const demRate = num(recap.demDespatch);
+  const voyageDefaults = {
+    name: (port.op === 'Load' ? recap.loadPort : recap.dischargePort) || port.name,
+    accountName: recap.charterers || recap.owners || port.accountName || '',
+    cargo: recap.cargoName || port.cargo,
+    quantity: String(num(recap.finalQtyLoaded) || num(recap.cpQuantity) || num(port.quantity)),
+    rate: voyageRate ? String(num(voyageRate)) : port.rate,
+    terms: voyageTerms || port.terms || LAYTIME_TERMS_OPTIONS[0],
+    demurrageRate: recap.demDespatch ? String(demRate) : port.demurrageRate,
+    despatchRate: recap.demDespatch ? String(/no\s*despatch|free\s*despatch/i.test(recap.despatchTerm) ? 0 : /half/i.test(recap.despatchTerm) ? demRate / 2 : demRate) : port.despatchRate,
+  };
+  const withVoyageDetails = (row: LaytimePort): LaytimePort => ({
+    ...row,
+    ...Object.fromEntries(Object.entries(voyageDefaults).filter(([key]) => !row.voyageFieldOverrides?.includes(key))),
+  });
+  const view = withVoyageDetails(editing ? draft : port);
+  const setD = (patch: Partial<LaytimePort>) => setDraft((previous) => ({
+    ...previous, ...patch,
+    voyageFieldOverrides: Array.from(new Set([...(previous.voyageFieldOverrides ?? []), ...Object.keys(patch).filter((key) => key in voyageDefaults)])),
+  }));
+  const searchable = (label: string, value: string, onChange: (value: string) => void, options: { value: string; meta?: string }[]) => (
+    <label><span>{label}</span>{editing
+      ? <VdAutocomplete value={value} onChange={onChange} options={options} inputLabel={label} />
+      : <input className="fv-ops__vd-in" value={value} disabled />}</label>
+  );
   const res = calcLaytime(view);
   const method = view.calcMethod ?? 'counting';
   const today = new Date();
@@ -7659,15 +10370,8 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
 
   const autoCalculate = () => {
     const next: LaytimePort = {
-      ...draft,
-      accountName: draft.accountName || recap.charterers || recap.owners,
-      cargo: draft.cargo || recap.cargoName,
-      quantity: draft.quantity && num(draft.quantity) > 0 ? draft.quantity : String(Math.round(num(recap.finalQtyLoaded) || num(recap.cpQuantity))),
-      rate: draft.rate && num(draft.rate) > 0 ? draft.rate : String(num(draft.op === 'Load' ? recap.loadRate : recap.dischRate)),
-      terms: draft.terms || LAYTIME_TERMS_OPTIONS[0],
-      norTendered: draft.norTendered || (draft.op === 'Load' ? recap.norAtLoadPort : recap.norAtDPort),
-      demurrageRate: draft.demurrageRate || String(num(recap.demDespatch)),
-      despatchRate: draft.despatchRate || String(/half/i.test(recap.despatchTerm) ? num(recap.demDespatch) / 2 : num(recap.demDespatch)),
+      ...view,
+      terms: view.terms || LAYTIME_TERMS_OPTIONS[0],
     };
     if (!next.commenced && next.norAccepted) next.commenced = next.norAccepted;
     if (next.events.length === 0 && next.commenced && next.completed) {
@@ -7681,7 +10385,7 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
     addNotification(`Laytime for ${next.name || next.op} auto-calculated from recap, charter-party terms and SOF / port log.`, 'Operations');
   };
 
-  const save = () => { onSave(draft); setEditing(false); };
+  const save = () => { onSave(view); setEditing(false); };
   const discard = () => { setDraft(port); setEditing(false); };
 
   const addEvent = () => setD({ events: [...draft.events, { date: '', from: '', to: '', pct: '100', remark: '' }] });
@@ -7754,45 +10458,31 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
         </div>
         <div className="fv-ops__soa-body">
           <div className="fv-ops__frl-lay">
-            <div className="fv-ops__frl-layfields">
-              <label>Port Name{inp(view.name, (v) => setD({ name: v }))}</label>
-              <label>In Favour Of (Account){inp(view.accountName ?? '', (v) => setD({ accountName: v }), undefined, 'Charterers / Owners')}</label>
-              <label>Cargo{inp(view.cargo, (v) => setD({ cargo: v }))}</label>
-              <label>Quantity (MT){inp(view.quantity, (v) => setD({ quantity: v }))}</label>
-              <label>Rate (mt/day){inp(view.rate, (v) => setD({ rate: v }))}</label>
-              <label>Terms
-                <select className="fv-ops__vd-in" value={view.terms} disabled={!editing} onChange={(e) => setD({ terms: e.target.value })}>
-                  {view.terms && !LAYTIME_TERMS_OPTIONS.includes(view.terms) && <option value={view.terms}>{view.terms}</option>}
-                  {LAYTIME_TERMS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </label>
-              <label>NOR Tendered{inp(view.norTendered, (v) => setD({ norTendered: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
-              <label>Turn Time (hrs){inp(view.turnTimeHours, (v) => setD({ turnTimeHours: v }))}</label>
-              <label>NOR Accepted{inp(view.norAccepted, (v) => setD({ norAccepted: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
-              <label>Laytime Commenced{inp(view.commenced, (v) => setD({ commenced: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
-              <label>Laytime Completed{inp(view.completed, (v) => setD({ completed: v }), undefined, 'dd-mm-yyyy HH:MM')}</label>
-              <label>Demurrage (US$/day){inp(view.demurrageRate, (v) => setD({ demurrageRate: v }))}</label>
-              <label>Despatch (US$/day){inp(view.despatchRate, (v) => setD({ despatchRate: v }))}</label>
-              <label>Calculation Method
-                <select className="fv-ops__vd-in" value={method} disabled={!editing} onChange={(e) => setD({ calcMethod: e.target.value as 'counting' | 'deduction' })}>
-                  <option value="counting">Time Counting</option>
-                  <option value="deduction">Deduction</option>
-                </select>
-              </label>
-              <label>Laytime Type
-                <select className="fv-ops__vd-in" value={view.reversible ? 'reversible' : 'non'} disabled={!editing} onChange={(e) => setD({ reversible: e.target.value === 'reversible' })}>
-                  <option value="non">Non-Reversible</option>
-                  <option value="reversible">Reversible</option>
-                </select>
-              </label>
-              <label>Demurrage Basis
-                <select className="fv-ops__vd-in" value={view.onceOnDemurrage ? 'always' : 'standard'} disabled={!editing} onChange={(e) => setD({ onceOnDemurrage: e.target.value === 'always' })}>
-                  <option value="standard">Standard (exceptions apply)</option>
-                  <option value="always">Once on Demurrage, Always on Demurrage</option>
-                </select>
-              </label>
-              <label>Demurrage Starts<input className="fv-ops__vd-in fv-ops__frl-demstart" value={fmtDT2(outcome.demurrageStart)} readOnly title="Auto — when used laytime reaches the allowance" /></label>
+            <div className="fv-ops__frl-layeditor">
+              <div className="fv-ops__frl-layfields fv-ops__frl-layidentity">
+                {searchable('Port Name', view.name, (value) => setD({ name: value }), [{ value: voyageDefaults.name }, ...worldPorts.map((entry) => ({ value: entry.label, meta: entry.country }))])}
+                {searchable('In Favour Of (Account)', view.accountName ?? '', (value) => setD({ accountName: value }), clients.filter((client) => (client.kind ?? 'Account') === 'Account').map((client) => ({ value: client.name })))}
+              </div>
+              <div className="fv-ops__frl-laycolumns">
+                <div className="fv-ops__frl-layfields fv-ops__frl-laycolumn">
+                  <VdDateTime label="NOR Tendered" value={view.norTendered} onChange={(value) => setD({ norTendered: value })} readOnly={!editing} />
+                  <VdDateTime label="NOR Accepted" value={view.norAccepted} onChange={(value) => setD({ norAccepted: value })} readOnly={!editing} />
+                  <label>Turn Time (hrs)<input type="number" min="0" className="fv-ops__vd-in" value={view.turnTimeHours} disabled={!editing} onChange={(event) => setD({ turnTimeHours: event.target.value })} /></label>
+                  <VdDateTime label="Laytime Commenced" value={view.commenced} onChange={(value) => setD({ commenced: value })} readOnly={!editing} />
+                  <VdDateTime label="Laytime Completed" value={view.completed} onChange={(value) => setD({ completed: value })} readOnly={!editing} />
+                  <VdDateTime label="Demurrage Starts" value={view.demurrageStarts || (outcome.demurrageStart ? fmtDT2(outcome.demurrageStart) : '')} onChange={(value) => setD({ demurrageStarts: value })} readOnly={!editing} />
+                </div>
+                <div className="fv-ops__frl-layfields fv-ops__frl-laycolumn">
+                  {searchable('Cargo', view.cargo, (value) => setD({ cargo: value }), cargoMaster.filter((cargo) => cargo.status === 'Active').map((cargo) => ({ value: cargo.cargoName })))}
+                  <label>Quantity (MT)<input type="number" min="0" className="fv-ops__vd-in" value={view.quantity} disabled={!editing} onChange={(event) => setD({ quantity: event.target.value })} /></label>
+                  <label>{view.op === 'Load' ? 'Load' : 'Discharge'} Rate (MT/day)<input type="number" min="0" className="fv-ops__vd-in" value={view.rate} disabled={!editing} onChange={(event) => setD({ rate: event.target.value })} /></label>
+                  {searchable('Terms', view.terms, (value) => setD({ terms: value }), LAYTIME_TERMS_OPTIONS.map((value) => ({ value })))}
+                  <label>Demurrage Rate (US$/day)<input type="number" min="0" className="fv-ops__vd-in" value={view.demurrageRate} disabled={!editing} onChange={(event) => setD({ demurrageRate: event.target.value })} /></label>
+                  <label>Despatch Rate (US$/day)<input type="number" min="0" className="fv-ops__vd-in" value={view.despatchRate} disabled={!editing} onChange={(event) => setD({ despatchRate: event.target.value })} /></label>
+                </div>
+              </div>
             </div>
+            <div className="fv-ops__frl-layaside">
             <div className="fv-ops__frl-laysum">
               <div><span>Laytime Allowed</span><b>{fmt(res.allowed, 3)} d</b></div>
               <div><span>Laytime Used</span><b>{fmt(res.used, 3)} d</b></div>
@@ -7800,8 +10490,28 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
               {method === 'deduction' && <div><span>Total Deducted</span><b>{fmt(res.deductions, 3)} d</b></div>}
               <div><span>{outcome.onDemurrage ? 'On Demurrage' : 'Time Saved'}</span><b className={outcome.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{fmt(Math.abs(outcome.balance), 3)} d</b></div>
               <div><span>{outcome.onDemurrage ? 'Demurrage Due' : 'Despatch Due'}</span><b className={outcome.onDemurrage ? 'fv-ops__neg' : 'fv-ops__pos'}>{outcome.onDemurrage ? money(outcome.demurrageAmt) : money(outcome.despatchAmt)}</b></div>
-              <div><span>Demurrage Starts</span><b className={outcome.onDemurrage ? 'fv-ops__neg' : ''}>{outcome.onDemurrage ? fmtDT2(outcome.demurrageStart) : '—'}</b></div>
               {pool && <div className="fv-ops__frl-laypool"><span>Reversible — combined {reversiblePorts.length} ports</span><b>Allowed {fmt(pool.allowed, 3)} d · Used {fmt(pool.used, 3)} d</b></div>}
+            </div>
+              <div className="fv-ops__frl-layfields fv-ops__frl-layoptions">
+                <label>Calculation Method
+                  <select className="fv-ops__vd-in" value={method} disabled={!editing} onChange={(e) => setD({ calcMethod: e.target.value as 'counting' | 'deduction' })}>
+                    <option value="counting">Time Counting</option>
+                    <option value="deduction">Deduction</option>
+                  </select>
+                </label>
+                <label>Laytime Type
+                  <select className="fv-ops__vd-in" value={view.reversible ? 'reversible' : 'non'} disabled={!editing} onChange={(e) => setD({ reversible: e.target.value === 'reversible' })}>
+                    <option value="non">Non-Reversible</option>
+                    <option value="reversible">Reversible</option>
+                  </select>
+                </label>
+                <label>Demurrage Term Basis
+                  <select className="fv-ops__vd-in" value={view.onceOnDemurrage ? 'always' : 'standard'} disabled={!editing} onChange={(e) => setD({ onceOnDemurrage: e.target.value === 'always' })}>
+                    <option value="standard">Standard (exceptions apply)</option>
+                    <option value="always">Once on Demurrage, Always on Demurrage</option>
+                  </select>
+                </label>
+              </div>
             </div>
           </div>
           <div className="fv-ops__vd-sub-head"><i className="fas fa-list-ul" aria-hidden="true" /> Statement of Facts — {method === 'deduction' ? 'enter deducted / excepted periods only' : 'time-counting'}
@@ -7815,9 +10525,9 @@ function LaytimeModal({ port, siblings, recap, onSave, onDelete, onClose }: {
               {res.rows.length === 0 && <tr><td colSpan={editing ? 9 : 8} className="fv-ops__vd-empty">No facts recorded.{editing ? ' Use “Row” to log NOR, laytime periods, stoppages, weather etc.' : ''}</td></tr>}
               {res.rows.map(({ ev, elapsed, counted, cumulative }, i) => (
                 <tr key={i}>
-                  <td>{inp(ev.date, (v) => setEvent(i, { date: v }), 96, 'dd-mm-yyyy')}</td>
-                  <td>{inp(ev.from, (v) => setEvent(i, { from: v }), 56, 'HH:MM')}</td>
-                  <td>{inp(ev.to, (v) => setEvent(i, { to: v }), 56, 'HH:MM')}</td>
+                  <td><input type="date" className="fv-ops__vd-in" aria-label={`Fact ${i + 1} Date`} value={dmyToDateTimeInput(ev.date).split('T')[0]} disabled={!editing} onChange={(event) => setEvent(i, { date: dateTimeInputToDmy(`${event.target.value}T00:00`).split(' ')[0] })} /></td>
+                  <td><input type="time" className="fv-ops__vd-in" aria-label={`Fact ${i + 1} From`} value={ev.from} disabled={!editing} onChange={(event) => setEvent(i, { from: event.target.value })} /></td>
+                  <td><input type="time" className="fv-ops__vd-in" aria-label={`Fact ${i + 1} To`} value={ev.to} disabled={!editing} onChange={(event) => setEvent(i, { to: event.target.value })} /></td>
                   <td className="fv-ops__r">{fmt(elapsed, 3)}</td>
                   <td className="fv-ops__r">{inp(ev.pct, (v) => setEvent(i, { pct: v }), 48)}</td>
                   <td className="fv-ops__r">{fmt(counted, 3)}</td>
@@ -8092,6 +10802,38 @@ function RailIcon({ icon, label, active, badge, onClick }: { icon: string; label
       {badge != null && badge > 0 && <span className="fv-ops__rail-badge">{badge}</span>}
       <span className="fv-ops__rail-icon-label">{label}</span>
     </button>
+  );
+}
+
+function ConfigHistoryPanel({ entries }: { entries: ConfigHistoryEntry[] }) {
+  const fmt = (iso: string) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  if (entries.length === 0) {
+    return <p className="fv-ops__hint">No changes recorded yet — every edit to this voyage will appear here.</p>;
+  }
+  return (
+    <div className="fv-ops__config-history">
+      {entries.map((e) => (
+        <div key={e.id} className="fv-ops__config-history-row">
+          <div className="fv-ops__config-history-meta">
+            <span className="fv-ops__config-history-date">{fmt(e.at)}</span>
+            <span className="fv-ops__config-history-user"><i className="fas fa-user" aria-hidden="true" /> {e.by}</span>
+          </div>
+          <div className="fv-ops__config-history-field">{e.field}</div>
+          {(e.before !== '—' || e.after !== '—') && (
+            <div className="fv-ops__config-history-vals">
+              <span className="fv-ops__config-history-before">{e.before}</span>
+              <i className="fas fa-arrow-right" aria-hidden="true" />
+              <span className="fv-ops__config-history-after">{e.after}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

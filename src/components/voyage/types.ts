@@ -173,6 +173,16 @@ export interface VoyageView {
   slowAheadRpm: string;
   halfAheadRpm: string;
   fullAheadRpm: string;
+  // Speed (kt) achieved at each telegraph order — ballast / laden differ since
+  // the same RPM pushes a lighter (ballast) hull faster than a laden one.
+  deadSlowSpeedBallast: string;
+  deadSlowSpeedLaden: string;
+  slowAheadSpeedBallast: string;
+  slowAheadSpeedLaden: string;
+  halfAheadSpeedBallast: string;
+  halfAheadSpeedLaden: string;
+  fullAheadSpeedBallast: string;
+  fullAheadSpeedLaden: string;
 
   // 2c. M/E & dimensions
   meType: string;

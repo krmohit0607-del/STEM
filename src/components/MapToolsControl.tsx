@@ -14,9 +14,11 @@ import { useSavedPorts } from '../data/savedPorts';
 /** Renders React children into a real Leaflet control container. */
 function ControlPortal({
   position,
+  className = 'fv-wp-control',
   children,
 }: {
   position: ControlPosition;
+  className?: string;
   children: React.ReactNode;
 }) {
   const map = useMap();
@@ -25,7 +27,7 @@ function ControlPortal({
   useEffect(() => {
     const ctrl = new L.Control({ position });
     ctrl.onAdd = () => {
-      const div = L.DomUtil.create('div', 'fv-wp-control');
+      const div = L.DomUtil.create('div', `fv-wp-control ${className}`);
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
       setContainer(div);
@@ -114,7 +116,7 @@ export function PortsControl({
 
   return (
     <>
-      <ControlPortal position={position}>
+      <ControlPortal position={position} className="fv-ports-control">
         <button
           type="button"
           className={`fv-wp-control__btn${active ? ' fv-wp-control__btn--on' : ''}`}
@@ -194,7 +196,7 @@ export function RulerControl({
 
   return (
     <>
-      <ControlPortal position={position}>
+      <ControlPortal position={position} className="fv-ruler-control">
         <button
           type="button"
           className={`fv-wp-control__btn${active ? ' fv-wp-control__btn--on' : ''}`}

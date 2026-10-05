@@ -2,7 +2,13 @@ import { useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import { BoolField, Card, Cell, Field } from './primitives';
-import { loadVessels } from '../../data/vessels';
+import {
+  findVesselForVoyage,
+  loadVessels,
+  syncVesselProfileFromVoyage,
+  vesselProfileFromVessel,
+  type VesselProfileFields,
+} from '../../data/vessels';
 import {
   ME_TYPE_OPTIONS,
   SCRUBBER_TYPE_OPTIONS,
@@ -21,10 +27,74 @@ interface Props {
   onToggleCollapse: () => void;
 }
 
+/** Pull just the profile subset out of a `VoyageView`, in `VesselProfileFields` shape. */
+function profileFromView(view: VoyageView): VesselProfileFields {
+  return {
+    vesselType: view.vesselType,
+    flag: view.flag,
+    vesselEmail: view.vesselEmail,
+    ecdisModel: view.ecdisModel,
+    autoSendForecast: view.autoSendForecast,
+    autoSendForecastTime: view.autoSendForecastTime,
+    weather4x: view.weather4x,
+    weather4xDuration: view.weather4xDuration,
+    autoSendReports: view.autoSendReports,
+    scrubber: view.scrubber,
+    scrubberType: view.scrubberType,
+    meType: view.meType,
+    meModel: view.meModel,
+    loa: view.loa,
+    beam: view.beam,
+    defaultBallastDraft: view.defaultBallastDraft,
+    defaultLadenDraft: view.defaultLadenDraft,
+    summerDraft: view.summerDraft,
+    summerDisplacement: view.summerDisplacement,
+    summerDeadweight: view.summerDeadweight,
+    minRpm: view.minRpm,
+    maxRpm: view.maxRpm,
+    minMcr: view.minMcr,
+    maxMcr: view.maxMcr,
+    minSpeed: view.minSpeed,
+    maxSpeed: view.maxSpeed,
+    minPowerFraction: view.minPowerFraction,
+    maxPowerFraction: view.maxPowerFraction,
+    nominalPowerFraction: view.nominalPowerFraction,
+    blowerBallastMin: view.blowerBallastMin,
+    blowerBallastMax: view.blowerBallastMax,
+    blowerLadenMin: view.blowerLadenMin,
+    blowerLadenMax: view.blowerLadenMax,
+    criticalRpmMin: view.criticalRpmMin,
+    criticalRpmMax: view.criticalRpmMax,
+    deadSlowRpm: view.deadSlowRpm,
+    slowAheadRpm: view.slowAheadRpm,
+    halfAheadRpm: view.halfAheadRpm,
+    fullAheadRpm: view.fullAheadRpm,
+    deadSlowSpeedBallast: view.deadSlowSpeedBallast,
+    deadSlowSpeedLaden: view.deadSlowSpeedLaden,
+    slowAheadSpeedBallast: view.slowAheadSpeedBallast,
+    slowAheadSpeedLaden: view.slowAheadSpeedLaden,
+    halfAheadSpeedBallast: view.halfAheadSpeedBallast,
+    halfAheadSpeedLaden: view.halfAheadSpeedLaden,
+    fullAheadSpeedBallast: view.fullAheadSpeedBallast,
+    fullAheadSpeedLaden: view.fullAheadSpeedLaden,
+    wslMaxSwhBallast: view.wslMaxSwhBallast,
+    wslMaxSwhLaden: view.wslMaxSwhLaden,
+    wslMaxWindsBallast: view.wslMaxWindsBallast,
+    wslMaxWindsLaden: view.wslMaxWindsLaden,
+    wslMaxSeaStateBallast: view.wslMaxSeaStateBallast,
+    wslMaxSeaStateLaden: view.wslMaxSeaStateLaden,
+  };
+}
+
 /**
  * 2. Vessel Profile — Vessel & Engine details, engine limits & constraints,
  * telegraph table, weather safety limits and the load-dependent Speed & Cons
  * profile. Arranged to mirror the source spreadsheet layout.
+ *
+ * Shares this data with Settings → Vessels Details: selecting a known vessel
+ * name prefills the whole profile from its saved master record, and leaving
+ * edit mode ("Done") pushes any edits back to that same record — so the next
+ * voyage for this vessel starts pre-filled instead of asking again.
  */
 export function VesselSection({ view, setView, editing, onToggleEdit, title, collapsed, onToggleCollapse }: Props) {
   const set = <K extends keyof VoyageView>(key: K, value: VoyageView[K]) =>
@@ -36,6 +106,24 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
 
   // Vessel-name suggestions come from Settings → Vessels Details.
   const vesselNames = loadVessels().map((v) => v.name.trim()).filter(Boolean);
+
+  /** Prefill the whole profile from the matching Settings → Vessels Details
+   *  record whenever the vessel name/IMO is changed to one that's known. */
+  const setVesselIdentity = (key: 'vesselName' | 'imo', value: string) => {
+    setView((prev) => {
+      const next = { ...prev, [key]: value };
+      const match = findVesselForVoyage(
+        key === 'vesselName' ? value : next.vesselName,
+        key === 'imo' ? value : next.imo,
+      );
+      return match ? { ...next, ...vesselProfileFromVessel(match) } : next;
+    });
+  };
+
+  const handleToggleEdit = () => {
+    if (editing) syncVesselProfileFromVoyage(view.vesselName, view.imo, profileFromView(view));
+    onToggleEdit();
+  };
 
   const setEngine = (i: number, key: keyof EngineSpeedConsRow, value: string) =>
     setView((prev) => ({
@@ -77,7 +165,7 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
       id="vessel"
       title={title}
       editing={editing}
-      onToggleEdit={onToggleEdit}
+      onToggleEdit={handleToggleEdit}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}
     >
@@ -86,8 +174,8 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
         <h5 className="fv-voyage__subhead">Vessel &amp; Engine Details</h5>
         <div className="fv-voyage__cols fv-voyage__cols--3">
           <div className="fv-voyage__col">
-            <Field label="Vessel Name" value={view.vesselName} editing={editing} onChange={(x) => set('vesselName', x)} suggestions={vesselNames} />
-            <Field label="Vessel IMO" value={view.imo} editing={editing} onChange={(x) => set('imo', x)} />
+            <Field label="Vessel Name" value={view.vesselName} editing={editing} onChange={(x) => setVesselIdentity('vesselName', x)} suggestions={vesselNames} />
+            <Field label="Vessel IMO" value={view.imo} editing={editing} onChange={(x) => setVesselIdentity('imo', x)} />
             <Field label="Vessel Type" value={view.vesselType} editing={editing} onChange={(x) => set('vesselType', x)} options={VESSEL_TYPE_OPTIONS} />
             <Field label="LOA (m)" value={view.loa} editing={editing} onChange={(x) => set('loa', x)} type="number" />
             <Field label="Beam (m)" value={view.beam} editing={editing} onChange={(x) => set('beam', x)} type="number" />
@@ -190,24 +278,34 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
                   <tr>
                     <th>Order</th>
                     <th>RPM</th>
+                    <th>Speed, Ballast (kt)</th>
+                    <th>Speed, Laden (kt)</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
                     <td>Dead Slow Ahead</td>
                     <td><Cell editing={editing} value={view.deadSlowRpm} onChange={(x) => set('deadSlowRpm', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.deadSlowSpeedBallast} onChange={(x) => set('deadSlowSpeedBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.deadSlowSpeedLaden} onChange={(x) => set('deadSlowSpeedLaden', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Slow Ahead</td>
                     <td><Cell editing={editing} value={view.slowAheadRpm} onChange={(x) => set('slowAheadRpm', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.slowAheadSpeedBallast} onChange={(x) => set('slowAheadSpeedBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.slowAheadSpeedLaden} onChange={(x) => set('slowAheadSpeedLaden', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Half Ahead</td>
                     <td><Cell editing={editing} value={view.halfAheadRpm} onChange={(x) => set('halfAheadRpm', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.halfAheadSpeedBallast} onChange={(x) => set('halfAheadSpeedBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.halfAheadSpeedLaden} onChange={(x) => set('halfAheadSpeedLaden', x)} type="number" /></td>
                   </tr>
                   <tr>
                     <td>Full Ahead</td>
                     <td><Cell editing={editing} value={view.fullAheadRpm} onChange={(x) => set('fullAheadRpm', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.fullAheadSpeedBallast} onChange={(x) => set('fullAheadSpeedBallast', x)} type="number" /></td>
+                    <td><Cell editing={editing} value={view.fullAheadSpeedLaden} onChange={(x) => set('fullAheadSpeedLaden', x)} type="number" /></td>
                   </tr>
                 </tbody>
               </table>

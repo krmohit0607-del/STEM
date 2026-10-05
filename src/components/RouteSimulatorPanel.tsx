@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
-import { sampleEnvironment } from '../data/routeOptimizer';
+import { sampleWeatherField } from '../data/weatherField';
 import {
   ensureLiveData,
   sampleLiveField,
@@ -227,6 +227,13 @@ function clampHour(hours: number): number {
   return Math.max(0, Math.min(MAX_FORECAST_HOURS, Math.round(hours)));
 }
 
+/** Clamp an hour offset into the live-forecast window, keeping fractions —
+ *  used while playback is live so the forecast moves continuously instead
+ *  of snapping once per whole hour. */
+function clampHourFrac(hours: number): number {
+  return Math.max(0, Math.min(MAX_FORECAST_HOURS, hours));
+}
+
 // --- Compass / units ---------------------------------------------------------
 
 const COMPASS8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -275,28 +282,17 @@ const WEATHER_FACTOR_BY_ID: Record<WeatherFactorId, WeatherFactorDef> =
     WeatherFactorDef
   >;
 
-/** Synthetic magnitude of a factor at a point (fallback while live loads). */
+/** Synthetic magnitude of a factor at a point (fallback while live loads) —
+ *  the same model `WeatherFieldLayer` uses for the map, so the read-outs
+ *  and chart never show a different "actual weather value" than the
+ *  colours on the map. */
 function factorMagnitudeSynthetic(
   lat: number,
   lon: number,
   factor: WeatherFactorId,
+  hour: number,
 ): number {
-  const env = sampleEnvironment(lat, lon);
-  switch (factor) {
-    case 'waves':
-      return env.waveHeight;
-    case 'swell':
-      return Math.max(0, env.waveHeight * 0.6 + 1.1 * Math.sin(lat * 0.12 - lon * 0.09));
-    case 'wind':
-      return env.windSpeed;
-    case 'current':
-      return Math.max(
-        0,
-        0.9 + 0.8 * Math.sin(lon * 0.14 + lat * 0.1) + 0.5 * Math.cos(lat * 0.07),
-      );
-    default:
-      return 0;
-  }
+  return sampleWeatherField(lat, lon, WEATHER_FACTOR_BY_ID[factor].liveId, hour).magnitude;
 }
 
 /** Weather magnitude at a fractional position along a route. */
@@ -315,7 +311,7 @@ function weatherAt(
     const live = sampleLiveField(lat, lon, factor.liveId, bounds, hour);
     if (live && Number.isFinite(live.magnitude)) return Math.max(0, live.magnitude);
   }
-  return factorMagnitudeSynthetic(lat, lon, factor.id);
+  return factorMagnitudeSynthetic(lat, lon, factor.id, hour);
 }
 
 /** Magnitude + direction at a geographic point for a read-out row. */
@@ -331,7 +327,7 @@ function readoutAt(
       return { mag: Math.max(0, live.magnitude), dir: live.directionDeg };
     }
   }
-  return { mag: factorMagnitudeSynthetic(pos[0], pos[1], factor.id), dir: null };
+  return { mag: factorMagnitudeSynthetic(pos[0], pos[1], factor.id, hour), dir: null };
 }
 
 /** Whether the live grid for a factor has loaded over the given bounds. */
@@ -953,7 +949,7 @@ export function RouteSimulatorPanel() {
 
   const simElapsedHours = simClock * simMaxHours;
   const cursorDate = new Date(simBaseDate.getTime() + simElapsedHours * 3600_000);
-  const simWeatherHour = clampHour(simElapsedHours);
+  const simWeatherHour = clampHourFrac(simElapsedHours);
 
   // Fetch the weather slice for the current simulation time so the compass
   // directions follow playback instead of remaining fixed at the initial hour.
@@ -985,7 +981,7 @@ export function RouteSimulatorPanel() {
       const elapsed = Math.min(simElapsedHours, r.hours);
       byId[r.id] = {
         frac,
-        weather: weatherAt(r.path, frac, simFactorDef, simBounds, clampHour(elapsed)),
+        weather: weatherAt(r.path, frac, simFactorDef, simBounds, clampHourFrac(elapsed)),
       };
     });
     return byId;
@@ -1004,7 +1000,7 @@ export function RouteSimulatorPanel() {
       posAtHours(selectedRoute, Math.min(selectedRoute.hours, elapsed + 0.5)),
     );
     const get = (id: WeatherFactorId) =>
-      readoutAt(pos, WEATHER_FACTOR_BY_ID[id], simBounds, clampHour(elapsed));
+      readoutAt(pos, WEATHER_FACTOR_BY_ID[id], simBounds, clampHourFrac(elapsed));
     return {
       pos,
       heading,
@@ -1049,12 +1045,30 @@ export function RouteSimulatorPanel() {
   // Drive the map weather layers from the simulation time while playing (or
   // scrubbing), so the on-map weather advances in step with the vessel; hand
   // control back to the manual weather slider when the simulation is idle.
+  // Throttled to a wall-clock cadence (not every animation frame) to bound
+  // how often the field re-renders — the on-map layer rebuilds real vector
+  // contour polygons per update, which is heavier than a plain canvas
+  // repaint, so this is deliberately slower than a UI animation frame rate.
+  // Weather systems evolve over hours, not seconds, so this cadence still
+  // reads as the forecast moving along with the voyage.
   const lastSimHourRef = useRef<number | null>(null);
+  const lastSimHourTsRef = useRef(0);
   useEffect(() => {
     const active = simPlaying || simClock > 0;
-    const next = active ? clampHour(simElapsedHours) : null;
-    if (next !== lastSimHourRef.current) {
+    if (!active) {
+      if (lastSimHourRef.current !== null) {
+        lastSimHourRef.current = null;
+        setSimWeatherHour(null);
+      }
+      return;
+    }
+    const next = Math.max(0, simElapsedHours);
+    const now = performance.now();
+    const changed = lastSimHourRef.current == null || Math.abs(next - lastSimHourRef.current) > 0.05;
+    const due = now - lastSimHourTsRef.current > 200;
+    if (changed && due) {
       lastSimHourRef.current = next;
+      lastSimHourTsRef.current = now;
       setSimWeatherHour(next);
     }
   }, [simPlaying, simClock, simElapsedHours]);

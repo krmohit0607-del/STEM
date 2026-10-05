@@ -16,6 +16,7 @@ import { getAccountTxns } from './accounts';
 import { getBunkerRequirements } from './bunker';
 import { loadOpsRecap } from './opsRecap';
 import { loadEmissionsDoc } from './emissions';
+import { settingsApi } from '../api/settingsApi';
 
 /**
  * A recipient type kept in a template's To / CC field. One of:
@@ -65,6 +66,7 @@ export interface EmailDistributionList {
 }
 
 const DISTRIBUTION_LISTS_KEY = 'fv.emailDistributionLists';
+const DISTRIBUTION_SETTING_KEY = 'emailDistributionLists';
 
 export function loadEmailDistributionLists(): EmailDistributionList[] {
   try {
@@ -86,11 +88,31 @@ export function loadEmailDistributionLists(): EmailDistributionList[] {
 
 export function saveEmailDistributionLists(lists: EmailDistributionList[]): void {
   try { window.localStorage.setItem(DISTRIBUTION_LISTS_KEY, JSON.stringify(lists)); } catch { /* ignore */ }
+  void settingsApi.put(DISTRIBUTION_SETTING_KEY, lists).catch(() => { /* local fallback */ });
+}
+
+async function hydrateEmailDistributionLists(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(DISTRIBUTION_SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as unknown;
+    if (Array.isArray(parsed)) {
+      saveLocalDistributionLists(parsed as EmailDistributionList[]);
+    }
+  } catch {
+    const local = loadEmailDistributionLists();
+    if (local.length) void settingsApi.put(DISTRIBUTION_SETTING_KEY, local).catch(() => { /* unavailable */ });
+  }
+}
+
+function saveLocalDistributionLists(lists: EmailDistributionList[]): void {
+  try { window.localStorage.setItem(DISTRIBUTION_LISTS_KEY, JSON.stringify(lists)); } catch { /* ignore */ }
 }
 
 export function newDistributionListId(): string {
   return `dist-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
+
+void hydrateEmailDistributionLists();
 
 export const EMAIL_TEMPLATE_CATEGORIES = [
   'Voyage Ops',
@@ -430,6 +452,7 @@ export const EMAIL_TEMPLATES: EmailTemplate[] = [
 // over the built-in defaults above, so the seed list can grow over time.
 
 const STORAGE_KEY = 'fv.emailTemplates';
+const TEMPLATE_SETTING_KEY = 'emailTemplates';
 
 export function loadEmailTemplates(): EmailTemplate[] {
   try {
@@ -461,6 +484,22 @@ export function saveEmailTemplates(templates: EmailTemplate[]): void {
   } catch {
     /* storage unavailable — ignore */
   }
+  void settingsApi.put(TEMPLATE_SETTING_KEY, templates).catch(() => { /* local fallback */ });
+}
+
+async function hydrateEmailTemplates(): Promise<void> {
+  try {
+    const setting = await settingsApi.get(TEMPLATE_SETTING_KEY);
+    const parsed = JSON.parse(setting.valueJson) as unknown;
+    if (Array.isArray(parsed) && parsed.every(isEmailTemplate)) saveLocalEmailTemplates(parsed as EmailTemplate[]);
+  } catch {
+    const local = loadEmailTemplates();
+    void settingsApi.put(TEMPLATE_SETTING_KEY, local).catch(() => { /* unavailable */ });
+  }
+}
+
+function saveLocalEmailTemplates(templates: EmailTemplate[]): void {
+  try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(templates)); } catch { /* ignore */ }
 }
 
 export function resetEmailTemplates(): EmailTemplate[] {
@@ -475,6 +514,8 @@ export function resetEmailTemplates(): EmailTemplate[] {
 export function newTemplateId(): string {
   return `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
+
+void hydrateEmailTemplates();
 
 // --- Shared module auto-tokens ----------------------------------------------
 // These fields are available to templates generated from any module. The

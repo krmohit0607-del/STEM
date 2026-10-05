@@ -196,6 +196,14 @@ export function buildEmptyView(): VoyageView {
     slowAheadRpm: '',
     halfAheadRpm: '',
     fullAheadRpm: '',
+    deadSlowSpeedBallast: '',
+    deadSlowSpeedLaden: '',
+    slowAheadSpeedBallast: '',
+    slowAheadSpeedLaden: '',
+    halfAheadSpeedBallast: '',
+    halfAheadSpeedLaden: '',
+    fullAheadSpeedBallast: '',
+    fullAheadSpeedLaden: '',
 
     meType: '',
     meModel: '',
@@ -450,6 +458,16 @@ export function buildView(v: Voyage): VoyageView {
     slowAheadRpm: String(slowAhead),
     halfAheadRpm: String(halfAhead),
     fullAheadRpm: String(fullAhead),
+    // Speed at each telegraph order, scaled off Full Ahead's RPM share; laden
+    // runs ~8% slower than ballast at the same RPM (typical hull loss).
+    deadSlowSpeedBallast: ((deadSlow / fullAhead) * fullSpeed).toFixed(1),
+    deadSlowSpeedLaden: ((deadSlow / fullAhead) * fullSpeed * 0.92).toFixed(1),
+    slowAheadSpeedBallast: ((slowAhead / fullAhead) * fullSpeed).toFixed(1),
+    slowAheadSpeedLaden: ((slowAhead / fullAhead) * fullSpeed * 0.92).toFixed(1),
+    halfAheadSpeedBallast: ((halfAhead / fullAhead) * fullSpeed).toFixed(1),
+    halfAheadSpeedLaden: ((halfAhead / fullAhead) * fullSpeed * 0.92).toFixed(1),
+    fullAheadSpeedBallast: fullSpeed.toFixed(1),
+    fullAheadSpeedLaden: (fullSpeed * 0.92).toFixed(1),
 
     meType: r[29] > 0.5 ? '2-Stroke' : '4-Stroke',
     meModel,

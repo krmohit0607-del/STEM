@@ -3,14 +3,24 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { buildView } from './voyage/buildView';
 import type { Voyage } from '../data/voyages';
+import { useWorldPorts } from '../data/ports';
+import { PortInput } from './PortInput';
+import { VesselSearchInput } from './VesselSearchInput';
 
 /**
- * Voyage Estimation — a side-by-side voyage cost comparison modelled on the
- * operations spreadsheet. Each column is one estimate; the "Add comparison"
- * button appends another column to the right.
+ * Voyage Estimation — a flexible, free-standing speed/cons cost comparison
+ * tool. Each column ("comparison") is one leg the operator describes by hand
+ * (name + Ballast/Laden type, ports, distance, speed, consumption, market
+ * factors) — nothing here is bound to any particular voyage's fixed
+ * itinerary, so the tool can be used to check a hypothetical leg for a future
+ * voyage just as easily as the currently selected one. "Add comparison"
+ * appends another independent leg column.
  *
- * Inputs drive live calculations for corrected speed, duration, ETA (UTC/LT),
- * fuel used, ROB on arrival and the cost breakdown (hire / FO / MGO / EUA).
+ * A leg is either Ballast or Laden, never both at once, so each column shows
+ * only ONE speed/consumption rate for that leg — but both Full and Eco modes
+ * are always computed side-by-side within that same column, so the operator
+ * can directly compare the cost/time outcome of instructing Full vs Eco for
+ * that leg.
  */
 
 const HOUR = 3_600_000;
@@ -62,23 +72,33 @@ function fmtDateDay(ms: number | null): string {
   )} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} ${WEEKDAYS[d.getUTCDay()]}`;
 }
 
-interface Estimate {
+type LegType = 'Ballast' | 'Laden';
+
+interface LegCard {
   id: string;
-  /** Optional column label (e.g. "ECO", "Full") shown in the header. */
-  label?: string;
+  /** Editable column title, e.g. "Leg 1" or a custom name. */
+  name: string;
+  /** A leg is Ballast OR Laden, never both — purely descriptive here. */
+  legType: LegType;
   vesselName: string;
   hirePerDay: string;
   foPrice: string;
   goPrice: string;
   euaPrice: string;
-  consFO: string;
-  consMGO: string;
   portFrom: string;
   portTo: string;
   distNonEca: string;
   distEca: string;
-  speed: string;
   wf: string;
+  /** Full/Eco CP speed (kn) — the one rate that applies to this leg's type. */
+  fullSpeed: string;
+  ecoSpeed: string;
+  /** Full/Eco FO (Main) consumption (MT/day). */
+  fullConsFO: string;
+  ecoConsFO: string;
+  /** Full/Eco MGO (Sub) consumption (MT/day). */
+  fullConsMGO: string;
+  ecoConsMGO: string;
   departure: string;
   timeZone: string;
   robDepFO: string;
@@ -87,23 +107,27 @@ interface Estimate {
   suppliedMGO: string;
 }
 
-let estSeq = 0;
-function makeEstimate(base?: Partial<Estimate>): Estimate {
-  estSeq += 1;
+let legSeq = 0;
+function makeLegCard(base?: Partial<LegCard>): LegCard {
+  legSeq += 1;
   return {
+    legType: 'Laden',
     vesselName: 'ZEYNEP C',
     hirePerDay: '14000',
     foPrice: '620',
     goPrice: '700',
     euaPrice: '0',
-    consFO: '24',
-    consMGO: '0',
     portFrom: 'LUBUK',
     portTo: 'CHITTAGONG',
     distNonEca: '240',
     distEca: '240',
-    speed: '12',
     wf: '0',
+    fullSpeed: '14',
+    ecoSpeed: '12',
+    fullConsFO: '30',
+    ecoConsFO: '24',
+    fullConsMGO: '0',
+    ecoConsMGO: '0',
     departure: '2025-10-12T01:40',
     timeZone: '6',
     robDepFO: '300',
@@ -111,21 +135,23 @@ function makeEstimate(base?: Partial<Estimate>): Estimate {
     suppliedFO: '0',
     suppliedMGO: '0',
     ...base,
-    id: `est-${estSeq}`,
+    name: base?.name ?? `Leg ${legSeq}`,
+    id: `leg-${legSeq}`,
   };
 }
 
 /**
- * Seed an estimate from the currently selected voyage — vessel name, market
- * factors (hire / FO / GO / EUA), fuel consumption, ports, distance and CP
- * speed are pulled from the voyage so the operator starts from real data.
- * Only fields that resolve to a value override the defaults.
+ * Seed one leg card from the currently selected voyage — vessel name, market
+ * factors (hire / FO / GO / EUA), ports, distance and the Full/Eco CP
+ * speed & consumption profile are pulled from the voyage so the operator
+ * starts from real data, but every field stays editable and nothing stays
+ * bound to the voyage afterwards.
  */
-function estimateFromVoyage(voyage: Voyage | undefined): Partial<Estimate> {
+function legCardFromVoyage(voyage: Voyage | undefined): Partial<LegCard> {
   if (!voyage) return {};
   const view = buildView(voyage);
   const totalDist = view.legs.reduce((sum, leg) => sum + num(leg.distanceNm), 0);
-  const base: Partial<Estimate> = {};
+  const base: Partial<LegCard> = {};
   if (voyage.vessel) base.vesselName = voyage.vessel;
   if (view.hireRate) base.hirePerDay = view.hireRate;
   if (view.foPrice) base.foPrice = view.foPrice;
@@ -138,49 +164,26 @@ function estimateFromVoyage(voyage: Voyage | undefined): Partial<Estimate> {
     base.distEca = '0';
   }
   if (voyage.etdIso) base.departure = voyage.etdIso;
-  return base;
-}
-
-/**
- * Default two-column comparison for the selected voyage: an ECO estimate and a
- * Full estimate, each seeded from the voyage's CP speed & cons profile. Common
- * fields (vessel, market factors, ports, distance) are shared; only speed and
- * fuel consumption differ between the columns.
- */
-function estimatesFromVoyage(voyage: Voyage | undefined): Estimate[] {
-  if (!voyage) return [makeEstimate({ label: 'ECO' }), makeEstimate({ label: 'FULL' })];
-  const view = buildView(voyage);
-  const common = estimateFromVoyage(voyage);
   const speedCons = view.legs[0]?.speedCons ?? [];
   const pick = (desc: string) => speedCons.find((r) => r.description === desc);
   const eco = pick('ECO');
   const full = pick('FULL');
-  return [
-    makeEstimate({
-      ...common,
-      label: 'ECO',
-      speed: eco?.speed || String(voyage.cpSpeed || 12),
-      consFO: eco?.dailyCons1 || String(voyage.cpCons || 24),
-      consMGO: eco?.dailyCons2 || '0',
-    }),
-    makeEstimate({
-      ...common,
-      label: 'FULL',
-      speed: full?.speed || String(voyage.instSpeed || voyage.cpSpeed || 14),
-      consFO: full?.dailyCons1 || String(voyage.instCons || voyage.cpCons || 30),
-      consMGO: full?.dailyCons2 || '0',
-    }),
-  ];
+  base.ecoSpeed = eco?.speed || String(voyage.cpSpeed || 12);
+  base.ecoConsFO = eco?.dailyCons1 || String(voyage.cpCons || 24);
+  base.ecoConsMGO = eco?.dailyCons2 || '0';
+  base.fullSpeed = full?.speed || String(voyage.instSpeed || voyage.cpSpeed || 14);
+  base.fullConsFO = full?.dailyCons1 || String(voyage.instCons || voyage.cpCons || 30);
+  base.fullConsMGO = full?.dailyCons2 || '0';
+  return base;
 }
 
-interface Result {
+interface ModeResult {
   corr: number;
   durN: number;
   durE: number;
   days: number;
   etaUtcMs: number | null;
   etaLtMs: number | null;
-  depMs: number | null;
   foUsed: number;
   mgoUsed: number;
   robArrFO: number;
@@ -192,75 +195,86 @@ interface Result {
   total: number;
 }
 
-function compute(e: Estimate): Result {
-  const speed = num(e.speed);
-  const corr = speed * (1 - num(e.wf) / 100);
-  const durN = corr > 0 ? num(e.distNonEca) / corr / 24 : 0;
-  const durE = corr > 0 ? num(e.distEca) / corr / 24 : 0;
+function computeMode(card: LegCard, speed: string, consFO: string, consMGO: string): ModeResult {
+  const sp = num(speed);
+  const corr = sp * (1 - num(card.wf) / 100);
+  const durN = corr > 0 ? num(card.distNonEca) / corr / 24 : 0;
+  const durE = corr > 0 ? num(card.distEca) / corr / 24 : 0;
   const days = durN + durE;
 
-  const depMs = parseDT(e.departure);
+  const depMs = parseDT(card.departure);
   const etaUtcMs = depMs != null ? depMs + days * DAY : null;
-  const etaLtMs = etaUtcMs != null ? etaUtcMs + num(e.timeZone) * HOUR : null;
+  const etaLtMs = etaUtcMs != null ? etaUtcMs + num(card.timeZone) * HOUR : null;
 
   // FO burned outside ECA; inside ECA the same daily rate is met by MGO.
-  const foUsed = num(e.consFO) * durN;
-  const mgoUsed = num(e.consFO) * durE + num(e.consMGO) * days;
+  const foUsed = num(consFO) * durN;
+  const mgoUsed = num(consFO) * durE + num(consMGO) * days;
 
-  const robArrFO = num(e.robDepFO) - foUsed + num(e.suppliedFO);
-  const robArrMGO = num(e.robDepMGO) - mgoUsed + num(e.suppliedMGO);
+  const robArrFO = num(card.robDepFO) - foUsed + num(card.suppliedFO);
+  const robArrMGO = num(card.robDepMGO) - mgoUsed + num(card.suppliedMGO);
 
-  const hireCost = num(e.hirePerDay) * days;
-  const foCost = foUsed * num(e.foPrice);
-  const mgoCost = mgoUsed * num(e.goPrice);
-  const euaCost = (foUsed * FO_CO2 + mgoUsed * MGO_CO2) * num(e.euaPrice);
+  const hireCost = num(card.hirePerDay) * days;
+  const foCost = foUsed * num(card.foPrice);
+  const mgoCost = mgoUsed * num(card.goPrice);
+  const euaCost = (foUsed * FO_CO2 + mgoUsed * MGO_CO2) * num(card.euaPrice);
   const total = hireCost + foCost + mgoCost + euaCost;
 
   return {
-    corr, durN, durE, days, depMs, etaUtcMs, etaLtMs,
+    corr, durN, durE, days, etaUtcMs, etaLtMs,
     foUsed, mgoUsed, robArrFO, robArrMGO,
     hireCost, foCost, mgoCost, euaCost, total,
   };
 }
 
+function computeCard(card: LegCard): { full: ModeResult; eco: ModeResult } {
+  return {
+    full: computeMode(card, card.fullSpeed, card.fullConsFO, card.fullConsMGO),
+    eco: computeMode(card, card.ecoSpeed, card.ecoConsFO, card.ecoConsMGO),
+  };
+}
+
 export function VoyageEstimation() {
   const voyage = useSelectedVoyage();
-  const [estimates, setEstimates] = useState<Estimate[]>(() => estimatesFromVoyage(voyage));
+  const worldPorts = useWorldPorts();
+  const [legs, setLegs] = useState<LegCard[]>(() => [makeLegCard(legCardFromVoyage(voyage))]);
 
-  // Re-seed the ECO / Full comparison whenever the selected voyage changes.
+  // Re-seed a single leg from the selected voyage whenever it changes.
   const voyageId = voyage?.id;
   useEffect(() => {
-    setEstimates(estimatesFromVoyage(voyage));
+    setLegs([makeLegCard(legCardFromVoyage(voyage))]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voyageId]);
 
-  const results = useMemo(() => estimates.map(compute), [estimates]);
+  const results = useMemo(() => legs.map(computeCard), [legs]);
 
-  const setField = (id: string, field: keyof Estimate, value: string) =>
-    setEstimates((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)),
+  const setField = (id: string, field: keyof Omit<LegCard, 'id' | 'legType'>, value: string) =>
+    setLegs((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, [field]: value } : l)),
     );
 
+  const setLegType = (id: string, value: LegType) =>
+    setLegs((prev) => prev.map((l) => (l.id === id ? { ...l, legType: value } : l)));
+
   const addComparison = () =>
-    setEstimates((prev) => [...prev, makeEstimate({ ...prev[prev.length - 1], label: undefined })]);
+    setLegs((prev) => [...prev, makeLegCard({ ...prev[prev.length - 1], name: undefined })]);
 
   const removeComparison = (id: string) =>
-    setEstimates((prev) => (prev.length > 1 ? prev.filter((e) => e.id !== id) : prev));
+    setLegs((prev) => (prev.length > 1 ? prev.filter((l) => l.id !== id) : prev));
 
-  // ── cell renderers ────────────────────────────────────────────────
+  // ── cell renderers ──────────────────────────────────────────────────
   const singleInput = (
-    field: keyof Estimate,
+    field: keyof Omit<LegCard, 'id' | 'legType'>,
     opts?: { num?: boolean; prefix?: string; suffix?: string; type?: string },
   ) =>
-    estimates.map((e) => (
-      <td key={e.id} colSpan={2} className="fv-est__cell">
+    legs.map((l) => (
+      <td key={l.id} colSpan={2} className="fv-est__cell">
         <span className="fv-est__in-wrap">
           {opts?.prefix && <span className="fv-est__affix">{opts.prefix}</span>}
           <input
             className={`fv-est__in${opts?.num ? ' fv-est__in--num' : ''}`}
             type={opts?.type ?? (opts?.num ? 'number' : 'text')}
-            value={e[field]}
-            onChange={(ev) => setField(e.id, field, ev.target.value)}
+            value={l[field]}
+            onChange={(ev) => setField(l.id, field, ev.target.value)}
           />
           {opts?.suffix && <span className="fv-est__affix">{opts.suffix}</span>}
         </span>
@@ -268,46 +282,63 @@ export function VoyageEstimation() {
     ));
 
   const dualInput = (
-    fieldA: keyof Estimate,
-    fieldB: keyof Estimate,
+    fieldA: keyof Omit<LegCard, 'id' | 'legType'>,
+    fieldB: keyof Omit<LegCard, 'id' | 'legType'>,
     opts?: { num?: boolean },
   ) =>
-    estimates.flatMap((e) => [
-      <td key={`${e.id}-a`} className="fv-est__cell">
+    legs.flatMap((l) => [
+      <td key={`${l.id}-a`} className="fv-est__cell">
         <input
           className={`fv-est__in${opts?.num ? ' fv-est__in--num' : ''}`}
           type={opts?.num ? 'number' : 'text'}
-          value={e[fieldA]}
-          onChange={(ev) => setField(e.id, fieldA, ev.target.value)}
+          value={l[fieldA]}
+          onChange={(ev) => setField(l.id, fieldA, ev.target.value)}
         />
       </td>,
-      <td key={`${e.id}-b`} className="fv-est__cell">
+      <td key={`${l.id}-b`} className="fv-est__cell">
         <input
           className={`fv-est__in${opts?.num ? ' fv-est__in--num' : ''}`}
           type={opts?.num ? 'number' : 'text'}
-          value={e[fieldB]}
-          onChange={(ev) => setField(e.id, fieldB, ev.target.value)}
+          value={l[fieldB]}
+          onChange={(ev) => setField(l.id, fieldB, ev.target.value)}
         />
       </td>,
     ]);
 
-  const singleOut = (get: (r: Result) => string) =>
-    estimates.map((e, i) => (
-      <td key={e.id} colSpan={2} className="fv-est__cell fv-est__out">
-        {get(results[i])}
-      </td>
-    ));
-
-  const dualOut = (getA: (r: Result) => string, getB: (r: Result) => string) =>
-    estimates.flatMap((e, i) => [
-      <td key={`${e.id}-a`} className="fv-est__cell fv-est__out">{getA(results[i])}</td>,
-      <td key={`${e.id}-b`} className="fv-est__cell fv-est__out">{getB(results[i])}</td>,
+  /** One accessor applied to both this leg's Full and Eco results. */
+  const modeOut = (get: (r: ModeResult) => string) =>
+    legs.flatMap((l, i) => [
+      <td key={`${l.id}-full`} className="fv-est__cell fv-est__out">{get(results[i].full)}</td>,
+      <td key={`${l.id}-eco`} className="fv-est__cell fv-est__out">{get(results[i].eco)}</td>,
     ]);
 
   const subhead = (a: string, b: string) =>
-    estimates.flatMap((e) => [
-      <th key={`${e.id}-a`} className="fv-est__subhead">{a}</th>,
-      <th key={`${e.id}-b`} className="fv-est__subhead">{b}</th>,
+    legs.flatMap((l) => [
+      <th key={`${l.id}-a`} className="fv-est__subhead">{a}</th>,
+      <th key={`${l.id}-b`} className="fv-est__subhead">{b}</th>,
+    ]);
+
+  /** Vessel Name — search/select against the saved fleet + bundled IMO ship database. */
+  const vesselNameRow = () =>
+    legs.map((l) => (
+      <td key={l.id} colSpan={2} className="fv-est__cell">
+        <VesselSearchInput
+          value={l.vesselName}
+          onChange={(v) => setField(l.id, 'vesselName', v)}
+          placeholder="Vessel name"
+        />
+      </td>
+    ));
+
+  /** Ports — search/select against the World Port Index. */
+  const portsRow = () =>
+    legs.flatMap((l) => [
+      <td key={`${l.id}-a`} className="fv-est__cell">
+        <PortInput value={l.portFrom} onChange={(v) => setField(l.id, 'portFrom', v)} ports={worldPorts} placeholder="From" />
+      </td>,
+      <td key={`${l.id}-b`} className="fv-est__cell">
+        <PortInput value={l.portTo} onChange={(v) => setField(l.id, 'portTo', v)} ports={worldPorts} placeholder="To" />
+      </td>,
     ]);
 
   return (
@@ -317,14 +348,28 @@ export function VoyageEstimation() {
           <thead>
             <tr>
               <th className="fv-est__corner" />
-              {estimates.map((e, i) => (
-                <th key={e.id} colSpan={2} className="fv-est__est-head">
-                  <span>{e.label ? `${e.label} — Estimate ${i + 1}` : `Estimate ${i + 1}`}</span>
-                  {estimates.length > 1 && (
+              {legs.map((l) => (
+                <th key={l.id} colSpan={2} className="fv-est__est-head">
+                  <input
+                    className="fv-est__in"
+                    style={{ width: 96, marginRight: 6 }}
+                    value={l.name}
+                    onChange={(ev) => setField(l.id, 'name', ev.target.value)}
+                  />
+                  <select
+                    className="fv-est__in"
+                    style={{ width: 82, display: 'inline-block', marginRight: 4 }}
+                    value={l.legType}
+                    onChange={(ev) => setLegType(l.id, ev.target.value as LegType)}
+                  >
+                    <option value="Ballast">Ballast</option>
+                    <option value="Laden">Laden</option>
+                  </select>
+                  {legs.length > 1 && (
                     <button
                       type="button"
                       className="fv-est__remove"
-                      onClick={() => removeComparison(e.id)}
+                      onClick={() => removeComparison(l.id)}
                       title="Remove comparison"
                       aria-label="Remove comparison"
                     >
@@ -336,45 +381,47 @@ export function VoyageEstimation() {
             </tr>
           </thead>
           <tbody>
-            <tr><td className="fv-est__label">Vessel Name</td>{singleInput('vesselName')}</tr>
+            <tr><td className="fv-est__label">Vessel Name</td>{vesselNameRow()}</tr>
             <tr><td className="fv-est__label">Hire Per Day</td>{singleInput('hirePerDay', { num: true, prefix: '$' })}</tr>
             <tr><td className="fv-est__label">FO Price /MT</td>{singleInput('foPrice', { num: true, prefix: '$' })}</tr>
             <tr><td className="fv-est__label">GO Price /MT</td>{singleInput('goPrice', { num: true, prefix: '$' })}</tr>
             <tr><td className="fv-est__label">EUA Price /tCO₂</td>{singleInput('euaPrice', { num: true, prefix: '$' })}</tr>
 
-            <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('FO', 'MGO')}</tr>
-            <tr><td className="fv-est__label">Fuel Cons / Day</td>{dualInput('consFO', 'consMGO', { num: true })}</tr>
-
             <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('From', 'To')}</tr>
-            <tr><td className="fv-est__label">Ports</td>{dualInput('portFrom', 'portTo')}</tr>
+            <tr><td className="fv-est__label">Ports</td>{portsRow()}</tr>
 
             <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('Non-ECA', 'ECA')}</tr>
             <tr><td className="fv-est__label">Distance</td>{dualInput('distNonEca', 'distEca', { num: true })}</tr>
 
-            <tr><td className="fv-est__label">Speed</td>{singleInput('speed', { num: true })}</tr>
             <tr><td className="fv-est__label">W.F</td>{singleInput('wf', { num: true, suffix: '%' })}</tr>
-            <tr><td className="fv-est__label">Corr. Speed W.F</td>{singleOut((r) => fmt(r.corr))}</tr>
 
-            <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('Non-ECA', 'ECA')}</tr>
-            <tr><td className="fv-est__label">Duration</td>{dualOut((r) => fmt(r.durN), (r) => fmt(r.durE))}</tr>
-            <tr><td className="fv-est__label">Days</td>{singleOut((r) => fmt(r.days))}</tr>
+            <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('Full', 'Eco')}</tr>
+            <tr><td className="fv-est__label">CP Speed</td>{dualInput('fullSpeed', 'ecoSpeed', { num: true })}</tr>
+            <tr><td className="fv-est__label">Speed after W.F</td>{modeOut((r) => fmt(r.corr))}</tr>
+            <tr><td className="fv-est__label">FO Cons / Day</td>{dualInput('fullConsFO', 'ecoConsFO', { num: true })}</tr>
+            <tr><td className="fv-est__label">MGO Cons / Day</td>{dualInput('fullConsMGO', 'ecoConsMGO', { num: true })}</tr>
+            <tr><td className="fv-est__label">Days</td>{modeOut((r) => fmt(r.days))}</tr>
+            <tr><td className="fv-est__label">FO Used</td>{modeOut((r) => fmt(r.foUsed, 3))}</tr>
+            <tr><td className="fv-est__label">MGO Used</td>{modeOut((r) => fmt(r.mgoUsed, 3))}</tr>
 
             <tr><td className="fv-est__label">Departure</td>{singleInput('departure', { type: 'datetime-local' })}</tr>
-            <tr><td className="fv-est__label">ETA — UTC</td>{singleOut((r) => fmtDateDay(r.etaUtcMs))}</tr>
+            <tr><td className="fv-est__label">ETA — UTC</td>{modeOut((r) => fmtDateDay(r.etaUtcMs))}</tr>
             <tr><td className="fv-est__label">Time Zone</td>{singleInput('timeZone', { num: true })}</tr>
-            <tr><td className="fv-est__label">ETA — LT</td>{singleOut((r) => fmtDateDay(r.etaLtMs))}</tr>
+            <tr><td className="fv-est__label">ETA — LT</td>{modeOut((r) => fmtDateDay(r.etaLtMs))}</tr>
 
             <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('FO', 'MGO')}</tr>
             <tr><td className="fv-est__label">ROB on Dep</td>{dualInput('robDepFO', 'robDepMGO', { num: true })}</tr>
-            <tr><td className="fv-est__label">Fuel Used</td>{dualOut((r) => fmt(r.foUsed, 3), (r) => fmt(r.mgoUsed, 3))}</tr>
             <tr><td className="fv-est__label">Fuel Supplied</td>{dualInput('suppliedFO', 'suppliedMGO', { num: true })}</tr>
-            <tr><td className="fv-est__label">ROB on Arrival</td>{dualOut((r) => fmt(r.robArrFO, 3), (r) => fmt(r.robArrMGO, 3))}</tr>
 
-            <tr><td className="fv-est__label">Hire Cost</td>{singleOut((r) => money(r.hireCost))}</tr>
-            <tr><td className="fv-est__label">FO Cost</td>{singleOut((r) => money(r.foCost))}</tr>
-            <tr><td className="fv-est__label">MGO Cost</td>{singleOut((r) => money(r.mgoCost))}</tr>
-            <tr><td className="fv-est__label">EUA Cost</td>{singleOut((r) => money(r.euaCost))}</tr>
-            <tr className="fv-est__total"><td className="fv-est__label">Total Costs</td>{singleOut((r) => money(r.total))}</tr>
+            <tr className="fv-est__subrow"><td className="fv-est__label" />{subhead('Full', 'Eco')}</tr>
+            <tr><td className="fv-est__label">ROB FO on Arrival</td>{modeOut((r) => fmt(r.robArrFO, 3))}</tr>
+            <tr><td className="fv-est__label">ROB MGO on Arrival</td>{modeOut((r) => fmt(r.robArrMGO, 3))}</tr>
+
+            <tr><td className="fv-est__label">Hire Cost</td>{modeOut((r) => money(r.hireCost))}</tr>
+            <tr><td className="fv-est__label">FO Cost</td>{modeOut((r) => money(r.foCost))}</tr>
+            <tr><td className="fv-est__label">MGO Cost</td>{modeOut((r) => money(r.mgoCost))}</tr>
+            <tr><td className="fv-est__label">EUA Cost</td>{modeOut((r) => money(r.euaCost))}</tr>
+            <tr className="fv-est__total"><td className="fv-est__label">Total Costs</td>{modeOut((r) => money(r.total))}</tr>
           </tbody>
         </table>
       </div>
@@ -386,3 +433,4 @@ export function VoyageEstimation() {
     </div>
   );
 }
+

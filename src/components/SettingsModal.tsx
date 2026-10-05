@@ -30,12 +30,16 @@ import {
   CLIENT_ROLES,
   ODAS_PICS,
   SERVICE_PROVIDER_TYPES,
+  clientToCreateDto,
+  clientToUpdateDto,
   loadClients,
   newClientId,
   resetClients,
   saveClients,
+  syncClientsFromBackend,
   type Client,
 } from '../data/clients';
+import { clientsApi } from '../api/clientsApi';
 import { VesselsPanel } from './VesselsPanel';
 import { useWorkflowConfig, setWorkflowConfig } from '../data/workflowConfig';
 import {
@@ -909,6 +913,12 @@ function ClientsPanel({ kind }: { kind: Client['kind'] }) {
     saveClients(clients);
   }, [clients]);
 
+  useEffect(() => {
+    void syncClientsFromBackend().then((list) => {
+      if (list && list.length > 0) setClients(list);
+    });
+  }, []);
+
   const ofKind = clients.filter((c) => (c.kind ?? 'Account') === kind);
   const q = query.trim().toLowerCase();
   const filtered = q
@@ -967,8 +977,14 @@ function ClientsPanel({ kind }: { kind: Client['kind'] }) {
 
   const deleteClient = (id: string) => {
     if (!window.confirm(t('confirmDeleteAccount', `Delete this ${noun}?`))) return;
+    const toDelete = clients.find((x) => x.id === id);
     setClients((prev) => prev.filter((x) => x.id !== id));
     setEditing((e) => (e && e.id === id ? null : e));
+    if (!toDelete || toDelete.id.startsWith('cl-')) return; // local-only, never reached the backend
+    void clientsApi.delete(id).catch(() => {
+      // Restore on failure so the record isn't silently lost from view.
+      setClients((prev) => [...prev, toDelete]);
+    });
   };
 
   const saveEditing = () => {
@@ -990,12 +1006,27 @@ function ClientsPanel({ kind }: { kind: Client['kind'] }) {
       pic: editing.pic,
       bankAccount: editing.bankAccount ?? { verified: false, details: '', bankName: '', accountHolder: '', accountNumber: '', swift: '', iban: '' },
     };
+    const isExisting = Boolean(editing.id && !editing.id.startsWith('cl-'));
     setClients((prev) => {
       if (editing.id) {
         return prev.map((x) => (x.id === editing.id ? next : x));
       }
       return [{ ...next, id: newClientId() }, ...prev];
     });
+    void (async () => {
+      try {
+        if (isExisting && editing.id) {
+          await clientsApi.update(editing.id, clientToUpdateDto(next));
+        } else {
+          const res = await clientsApi.create(clientToCreateDto(next));
+          if (res?.id) {
+            setClients((prev) => prev.map((x) => (x.name === next.name && x.id.startsWith('cl-') ? { ...x, id: res.id } : x)));
+          }
+        }
+      } catch {
+        /* local state fallback — stays in the browser cache until the next sync */
+      }
+    })();
     setEditing(null);
   };
 

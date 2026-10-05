@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Circle, MapContainer, Marker, Polyline, TileLayer, Tooltip, useMapEvents } from 'react-leaflet';
-import L from 'leaflet';
+import L, { type LatLngBoundsLiteral } from 'leaflet';
 
 import { resolveWorldPort, useWorldPorts, type WorldPort } from '../data/ports';
 import { useSavedPorts } from '../data/savedPorts';
@@ -8,10 +8,20 @@ import { bumpSavedRoutes } from '../data/optimizationStore';
 import { setActiveSimRoute } from '../data/routeSimulatorStore';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
-import { MapLayersControl, readMapLayerId, type MapLayerId } from './MapLayersControl';
+import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
+
+// Clamp vertical panning so the grey area past the poles never shows; wide
+// enough horizontally that worldCopyJump's wrap is never cut off.
+const WORLD_BOUNDS: LatLngBoundsLiteral = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
 
 interface RouteOption {
   id: string;
@@ -112,6 +122,7 @@ export function RouteExplorerSearchPage() {
   const [savedPassageMatched, setSavedPassageMatched] = useState(false);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [baseLayer, setBaseLayer] = useState<MapLayerId>(() => readMapLayerId());
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
   const [savedPassages, setSavedPassages] = useState<SavedPassage[]>(() => loadSavedPassages());
   const [mode, setMode] = useState<'search' | 'create'>('search');
   const [createdPoints, setCreatedPoints] = useState<[number, number][]>([]);
@@ -322,7 +333,7 @@ export function RouteExplorerSearchPage() {
       <div className="fv-route-explorer__results">{results.map((route) => <article key={route.id} className="fv-route-explorer__result"><div><strong>{route.from.code || route.from.name} to {route.to.code || route.to.name}</strong><small>{route.source} · {route.distanceNm.toLocaleString()} NM</small><small>{route.from.name} → {route.to.name}</small></div><div><button type="button" title="Add route to voyage" onClick={() => addToVoyage(route)}><i className="fas fa-plus" /></button><button type="button" title="Download route" onClick={() => download(route)}><i className="fas fa-download" /></button></div></article>)}</div>
       </>}
     </aside>
-    <main className="fv-route-explorer__map"><MapContainer center={[18, 105]} zoom={3} minZoom={2} style={{ height: '100%', width: '100%' }} worldCopyJump>
+    <main className="fv-route-explorer__map"><MapContainer center={[18, 105]} zoom={3} minZoom={2} maxBounds={WORLD_BOUNDS} maxBoundsViscosity={1.0} style={{ height: '100%', width: '100%' }} worldCopyJump>
       {mode === 'create' && <CreateRouteClickHandler onAdd={(point) => setCreatedPoints((current) => [...current, point])} />}
       {baseLayer === 'satellite' ? (
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" attribution="Tiles &copy; Esri" />
@@ -331,7 +342,7 @@ export function RouteExplorerSearchPage() {
       ) : (
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
       )}
-      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} /><WeatherFieldControl position="topright" /><AreaConstraintsControl position="topright" /><WeatherPointControl position="topright" /><PortsControl position="topright" /><RulerControl position="topright" />
+      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />{overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}<WeatherFieldControl position="topright" /><AreaConstraintsControl position="topright" /><WeatherPointControl position="topright" /><PortsControl position="topright" /><RulerControl position="topright" /><CycloneLayer position="topright" /><WeatherAlertsControl position="topright" />
       {showNearbyCircle && <Circle center={[nearbyCenter.lat, nearbyCenter.lon]} radius={radius * 1852} pathOptions={{ color: '#aeb7c5', weight: 1, fillColor: '#d8dee8', fillOpacity: 0.13, dashArray: '4 4' }} />}
       {mapFrom && <Marker position={[mapFrom.lat, mapFrom.lon]} icon={systemPortIcon()}><Tooltip>{mapFrom.name}</Tooltip></Marker>}
       {mapTo && (!mapFrom || mapFrom.lat !== mapTo.lat || mapFrom.lon !== mapTo.lon) && <Marker position={[mapTo.lat, mapTo.lon]} icon={systemPortIcon()}><Tooltip>{mapTo.name}</Tooltip></Marker>}

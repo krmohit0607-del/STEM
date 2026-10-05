@@ -1,19 +1,11 @@
-import { useSyncExternalStore } from 'react';
+import { useSyncExternalStore, useEffect } from 'react';
+import { voyagesApi, type BackendVoyageDto } from '../api/voyagesApi';
 
 /**
  * Shared voyage dataset — the single source of truth that links every
  * page together.
  *
- * The Fleet List View (`/main`) renders one grid row per voyage. Clicking
- * a vessel navigates to `/voyage?voyage=<id>` and stores the selection
- * (see `selectedVoyage.ts`). The Voyage Details, Interim Dashboard,
- * Tracksheet (bottom panel) and Route Explorer / Simulator pages all
- * resolve the same `Voyage` by id, so the whole shell stays focused on
- * the vessel the user picked.
- *
- * Replace `VOYAGES` with the real `/api/voyage/list` payload when the
- * endpoint is exposed for the React app — keep the `id` stable so the
- * cross-page linking keeps working.
+ * Linked with ASP.NET Core Web API `/api/voyages`.
  */
 
 export type Priority = 'HIGH' | 'MEDIUM' | 'LOW';
@@ -78,7 +70,7 @@ export interface Voyage {
   seed: number;
 }
 
-export const VOYAGES: Voyage[] = [
+export const VOYAGES: Voyage[] = []; /*
   {
     id: 'OPT001',
     priority: 'HIGH',
@@ -589,7 +581,7 @@ export const VOYAGES: Voyage[] = [
     euaCost: 74.5,
     seed: 10,
   },
-];
+]; */
 
 const CREATED_VOYAGES_KEY = 'fv.createdVoyages';
 let createdVoyages: Voyage[] = readCreatedVoyages();
@@ -700,11 +692,81 @@ function subscribeVoyages(listener: () => void): () => void {
   return () => voyageListeners.delete(listener);
 }
 
+function mapBackendDtoToVoyage(dto: BackendVoyageDto): Voyage {
+  return {
+    id: dto.voyageCode || dto.id,
+    priority: (dto.priority?.toUpperCase() as Priority) || 'MEDIUM',
+    dueLt: dto.dueLt ?? 900,
+    dueUtc: dto.dueUtc ?? 300,
+    remaining: dto.remaining ?? '01:00',
+    vessel: dto.vesselName,
+    pic: dto.pic ?? 'You',
+    client: dto.client ?? 'Client',
+    service: dto.service ?? 'PMO',
+    status: dto.status ?? 'At Sea',
+    portFrom: dto.portFrom,
+    portTo: dto.portTo,
+    eta: dto.etaDisplay ?? 'On Schedule',
+    lastNoon: dto.lastNoon ?? '0600 UTC',
+    wx: 'Y',
+    int: 'Y',
+    eov: 'N',
+    opt: 'Y',
+    openTasks: dto.openTasks ?? 0,
+    tags: dto.tags ?? '',
+    aiAlert: dto.aiAlert ?? 'None',
+    health: dto.health ?? 85,
+    handoverNote: dto.handoverNote ?? '',
+    open: dto.openStatus ?? 'OPEN',
+    imo: dto.imo ?? '9417878',
+    vesselType: dto.vesselType ?? 'Bulk Carrier',
+    flag: dto.flag ?? 'Singapore',
+    dwt: dto.dwt ?? '80,000 MT',
+    built: dto.built || 2018,
+    loa: dto.loa ?? '225 m',
+    beam: dto.beam ?? '32 m',
+    enginePower: dto.enginePower ?? '9,000 kW',
+    clientEmail: dto.clientEmail ?? '',
+    price: dto.price ?? 15000,
+    pricingBasis: dto.pricingBasis ?? 'Per Day',
+    ecdisModel: 'JRC JAN-9201',
+    interimPort: dto.interimPort ?? '',
+    etdDisplay: dto.etdDisplay ?? '',
+    etdIso: dto.etd ?? '',
+    routeRef: dto.routeRef ?? 'BL-001',
+    cpSpeed: dto.cpSpeed ?? 13,
+    cpCons: dto.cpCons ?? 30,
+    instSpeed: dto.instSpeed ?? 13.5,
+    instCons: dto.instCons ?? 29.5,
+    costPerDay: dto.costPerDay ?? 50000,
+    foCost: dto.foCost ?? 760,
+    goCost: dto.goCost ?? 1100,
+    euaCost: dto.euaCost ?? 74.5,
+    seed: 1,
+  };
+}
+
+export async function syncVoyagesFromBackend(): Promise<Voyage[]> {
+  try {
+    const backendItems = await voyagesApi.list();
+    const mapped = (backendItems ?? []).map(mapBackendDtoToVoyage);
+    voyagesSnapshot = mergeVoyages(mapped, createdVoyages);
+    voyageListeners.forEach((l) => l());
+    return voyagesSnapshot;
+  } catch {
+    // If backend not reachable or unauthenticated, keeps in-memory snapshot
+  }
+  return voyagesSnapshot;
+}
+
 export function getVoyages(): Voyage[] {
   return voyagesSnapshot;
 }
 
 export function useVoyages(): Voyage[] {
+  useEffect(() => {
+    void syncVoyagesFromBackend();
+  }, []);
   return useSyncExternalStore(subscribeVoyages, getVoyages, getVoyages);
 }
 
@@ -723,6 +785,32 @@ export function upsertCreatedVoyage(patch: Partial<Voyage>): Voyage {
   } else {
     writeCreatedVoyages([merged, ...createdVoyages]);
   }
+
+  // Push to backend asynchronously
+  void (async () => {
+    try {
+      await voyagesApi.create({
+        voyageCode: merged.id,
+        vesselName: merged.vessel,
+        imo: merged.imo,
+        portFrom: merged.portFrom,
+        portTo: merged.portTo,
+        status: merged.status,
+        priority: merged.priority,
+        client: merged.client,
+        service: merged.service,
+        etdDisplay: merged.etdDisplay,
+        etaDisplay: merged.eta,
+        handoverNote: merged.handoverNote,
+        tags: merged.tags,
+        aiAlert: merged.aiAlert,
+        health: merged.health,
+      });
+    } catch {
+      // Local fallback persists
+    }
+  })();
+
   return merged;
 }
 

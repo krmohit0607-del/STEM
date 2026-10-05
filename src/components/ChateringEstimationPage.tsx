@@ -7,20 +7,25 @@ import type { Voyage } from '../data/voyages';
 import { VOYAGES, makeBlankVoyage, upsertCreatedVoyage } from '../data/voyages';
 import { useWorldPorts, resolveWorldPort } from '../data/ports';
 import { accountNames } from '../data/clients';
-import { loadVessels } from '../data/vessels';
+import { useVessels } from '../data/vessels';
+import { cargoStowageFactor } from '../data/cargoMaster';
 import { VesselSearchInput } from './VesselSearchInput';
 import { ModuleVesselSearch } from './ModuleVesselSearch';
 import { EstimationRouteMap } from './EstimationRouteMap';
 import { generateSeaRoute } from '../data/seaRoute';
-import { upsertSavedEstimate, getSavedEstimate, setSavedEstimateStatus, nextEstimateNo } from '../data/savedEstimates';
+import { upsertSavedEstimate, getSavedEstimate, setSavedEstimateStatus, deleteSavedEstimate, nextEstimateNo } from '../data/savedEstimates';
 import { VESSEL_TEMPLATES, type VesselTemplate } from '../data/vesselTemplates';
 import { setEstimationStatus, setEstimationFixType, makeFixtureNo, setFixtureNumber, handoverToOperations, addNotification, useHandedOver, setCpdd, useCpdds, estStatusLabel } from '../data/workflow';
 import {
   defaultQtyUnitForVessel,
   defaultFreightUnit,
+  PORT_TYPE_OPTIONS,
   useEstimationOptions,
 } from '../data/estimationOptions';
 import { NoVesselSelected } from './NoVesselSelected';
+import { ConfirmationDialog } from './ConfirmationDialog';
+import { useAutoSaveEstimate, findBestMatchPort, normalizePortName } from '../hooks/useCharteringCalcuations';
+import { charteringApi } from '../api/charteringApi';
 
 /**
  * Chartering — Voyage Estimation (Netpas-style calculation sheet).
@@ -84,10 +89,21 @@ interface Performance {
   full: SpeedSet;
   eco: SpeedSet;
   customs: CustomSpeed[];
-  mainNormal: MainCons;
-  mainEca: MainCons;
-  subNormal: SubCons;
-  subEca: SubCons;
+  // FULL mode consumption
+  fullMainNormal: MainCons;
+  fullMainEca: MainCons;
+  fullSubNormal: SubCons;
+  fullSubEca: SubCons;
+  // ECO mode consumption
+  ecoMainNormal: MainCons;
+  ecoMainEca: MainCons;
+  ecoSubNormal: SubCons;
+  ecoSubEca: SubCons;
+  // CUSTOM mode consumption
+  customMainNormal: MainCons;
+  customMainEca: MainCons;
+  customSubNormal: SubCons;
+  customSubEca: SubCons;
 }
 
 interface Cargo {
@@ -116,13 +132,13 @@ interface PortRow {
   wf: number;
   speed: number;
   ldRate: number;
-  idle: number;
+  idle: number; // Turn time / free time allowance (excluded from laytime, but counts toward hire)
   work: number;
   seaManual: number;
   dem: number;
   des: number;
   portCharge: number;
-  laytimeTerm: string;
+  laytimeTerm: string; // SHINC, SHEX, SHEX SXUI, etc. - determines exclusions automatically
   rateUnit: string;
 }
 
@@ -289,7 +305,7 @@ function scenarioResult(base: EstimateInputs, sc: Scenario): EstimateResult {
   if (sc.basis === 'vessel') {
     i.perf.speedMode = 'Full';
     i.perf.full = { ballast: sc.ballastSpeed, laden: sc.ladenSpeed };
-    i.perf.mainNormal = { ...i.perf.mainNormal, ballast: sc.foBallast, laden: sc.foLaden };
+    i.perf.fullMainNormal = { ...i.perf.fullMainNormal, ballast: sc.foBallast, laden: sc.foLaden };
     i.ports = i.ports.map((p) => ({
       ...p,
       speed:
@@ -447,8 +463,8 @@ function parseLadenBallastPair(section: string): {
   ballastFo?: number;
   ballastMgo?: number;
 } {
-  const laden = section.match(/LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[^\n]*ON\s*ABOUT\s*([\d.]+)\s*MT[^\n]*\+\s*ABOUT\s*([\d.]+)\s*MT/i);
-  const ballast = section.match(/BALLAST\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[^\n]*ON\s*ABOUT\s*([\d.]+)\s*MT[^\n]*\+\s*ABOUT\s*([\d.]+)\s*MT/i);
+  const laden = section.match(/LADEN\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT[\s\S]*?\+\s*ABOUT\s*([\d.]+)\s*MT/i);
+  const ballast = section.match(/BALLAST\s*:\s*ABOUT\s*([\d.]+)\s*KNOTS[\s\S]*?ON\s*ABOUT\s*([\d.]+)\s*MT[\s\S]*?\+\s*ABOUT\s*([\d.]+)\s*MT/i);
   return {
     ladenSpeed: readNumber(laden?.[1]),
     ladenFo: readNumber(laden?.[2]),
@@ -467,8 +483,15 @@ function parseEstimatePaste(text: string): ParsedPasteDraft {
     dischargeRates: {},
   };
 
-  const vesselName = src.match(/\n\s*([A-Z][A-Z0-9 .'-]{2,})\s*\n\s*BUILT\b/i)?.[1]?.trim();
+  // Try to find vessel name near BUILT line or before TYPE line
+  let vesselName = src.match(/\n\s*([A-Z][A-Z0-9 .'-]{2,})\s*\n\s*BUILT\b/i)?.[1]?.trim();
+  if (!vesselName) {
+    // Fallback: look for a substantial word before TYPE line
+    const typeMatch = src.match(/\n\s*([A-Z][A-Z0-9 .'-]{2,})\s*\n\s*TYPE\s*:/i);
+    vesselName = typeMatch?.[1]?.trim();
+  }
   if (vesselName) out.vesselName = vesselName;
+
   out.built = readNumber(src.match(/\bBUILT\s*(\d{4})\b/i)?.[1]);
   out.vesselType = src.match(/\bTYPE\s*:\s*([^\n]+)/i)?.[1]?.trim();
   out.tpc = readNumber(src.match(/\bTPC\s*:\s*([\d.,]+)/i)?.[1]);
@@ -514,25 +537,30 @@ function parseEstimatePaste(text: string): ParsedPasteDraft {
   const dischPortOptions = [...src.matchAll(/[A-Z]\)\s*[^\n\-]*-\s*([^\n]+)/gi)].map((m) => squeezePortName(m[1])).filter(Boolean);
   out.dischargePorts = Array.from(new Set(dischPortOptions));
 
-  out.loadRate = readNumber(src.match(/LOAD\s+RATE[\s\S]{0,140}?-\s*([\d,]+(?:\.\d+)?)\s*MT/i)?.[1]);
-  for (const m of src.matchAll(/\b(PARADIP|GOPALPUR|GANGAVARAM)\s*-\s*([\d,]+(?:\.\d+)?)\s*MT/gi)) {
-    out.dischargeRates[keyPortName(prettyPortName(m[1]))] = readNumber(m[2]) ?? 0;
+  // Load rate: match "LOAD RATE" section, look for first number-MT pattern
+  const loadRateSection = src.match(/LOAD\s+RATE\s*:\s*([\s\S]{0,300})/i)?.[1] ?? '';
+  out.loadRate = readNumber(loadRateSection.match(/([\d,]+(?:\.\d+)?)\s*MT\s*P/i)?.[1]);
+
+  // Discharge rates: match any port name followed by dash and MT quantity
+  // Look for lines like "PARADIP-15,000 MT" or "VPT BERTH, VIZAG-15,000 MT"
+  const dischRateSection = src.match(/DISCHARGE\s+RATE\s*:\s*([\s\S]{0,1000})/i)?.[1] ?? '';
+  const dischRateMatches = [...dischRateSection.matchAll(/([A-Z][A-Z0-9, .]*?)[\s–-]+(\d{1,3}(?:,\d{3})?(?:\.\d+)?)\s*MT\s*PW/gi)];
+  for (const m of dischRateMatches) {
+    const portName = prettyPortName(m[1]);
+    const rate = readNumber(m[2]);
+    if (portName && rate) {
+      out.dischargeRates[keyPortName(portName)] = rate;
+    }
   }
 
-  out.freightRate = readNumber(src.match(/FREIGHT\s+RATE[^\n:]*:\s*[^\d\n]*([\d]+(?:\.\d+)?)/i)?.[1]);
+  // Freight rate: capture first USD rate value from FREIGHT RATE section
+  const freightSection = src.match(/FREIGHT\s+RATE\s*:\s*([\s\S]{0,500})/i)?.[1] ?? '';
+  out.freightRate = readNumber(freightSection.match(/USD\s*(\d+(?:\.\d+)?)/i)?.[1]);
+
   out.demurrage = readNumber(src.match(/DEM\/?DSP[^\n:]*:\s*USD\s*([\d,]+(?:\.\d+)?)/i)?.[1]);
   if (typeof out.demurrage === 'number' && out.demurrage > 0) out.despatch = out.demurrage / 2;
 
   return out;
-}
-
-function isBlankEstimationDraft(inputs: EstimateInputs, vessel: VesselParticular): boolean {
-  const hasVessel = Boolean(vessel.name.trim()) || vessel.dwt > 0 || vessel.built > 0 || vessel.tpc > 0;
-  const hasCargo = inputs.cargoes.some((c) =>
-    c.name.trim() || c.loadPort.trim() || c.dischPort.trim() || c.quantity > 0 || c.frt > 0,
-  );
-  const hasPorts = inputs.ports.some((p) => p.port.trim() || p.distance > 0 || p.ldRate > 0);
-  return !hasVessel && !hasCargo && !hasPorts;
 }
 
 /** Great-circle distance between two lat/lon points, in nautical miles. */
@@ -591,7 +619,10 @@ function ToolModal({
 
 /** Normalise a port name (strip "<Country>" / "(code)") for cargo↔port matching. */
 function cleanPortName(s: string): string {
-  return s.split('<')[0].split('(')[0].trim().toLowerCase();
+  // Remove country/state info after comma, parentheses, or angle brackets
+  // E.g., "VISHAKHAPATNAM, INDIA" → "VISHAKHAPATNAM"
+  //       "PORT (CODE)" → "PORT"
+  return s.split(',')[0].split('<')[0].split('(')[0].trim().toLowerCase();
 }
 
 /**
@@ -666,7 +697,7 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
   let portCharge = 0;
   let demTotal = 0;
   let desTotal = 0;
-  let foNormalSea = 0;
+  let foSea = 0;
   let foEcaSea = 0;
   let foPort = 0;
   let mgoSea = 0;
@@ -678,7 +709,26 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
   const perLeg: LegCalc[] = [];
   const handled = portHandledQty(ports, cargoes);
 
-  for (const p of ports) {
+  // Track cargo on board: determine after each port if cargo remains
+  const cargoOnBoardAfter: boolean[] = [];
+  let cargoRemaining = 0;
+  for (let idx = 0; idx < ports.length; idx++) {
+    const p = ports[idx];
+    const isLoading = p.type === 'Loading' || p.type === 'Part Loading' || 
+                      (p.type === 'Ballast' && (handled[p.id] ?? 0) > 0); // Ballast type with cargo = loading
+    const isDischarging = p.type === 'Discharging' || p.type === 'Part Discharging';
+    
+    if (isLoading) {
+      cargoRemaining += handled[p.id] ?? 0;
+    } else if (isDischarging) {
+      cargoRemaining -= handled[p.id] ?? 0;
+    }
+    
+    cargoOnBoardAfter[idx] = cargoRemaining > 0;
+  }
+
+  for (let portIdx = 0; portIdx < ports.length; portIdx++) {
+    const p = ports[portIdx];
     const spd = p.speed > 0 ? p.speed : 12;
     // Weather margin reduces the effective speed used for the leg time.
     const effSpeed = Math.max(0.1, spd * (1 - p.wf / 100));
@@ -694,35 +744,97 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
       legEca = 0;
     }
     const normalSea = Math.max(0, legSea - legEca);
-    const isBallast = p.type === 'Ballast' || p.type === 'Delivery' || p.type === 'Redelivery';
-    // Working days: from L/D rate + cargo when a rate is set, else manual.
-    const work = portWorkDays(p, handled[p.id] ?? 0);
-
-    // Demurrage / despatch from laytime: allowed (qty ÷ rate) vs used (idle + work).
-    // p.dem holds the demurrage rate ($/day); despatch is at half rate.
-    let legDem = 0;
-    let legDes = 0;
+    
+    // Determine if the LEG TO this port is ballast or laden
+    // The cargo status at the START of the leg (after processing the previous port)
+    // determines whether this leg is ballast or laden
+    const cargoOnBoardAtStartOfLeg = portIdx > 0 ? cargoOnBoardAfter[portIdx - 1] : false;
+    const isLadenLeg = cargoOnBoardAtStartOfLeg;
+    
+    // Working days: ALWAYS calculated from L/D rate + cargo when available, else manual.
     const ratePerDay = /hour/i.test(p.rateUnit) ? p.ldRate * 24 : p.ldRate;
     const qtyHandled = handled[p.id] ?? 0;
-    if (ratePerDay > 0 && qtyHandled > 0 && p.dem > 0) {
-      const allowed = qtyHandled / ratePerDay;
-      const used = p.idle + work;
-      const balance = allowed - used;
-      if (balance < 0) legDem = -balance * p.dem; // exceeded laytime → demurrage (income)
-      else legDes = balance * (p.dem / 2); // saved laytime → despatch (cost, half rate)
+    const work = portWorkDays(p, qtyHandled);
+
+    // Demurrage / despatch calculation for estimation:
+    // Step 1: Allowed Laytime = Cargo Quantity ÷ L/D Rate (contract allowance)
+    // Step 2: Working Days (W days) = Calculated from L/D rate + cargo
+    // Step 3: Idle Time = Delays, stoppages, weather, shifting, etc. (ADDS to working time)
+    // Step 4: Effective Working Time = W days + Idle (total time actually used)
+    // Step 5: Calculate Dem/Des
+    //   Balance = Allowed - Effective Working Time
+    //   If Balance > 0: Despatch (finished early)
+    //   If Balance < 0: Demurrage (took longer than allowed)
+    
+    let legDem = 0;
+    let legDes = 0;
+    
+    // ALWAYS calculate dem/des if demurrage rate is set
+    if (p.dem > 0) {
+      let allowed = 0;
+      
+      // Step 1: Calculate allowed laytime from cargo qty and L/D rate
+      if (ratePerDay > 0 && qtyHandled > 0) {
+        allowed = qtyHandled / ratePerDay;
+      }
+      
+      // Step 4: Effective working time = actual work + idle time delays
+      const effectiveWork = work + p.idle;
+      
+      // Step 5: Compare allowed vs effective working time
+      const balance = allowed - effectiveWork;
+      
+      if (allowed > 0) {
+        if (balance > 0) {
+          // Effective work < Allowed → Despatch (owner pays charterer). Use the port's
+          // despatch rate when set, else the customary half-demurrage default.
+          legDes = balance * (p.des > 0 ? p.des : p.dem / 2);
+        } else if (balance < 0) {
+          // Effective work > Allowed → Demurrage (charterer pays owner)
+          legDem = (-balance) * p.dem;
+        }
+        // If balance = 0 → dem/des = 0 (perfect match)
+      }
     }
 
-    foNormalSea += normalSea * (isBallast ? perf.mainNormal.ballast : perf.mainNormal.laden);
-    foEcaSea += legEca * (isBallast ? perf.mainEca.ballast : perf.mainEca.laden);
-    foPort += p.idle * perf.mainNormal.idle + work * perf.mainNormal.work;
-    mgoSea += normalSea * perf.subNormal.sea;
-    mgoEcaSea += legEca * perf.subEca.sea;
-    mgoPort += p.idle * perf.subNormal.idle + work * perf.subNormal.work;
+    // Select fuel consumption rates based on speed mode
+    let foCons: MainCons, mgoCons: SubCons;
+    if (perf.speedMode === 'Eco') {
+      foCons = perf.ecoMainNormal;
+      mgoCons = perf.ecoSubNormal;
+    } else if (perf.speedMode === 'Full') {
+      foCons = perf.fullMainNormal;
+      mgoCons = perf.fullSubNormal;
+    } else {
+      // Custom mode
+      foCons = perf.customMainNormal;
+      mgoCons = perf.customSubNormal;
+    }
+    
+    // Apply consumption based on port type and leg cargo status
+    // Rules:
+    // 1. Sea legs (Ballast, Laden): Use sea consumption based on cargo status
+    // 2. Sailing Delivery/Redelivery: Use sea consumption (ballast if empty, laden if cargo on board)
+    // 3. Port operations (Loading, Discharging, Bunkering, etc.): Use work/idle consumption only
+    // 4. Canal Transit: Use work consumption
+    
+    if (p.distance > 0) {
+      // Sea leg: Apply ballast or laden consumption based on cargo status
+      foSea += normalSea * (isLadenLeg ? foCons.laden : foCons.ballast);
+      foEcaSea += legEca * (isLadenLeg ? foCons.laden : foCons.ballast);
+      mgoSea += normalSea * mgoCons.sea;
+      mgoEcaSea += legEca * mgoCons.sea;
+    }
+    
+    // Port operations: Always use work rate for work time, idle rate for idle time (regardless of cargo)
+    // This is the primary consumption at ports (loading, discharging, waiting, bunkering, etc.)
+    foPort += p.idle * foCons.idle + work * foCons.work;
+    mgoPort += p.idle * mgoCons.idle + work * mgoCons.work;
 
     seaDays += legSea;
     ecaDays += legEca;
-    if (isBallast) ballastDays += legSea;
-    else ladenDays += legSea;
+    if (!isLadenLeg && p.distance > 0) ballastDays += legSea;
+    else if (isLadenLeg && p.distance > 0) ladenDays += legSea;
     idleTotal += p.idle;
     workTotal += work;
     distanceTotal += p.distance;
@@ -747,7 +859,7 @@ function computeEstimate(i: EstimateInputs): EstimateResult {
 
   const portDays = idleTotal + workTotal;
   const voyageDays = seaDays + portDays;
-  const vlsfoCons = foNormalSea + foPort;
+  const vlsfoCons = foSea + foPort;
   const ulsfoCons = foEcaSea;
   const mgoCons = mgoSea + mgoEcaSea + mgoPort;
   const vlsfoExp = vlsfoCons * commercial.vlsfoPrice;
@@ -874,6 +986,101 @@ function solveFreightForHire(i: EstimateInputs, targetHire: number): Cargo[] {
   return i.cargoes.map((c) => (c.quantity > 0 ? { ...c, frt: rate } : c));
 }
 
+/* --------------------------------------------------------- sync ports with cargo */
+
+/**
+ * Auto-sync port rotation based on cargo loading/discharging ports.
+ * Creates Loading ports for each unique loadPort and Discharging ports for
+ * each unique dischPort found in the cargo list. Preserves existing port
+ * properties (distance, speed, rates, etc.) where possible.
+ */
+function syncPortsWithCargo(ports: PortRow[], cargoes: Cargo[]): PortRow[] {
+  // Extract unique loading and discharging ports from cargoes, preserving order
+  const seenLoadPorts = new Set<string>();
+  const seenDischPorts = new Set<string>();
+  const loadPorts: string[] = [];
+  const dischPorts: string[] = [];
+
+  for (const cargo of cargoes) {
+    if (cargo.loadPort && !seenLoadPorts.has(cargo.loadPort)) {
+      seenLoadPorts.add(cargo.loadPort);
+      loadPorts.push(cargo.loadPort);
+    }
+    if (cargo.dischPort && !seenDischPorts.has(cargo.dischPort)) {
+      seenDischPorts.add(cargo.dischPort);
+      dischPorts.push(cargo.dischPort);
+    }
+  }
+
+  // Find Delivery and Redelivery ports (preserve them)
+  const delivery = ports.find((p) => p.type === 'Delivery');
+  const redelivery = ports.find((p) => p.type === 'Redelivery');
+
+  // Build a map of existing ports by port name for quick lookup
+  const existingByPort = new Map<string, PortRow>();
+  for (const port of ports) {
+    const normalized = normalizePortName(port.port);
+    if (!existingByPort.has(normalized)) {
+      existingByPort.set(normalized, port);
+    }
+  }
+
+  // Template for creating new ports (with defaults)
+  const createPort = (type: LegType, port: string): PortRow => ({
+    id: uid('pr'),
+    type,
+    port,
+    distance: 0,
+    ecaDistance: 0,
+    wf: 5,
+    speed: 0,
+    ldRate: type === 'Loading' ? 15000 : type === 'Discharging' ? 15000 : 0,
+    idle: 0.5, // Turn time / free time allowance (not counted in laytime)
+    work: 0,
+    seaManual: 0,
+    dem: type === 'Loading' ? 18000 : type === 'Discharging' ? 20000 : 0,
+    des: 0,
+    portCharge: type === 'Loading' ? 40000 : type === 'Discharging' ? 45000 : 0,
+    laytimeTerm: 'SHINC',
+    rateUnit: 'MT/Day',
+  });
+
+  // Build new ports array: Delivery → Loading ports → Discharging ports → Redelivery
+  const newPorts: PortRow[] = [];
+
+  if (delivery) {
+    newPorts.push(delivery);
+  }
+
+  for (const loadPort of loadPorts) {
+    // Try to find existing port with same name; if found, preserve its properties
+    const normalized = normalizePortName(loadPort);
+    const existing = existingByPort.get(normalized);
+    if (existing && existing.type === 'Loading') {
+      newPorts.push({ ...existing });
+    } else {
+      newPorts.push(createPort('Loading', loadPort));
+    }
+  }
+
+  for (const dischPort of dischPorts) {
+    // Try to find existing port with same name; if found, preserve its properties
+    const normalized = normalizePortName(dischPort);
+    const existing = existingByPort.get(normalized);
+    if (existing && existing.type === 'Discharging') {
+      newPorts.push({ ...existing });
+    } else {
+      newPorts.push(createPort('Discharging', dischPort));
+    }
+  }
+
+  if (redelivery) {
+    newPorts.push(redelivery);
+  }
+
+  return newPorts;
+}
+
 /* ------------------------------------------------------------ seed inputs */
 
 function seedInputs(voyage: Voyage | undefined, blank = false): EstimateInputs {
@@ -882,10 +1089,21 @@ function seedInputs(voyage: Voyage | undefined, blank = false): EstimateInputs {
     full: { ballast: 14, laden: 14 },
     eco: { ballast: 12, laden: 11.5 },
     customs: [],
-    mainNormal: { type: 'VLSFO', ballast: 29, laden: 33, idle: 2.5, work: 5 },
-    mainEca: { type: 'ULSFO', ballast: 29, laden: 33, idle: 2.5, work: 5 },
-    subNormal: { type: 'MGO', sea: 0.1, idle: 0, work: 0 },
-    subEca: { type: 'MGO', sea: 0.1, idle: 0, work: 0 },
+    // FULL mode consumption
+    fullMainNormal: { type: 'VLSFO', ballast: 29, laden: 33, idle: 2.5, work: 5 },
+    fullMainEca: { type: 'ULSFO', ballast: 29, laden: 33, idle: 2.5, work: 5 },
+    fullSubNormal: { type: 'MGO', sea: 0.1, idle: 0, work: 0 },
+    fullSubEca: { type: 'MGO', sea: 0.1, idle: 0, work: 0 },
+    // ECO mode consumption (20-25% lower than Full)
+    ecoMainNormal: { type: 'VLSFO', ballast: 23, laden: 26, idle: 2.0, work: 4 },
+    ecoMainEca: { type: 'ULSFO', ballast: 23, laden: 26, idle: 2.0, work: 4 },
+    ecoSubNormal: { type: 'MGO', sea: 0.08, idle: 0, work: 0 },
+    ecoSubEca: { type: 'MGO', sea: 0.08, idle: 0, work: 0 },
+    // CUSTOM mode (initialize with Full values, user can edit)
+    customMainNormal: { type: 'VLSFO', ballast: 29, laden: 33, idle: 2.5, work: 5 },
+    customMainEca: { type: 'ULSFO', ballast: 29, laden: 33, idle: 2.5, work: 5 },
+    customSubNormal: { type: 'MGO', sea: 0.1, idle: 0, work: 0 },
+    customSubEca: { type: 'MGO', sea: 0.1, idle: 0, work: 0 },
   };
 
   const c = (
@@ -1116,12 +1334,38 @@ function CeAutocomplete({ value, onChange, options, placeholder, disabled, min }
 
 export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const [searchParams] = useSearchParams();
+  // Extract URL parameters early so we can use them as stable dependencies
+  const newParam = searchParams.get('new');
+  const estParam = searchParams.get('est');
+  const fromParam = searchParams.get('from');
+  const bookDataParam = searchParams.get('bookData');
+  const bookRefParam = searchParams.get('bookRef');
+  
   const selectedVoyage = useSelectedVoyage({ emptyWhenCleared: true });
   // "create" mode (prop or ?new=1) opens a blank estimate — no vessel required.
-  const createMode = mode === 'create' || searchParams.get('new') === '1';
+  const createMode = mode === 'create' || newParam === '1';
   // Opening a previously saved estimate from the sidebar (?est=<id>).
-  const estParam = searchParams.get('est');
-  const savedRecord = useMemo(() => (estParam ? getSavedEstimate(estParam) : undefined), [estParam]);
+  
+  // Compute the stable estimate ID early so we can use it to find savedRecord
+  const [estimateId] = useState(() => {
+    if (estParam) return estParam;  // Reusing a saved estimate via URL param
+    
+    if (createMode && bookRefParam) {
+      // Create a stable ID derived from the bookRef so clicking Estimate multiple times
+      // on the same book entry reuses the same draft instead of creating duplicates
+      return `est-book-${bookRefParam}`;
+    }
+    
+    return createMode ? `est-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` : `est-${Date.now()}`;
+  });
+  
+  // Track the actual backend ID (GUID) for deletion - separate from draft IDs
+  const [backendEstimateId, setBackendEstimateId] = useState<string | null>(
+    estParam && !estParam.startsWith('est-') ? estParam : null
+  );
+  
+  // Now use estimateId to find the savedRecord (could be from URL or from reusing a book draft)
+  const savedRecord = useMemo(() => getSavedEstimate(estimateId), [estimateId]);
   const blankVoyage = useMemo(() => makeBlankVoyage(), []);
   // A saved estimate (or a brand-new one) works off a blank voyage base; the
   // saved snapshot then overrides the seeded values.
@@ -1145,6 +1389,12 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const [hireBasis, setHireBasis] = useState('Time Charter');
   const [canalsOpen, setCanalsOpen] = useState(false);
   const canalsRef = useRef<HTMLDivElement | null>(null);
+  const [manualStartDate, setManualStartDate] = useState<string>(() => {
+    const d = new Date(inputs.startDate);
+    return d.toISOString().split('T')[0];
+  });
+  const [isSaving, setIsSaving] = useState(false);
+  const [draftCreated, setDraftCreated] = useState(false);
   const [gettingDist, setGettingDist] = useState(false);
   const [quickPasteText, setQuickPasteText] = useState('');
   const [quickPasteMsg, setQuickPasteMsg] = useState('');
@@ -1155,6 +1405,9 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   // Mark-Fixed CP-date picker.
   const [fixOpen, setFixOpen] = useState(false);
   const [cpDate, setCpDate] = useState('');
+
+  // Confirmation dialog state for delete operations
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [lq, setLq] = useState({
     summerDwt: 0,
     densityAtPort: 1.025,
@@ -1173,9 +1426,10 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const worldPorts = useWorldPorts();
   const portOptions = useMemo(() => worldPorts.slice(0, 4000).map((p) => p.label), [worldPorts]);
   // Vessel options come from Settings → Vessels Details (plus any voyage vessels).
+  const vessels = useVessels();
   const vesselOptions = useMemo(
-    () => Array.from(new Set([...loadVessels().map((v) => v.name.trim()), ...VOYAGES.map((v) => v.vessel)].filter(Boolean))).sort(),
-    [],
+    () => Array.from(new Set([...vessels.map((v) => v.name.trim()), ...VOYAGES.map((v) => v.vessel)].filter(Boolean))).sort(),
+    [vessels],
   );
   // Account options come from Settings → Account Details.
   const accountOptions = useMemo(() => accountNames(), []);
@@ -1199,12 +1453,6 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     if (createMode) return createEstNo;
     return `EST-${voyage?.id ?? '0000'}`;
   }, [savedRecord?.estNo, createMode, createEstNo, voyage?.id]);
-  // Stable id for the saved-estimate record. A brand-new (create-mode) estimate
-  // gets a fresh id so re-saving updates the same record; an existing voyage
-  // reuses its voyage id.
-  const [estimateId] = useState(() =>
-    savedRecord?.id ?? (createMode ? `est-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` : (voyage?.id ?? `est-${Date.now()}`)),
-  );
 
   // Publish the estimate status so the Chartering sidebar buckets it correctly.
   useEffect(() => {
@@ -1244,17 +1492,157 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
 
   useEffect(() => {
     const snap = savedRecord?.data as { inputs?: EstimateInputs; vessel?: VesselParticular } | undefined;
-    setInputs(snap?.inputs ?? seedInputs(voyage, createMode));
-    setVessel(snap?.vessel ?? seedVessel(voyage, createMode));
-    setStatus((savedRecord?.status as EstStatus) ?? 'Estimate');
-    setLocked(false);
+    let initialInputs = snap?.inputs ?? seedInputs(voyage, createMode);
+    let initialVessel = snap?.vessel ?? seedVessel(voyage, createMode);
+
+    // Handle pre-fill from cargo/tonnage books via URL parameter
+    if (fromParam === 'book') {
+      try {
+        if (bookDataParam) {
+          const bookDataStr = atob(bookDataParam);  // searchParams already decodes, so just decode base64
+          const bookData = JSON.parse(bookDataStr);
+
+          // Pre-fill cargo from cargo book
+          if (bookData?.type === 'cargo' && bookData?.data) {
+            const cargoData = bookData.data;
+            const quantity = Number((cargoData.quantity || '').replace(/,/g, '')) || 0;
+            const frtRate = cargoData.frtRate ? Number((cargoData.frtRate || '').replace(/,/g, '')) : 0;
+            
+            initialInputs = {
+              ...initialInputs,
+              cargoes: [{
+                id: uid('cg'),
+                account: cargoData.account || '',
+                name: cargoData.commodity || '',
+                loadPort: cargoData.loadPort || '',
+                dischPort: cargoData.dischargePort || '',
+                quantity,
+                unit: 'MT',
+                frt: frtRate,
+                frtUnit: cargoData.frtUnit || 'USD/MT',
+                term: cargoData.terms || 'FIO',
+                aCommPct: 3.75,
+                brkgPct: 1.25,
+                frtTaxPct: 0,
+                linerTerm: 0,
+              }],
+            };
+          }
+
+          // Pre-fill vessel from tonnage book
+          if (bookData?.type === 'tonnage' && bookData?.data) {
+            const vesselData = bookData.data;
+            const dwt = Number((vesselData.dwt || '').replace(/,/g, '')) || 180_000;
+            const draft = Number(vesselData.draft || 9.5) || 9.5;
+            const tpc = Number(vesselData.tpc || 42) || 42;
+            const built = Number(vesselData.built || 2015) || 2015;
+            
+            initialVessel = {
+              name: vesselData.vessel || 'Untitled',
+              dwt,
+              draft,
+              tpc,
+              built,
+              kind: vesselData.vesselType || 'Bulk Carrier',
+              type: vesselData.vesselType || 'Bulk Carrier',
+            };
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    
+    // Sync ports with cargoes on load to ensure port rotation matches cargo entries
+    if (initialInputs.cargoes.length > 0) {
+      initialInputs = { ...initialInputs, ports: syncPortsWithCargo(initialInputs.ports, initialInputs.cargoes) };
+    }
+    
+    setInputs(initialInputs);
+    setVessel(initialVessel);
+    const loadedStatus = (savedRecord?.status as EstStatus) ?? 'Estimate';
+    setStatus(loadedStatus);
+    // Lock estimation when it's marked as Fixed (can only be reopened with Reopen button)
+    setLocked(loadedStatus === 'Fixed');
     setFixtureNo(null);
     setScenarios([]);
-  }, [voyage?.id, estParam]);
+  }, [voyage?.id, estParam, fromParam, bookDataParam]);
+
+  // Create a draft estimation in the sidebar when entering create mode (only once)
+  useEffect(() => {
+    if (!createMode || !estimateId || draftCreated) return;
+    
+    // Only create the draft once on component mount
+    // This runs AFTER pre-fill has updated the state
+    const existing = getSavedEstimate(estimateId);
+    if (!existing) {
+      upsertSavedEstimate({
+        id: estimateId,
+        estNo: estNo,
+        vessel: vessel.name.trim() || 'Untitled',
+        fixType: inputs.fixType,
+        status: 'Estimate',
+        profit: result.profit,
+        tce: result.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
+      });
+      setDraftCreated(true);
+    }
+  }, [createMode, estimateId, vessel.name, inputs.cargoes.length]); // Re-run if vessel name or cargo count changes
+
+  // Update the draft in the savedEstimates when pre-fill data changes
+  useEffect(() => {
+    if (!createMode || !estimateId || !draftCreated) return;
+    
+    const existing = getSavedEstimate(estimateId);
+    if (existing) {
+      // Update the draft with pre-filled data
+      const updated = computeEstimate(inputs);
+      upsertSavedEstimate({
+        ...existing,
+        vessel: vessel.name.trim() || 'Untitled',
+        fixType: inputs.fixType,
+        profit: updated.profit,
+        tce: updated.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
+      });
+    }
+  }, [createMode, estimateId, draftCreated, vessel.name, inputs.cargoes.length]); // Remove result from deps
 
   const result = useMemo(() => computeEstimate(inputs), [inputs]);
-  // Cargo handled per port (drives L/D-rate working days shown read-only).
-  const handledQty = useMemo(() => portHandledQty(inputs.ports, inputs.cargoes), [inputs.ports, inputs.cargoes]);
+
+  // Auto-save with 2.5 second debounce (fire-and-forget, non-blocking)
+  const autoSave = useAutoSaveEstimate(2500);
+
+  useEffect(() => {
+    if (locked || !voyage || !estimateId) return;
+
+    const dto = {
+      id: estimateId,
+      estimateNo: estNo,
+      vesselName: vessel.name.trim() || 'Untitled',
+      fixType: inputs.fixType,
+      status: status as any,
+      profit: result.profit,
+      tce: result.tce,
+      commodity: inputs.cargoes[0]?.name || '',
+      loadPort: inputs.ports.find((p) => p.type === 'Loading')?.port || '',
+      dischargePort: inputs.ports.find((p) => p.type === 'Discharging')?.port || '',
+      quantity: inputs.cargoes.reduce((s, c) => s + c.quantity, 0),
+      freightRate: inputs.cargoes[0]?.frt || 0,
+      dataJson: JSON.stringify({ inputs, vessel }),
+    };
+
+    // Only auto-save if estimation has meaningful data (vessel name or cargo entered)
+    // This prevents creating untitled/empty estimations in the list
+    const hasVessel = vessel?.name?.trim() || '';
+    const hasCargo = inputs.cargoes.some((c) => c.name?.trim() || c.quantity > 0);
+    if (hasVessel || hasCargo) {
+      autoSave(dto);
+    }
+  }, [inputs, vessel, status, result, estNo, locked, voyage, estimateId, autoSave]);
 
   // Keep Hire/Day synced to the break-even hire (voyage-out fixtures only).
   useEffect(() => {
@@ -1264,6 +1652,14 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       setInputs((prev) => ({ ...prev, commercial: { ...prev.commercial, dailyHire: rounded } }));
     }
   }, [linkHF, locked, result, inputs.fixType, inputs.commercial.hAddCommPct, inputs.commercial.dailyHire]);
+
+  // Sync manual start date with inputs (used for first port arrival date)
+  useEffect(() => {
+    if (manualStartDate && !locked) {
+      const time = inputs.startDate.split('T')[1] || '12:00';
+      setInputs((prev) => ({ ...prev, startDate: `${manualStartDate}T${time}` }));
+    }
+  }, [manualStartDate, locked, inputs.startDate]);
 
   const compareOptions = useMemo(
     () => [{ id: 'current', name: 'Current', result }, ...scenarios.map((s) => ({ id: s.id, name: s.name, result: scenarioResult(inputs, s) }))],
@@ -1285,7 +1681,6 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     const tf = inputs.cargoes.reduce((s, c) => s + c.quantity * c.frt, 0);
     return { qty, tf, frtAvg: qty > 0 ? tf / qty : 0 };
   }, [inputs.cargoes]);
-  const blankDraft = useMemo(() => isBlankEstimationDraft(inputs, vessel), [inputs, vessel]);
 
   if (!voyage) return <NoVesselSelected />;
 
@@ -1297,11 +1692,35 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     touch();
   };
   const patchPerf = (p: Partial<Performance>) => patch({ perf: { ...inputs.perf, ...p } });
-  const patchMain = (which: 'mainNormal' | 'mainEca', p: Partial<MainCons>) =>
+  const patchMain = (which: 'fullMainNormal' | 'fullMainEca' | 'ecoMainNormal' | 'ecoMainEca' | 'customMainNormal' | 'customMainEca', p: Partial<MainCons>) =>
     patchPerf({ [which]: { ...inputs.perf[which], ...p } } as Partial<Performance>);
-  const patchSub = (which: 'subNormal' | 'subEca', p: Partial<SubCons>) =>
+  const patchSub = (which: 'fullSubNormal' | 'fullSubEca' | 'ecoSubNormal' | 'ecoSubEca' | 'customSubNormal' | 'customSubEca', p: Partial<SubCons>) =>
     patchPerf({ [which]: { ...inputs.perf[which], ...p } } as Partial<Performance>);
   const patchComm = (p: Partial<Commercial>) => patch({ commercial: { ...inputs.commercial, ...p } });
+
+  // Get active consumption values based on current speedMode
+  const getActiveMainConsumption = (): { normal: MainCons; eca: MainCons; normalKey: 'fullMainNormal' | 'ecoMainNormal' | 'customMainNormal'; ecaKey: 'fullMainEca' | 'ecoMainEca' | 'customMainEca' } => {
+    if (inputs.perf.speedMode === 'Eco') {
+      return { normal: inputs.perf.ecoMainNormal, eca: inputs.perf.ecoMainEca, normalKey: 'ecoMainNormal', ecaKey: 'ecoMainEca' };
+    } else if (inputs.perf.speedMode === 'Full') {
+      return { normal: inputs.perf.fullMainNormal, eca: inputs.perf.fullMainEca, normalKey: 'fullMainNormal', ecaKey: 'fullMainEca' };
+    } else {
+      return { normal: inputs.perf.customMainNormal, eca: inputs.perf.customMainEca, normalKey: 'customMainNormal', ecaKey: 'customMainEca' };
+    }
+  };
+
+  const getActiveSubConsumption = (): { normal: SubCons; eca: SubCons; normalKey: 'fullSubNormal' | 'ecoSubNormal' | 'customSubNormal'; ecaKey: 'fullSubEca' | 'ecoSubEca' | 'customSubEca' } => {
+    if (inputs.perf.speedMode === 'Eco') {
+      return { normal: inputs.perf.ecoSubNormal, eca: inputs.perf.ecoSubEca, normalKey: 'ecoSubNormal', ecaKey: 'ecoSubEca' };
+    } else if (inputs.perf.speedMode === 'Full') {
+      return { normal: inputs.perf.fullSubNormal, eca: inputs.perf.fullSubEca, normalKey: 'fullSubNormal', ecaKey: 'fullSubEca' };
+    } else {
+      return { normal: inputs.perf.customSubNormal, eca: inputs.perf.customSubEca, normalKey: 'customSubNormal', ecaKey: 'customSubEca' };
+    }
+  };
+
+  const activeMain = getActiveMainConsumption();
+  const activeSub = getActiveSubConsumption();
 
   // Editing the hire back-solves the freight rates so the voyage stays at break-even (when linked).
   const updateDailyHire = (n: number) => {
@@ -1314,16 +1733,24 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     }
   };
 
-  const updateCargo = (id: string, p: Partial<Cargo>) =>
-    patch({ cargoes: inputs.cargoes.map((c) => (c.id === id ? { ...c, ...p } : c)) });
-  const addCargo = () =>
-    patch({
-      cargoes: [
-        ...inputs.cargoes,
-        { id: uid('cg'), account: '', name: '', loadPort: '', dischPort: '', quantity: 0, unit: defaultQtyUnitForVessel(vessel.type), frt: 0, frtUnit: defaultFreightUnit(defaultQtyUnitForVessel(vessel.type)), term: 'FIO', aCommPct: 3.75, brkgPct: 1.25, frtTaxPct: 0, linerTerm: 0 },
-      ],
-    });
-  const removeCargo = (id: string) => patch({ cargoes: inputs.cargoes.filter((c) => c.id !== id) });
+  const updateCargo = (id: string, p: Partial<Cargo>) => {
+    const updatedCargoes = inputs.cargoes.map((c) => (c.id === id ? { ...c, ...p } : c));
+    const syncedPorts = syncPortsWithCargo(inputs.ports, updatedCargoes);
+    patch({ cargoes: updatedCargoes, ports: syncedPorts });
+  };
+  const addCargo = () => {
+    const newCargoes = [
+      ...inputs.cargoes,
+      { id: uid('cg'), account: '', name: '', loadPort: '', dischPort: '', quantity: 0, unit: defaultQtyUnitForVessel(vessel.type), frt: 0, frtUnit: defaultFreightUnit(defaultQtyUnitForVessel(vessel.type)), term: 'FIO', aCommPct: 3.75, brkgPct: 1.25, frtTaxPct: 0, linerTerm: 0 },
+    ];
+    const syncedPorts = syncPortsWithCargo(inputs.ports, newCargoes);
+    patch({ cargoes: newCargoes, ports: syncedPorts });
+  };
+  const removeCargo = (id: string) => {
+    const filteredCargoes = inputs.cargoes.filter((c) => c.id !== id);
+    const syncedPorts = syncPortsWithCargo(inputs.ports, filteredCargoes);
+    patch({ cargoes: filteredCargoes, ports: syncedPorts });
+  };
 
   // Ad-hoc operation expenses (type dropdown + amount).
   const addExpense = () => patch({ expenses: [...inputs.expenses, { id: uid('ex'), type: opts.expenseTypes[0] ?? 'Other', amount: 0 }] });
@@ -1332,13 +1759,16 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
 
   const updatePort = (id: string, p: Partial<PortRow>) =>
     patch({ ports: inputs.ports.map((r) => (r.id === id ? { ...r, ...p } : r)) });
-  const addPort = () =>
-    patch({
+  const addPort = () => {
+    const speedSet = resolveSpeedSet(inputs.perf, inputs.perf.speedMode);
+    // New ports default to Discharging (laden speed)
+    return patch({
       ports: [
         ...inputs.ports,
-        { id: uid('pr'), type: 'Discharging', port: '', distance: 0, ecaDistance: 0, wf: 5, speed: resolveSpeedSet(inputs.perf, inputs.perf.speedMode).laden, ldRate: 0, idle: 0.5, work: 0, seaManual: 0, dem: 15_000, des: 0, portCharge: 0, laytimeTerm: 'SHINC', rateUnit: 'MT/Day' },
+        { id: uid('pr'), type: 'Discharging', port: '', distance: 0, ecaDistance: 0, wf: 5, speed: speedSet.laden, ldRate: 0, idle: 0.5, work: 0, seaManual: 0, dem: 15_000, des: 0, portCharge: 0, laytimeTerm: 'SHINC', rateUnit: 'MT/Day' },
       ],
     });
+  };
   const removePort = (id: string) => patch({ ports: inputs.ports.filter((r) => r.id !== id) });
 
   const applyQuickPaste = () => {
@@ -1382,13 +1812,22 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       cargoes: [...inputs.cargoes],
       ports: [...inputs.ports],
       perf: {
-        ...inputs.perf,
+        speedMode: inputs.perf.speedMode,
         full: { ...inputs.perf.full },
         eco: { ...inputs.perf.eco },
-        mainNormal: { ...inputs.perf.mainNormal },
-        mainEca: { ...inputs.perf.mainEca },
-        subNormal: { ...inputs.perf.subNormal },
-        subEca: { ...inputs.perf.subEca },
+        customs: inputs.perf.customs,
+        fullMainNormal: { ...inputs.perf.fullMainNormal },
+        fullMainEca: { ...inputs.perf.fullMainEca },
+        fullSubNormal: { ...inputs.perf.fullSubNormal },
+        fullSubEca: { ...inputs.perf.fullSubEca },
+        ecoMainNormal: { ...inputs.perf.ecoMainNormal },
+        ecoMainEca: { ...inputs.perf.ecoMainEca },
+        ecoSubNormal: { ...inputs.perf.ecoSubNormal },
+        ecoSubEca: { ...inputs.perf.ecoSubEca },
+        customMainNormal: { ...inputs.perf.customMainNormal },
+        customMainEca: { ...inputs.perf.customMainEca },
+        customSubNormal: { ...inputs.perf.customSubNormal },
+        customSubEca: { ...inputs.perf.customSubEca },
       },
       commercial: { ...inputs.commercial },
     };
@@ -1409,32 +1848,57 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       nextInputs.perf.eco.laden = parsed.ecoLadenSpeed;
       applied.push('eco laden speed');
     }
+    // Service (Full Speed) FO values → Full mode consumption (Normal and ECA zones)
     if (typeof parsed.serviceBallastFo === 'number' && parsed.serviceBallastFo > 0) {
-      nextInputs.perf.mainNormal.ballast = parsed.serviceBallastFo;
-      nextInputs.perf.mainEca.ballast = parsed.serviceBallastFo;
+      nextInputs.perf.fullMainNormal.ballast = parsed.serviceBallastFo;
+      nextInputs.perf.fullMainEca.ballast = parsed.serviceBallastFo;
       applied.push('service FO ballast');
     }
     if (typeof parsed.serviceLadenFo === 'number' && parsed.serviceLadenFo > 0) {
-      nextInputs.perf.mainNormal.laden = parsed.serviceLadenFo;
-      nextInputs.perf.mainEca.laden = parsed.serviceLadenFo;
+      nextInputs.perf.fullMainNormal.laden = parsed.serviceLadenFo;
+      nextInputs.perf.fullMainEca.laden = parsed.serviceLadenFo;
       applied.push('service FO laden');
     }
+
+    // Eco Speed FO values → Eco mode consumption (Normal and ECA zones)
+    if (typeof parsed.ecoBallastFo === 'number' && parsed.ecoBallastFo > 0) {
+      nextInputs.perf.ecoMainNormal.ballast = parsed.ecoBallastFo;
+      nextInputs.perf.ecoMainEca.ballast = parsed.ecoBallastFo;
+      applied.push('eco FO ballast');
+    }
+    if (typeof parsed.ecoLadenFo === 'number' && parsed.ecoLadenFo > 0) {
+      nextInputs.perf.ecoMainNormal.laden = parsed.ecoLadenFo;
+      nextInputs.perf.ecoMainEca.laden = parsed.ecoLadenFo;
+      applied.push('eco FO laden');
+    }
+
+    // In-port FO for Full mode
     if (typeof parsed.inPortIdleFo === 'number' && parsed.inPortIdleFo > 0) {
-      nextInputs.perf.mainNormal.idle = parsed.inPortIdleFo;
-      nextInputs.perf.mainEca.idle = parsed.inPortIdleFo;
+      nextInputs.perf.fullMainNormal.idle = parsed.inPortIdleFo;
+      nextInputs.perf.fullMainEca.idle = parsed.inPortIdleFo;
       applied.push('in-port idle FO');
     }
     if (typeof parsed.inPortWorkFo === 'number' && parsed.inPortWorkFo > 0) {
-      nextInputs.perf.mainNormal.work = parsed.inPortWorkFo;
-      nextInputs.perf.mainEca.work = parsed.inPortWorkFo;
+      nextInputs.perf.fullMainNormal.work = parsed.inPortWorkFo;
+      nextInputs.perf.fullMainEca.work = parsed.inPortWorkFo;
       applied.push('in-port work FO');
     }
+    // Service (Full Speed) MGO → BOTH subNormal and subEca (same consumption, different fuel type)
     const serviceMgo = [parsed.serviceLadenMgo, parsed.serviceBallastMgo].filter((v): v is number => typeof v === 'number' && v >= 0);
     if (serviceMgo.length > 0) {
       const seaMgo = round(serviceMgo.reduce((s, v) => s + v, 0) / serviceMgo.length, 3);
-      nextInputs.perf.subNormal.sea = seaMgo;
-      nextInputs.perf.subEca.sea = seaMgo;
+      nextInputs.perf.fullSubNormal.sea = seaMgo;
+      nextInputs.perf.fullSubEca.sea = seaMgo;
       applied.push('service MGO sea');
+    }
+
+    // Eco Speed MGO → BOTH subNormal and subEca (same consumption, different fuel type)
+    const ecoMgo = [parsed.ecoLadenMgo, parsed.ecoBallastMgo].filter((v): v is number => typeof v === 'number' && v >= 0);
+    if (ecoMgo.length > 0) {
+      const seaMgo = round(ecoMgo.reduce((s, v) => s + v, 0) / ecoMgo.length, 3);
+      nextInputs.perf.ecoSubNormal.sea = seaMgo;
+      nextInputs.perf.ecoSubEca.sea = seaMgo;
+      applied.push('eco MGO sea');
     }
 
     if (parsed.laycanStart) {
@@ -1503,7 +1967,12 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
       loadIdx = 0;
     }
     if (parsed.loadPort) {
-      basePorts[loadIdx] = { ...basePorts[loadIdx], port: parsed.loadPort };
+      const matchedPort = findBestMatchPort(parsed.loadPort, 
+        portOptions.map(p => ({ name: p })));
+      basePorts[loadIdx] = { 
+        ...basePorts[loadIdx], 
+        port: matchedPort || parsed.loadPort 
+      };
       applied.push('load port (rotation)');
     }
     if (typeof parsed.loadRate === 'number' && parsed.loadRate > 0) {
@@ -1528,8 +1997,14 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     dischTargets.forEach((portName, idx) => {
       const di = dischIndexes[idx];
       if (di == null) return;
-      const rate = parsed.dischargeRates[keyPortName(portName)] ?? basePorts[di].ldRate;
-      basePorts[di] = { ...basePorts[di], port: portName, ldRate: rate > 0 ? rate : basePorts[di].ldRate };
+      const matchedPort = findBestMatchPort(portName, 
+        portOptions.map(p => ({ name: p })));
+      const rate = parsed.dischargeRates[normalizePortName(portName)] ?? basePorts[di].ldRate;
+      basePorts[di] = { 
+        ...basePorts[di], 
+        port: matchedPort || portName, 
+        ldRate: rate > 0 ? rate : basePorts[di].ldRate 
+      };
     });
     if (dischTargets.length > 0) applied.push('discharge options');
     if (Object.keys(parsed.dischargeRates).length > 0) applied.push('discharge rates');
@@ -1617,7 +2092,10 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const addCustomSpeed = () => {
     if (locked) return;
     const id = uid('sp');
-    patchPerf({ customs: [...inputs.perf.customs, { id, name: `Custom ${inputs.perf.customs.length + 1}`, ballast: 12, laden: 12 }] });
+    const newCustom = { id, name: `Custom ${inputs.perf.customs.length + 1}`, ballast: 12, laden: 12 };
+    const newPerf = { ...inputs.perf, customs: [...inputs.perf.customs, newCustom], speedMode: id };
+    setInputs((prev) => ({ ...prev, perf: newPerf, ports: setLegSpeeds({ ...prev, perf: newPerf }, newCustom) }));
+    touch();
   };
   const renameCustomSpeed = (id: string, name: string) =>
     patchPerf({ customs: inputs.perf.customs.map((c) => (c.id === id ? { ...c, name } : c)) });
@@ -1648,6 +2126,61 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     setFixtureNo(null);
     setScenarios([]);
     setQuickPasteOpen(true);
+    // Don't create sidebar entry yet - wait until save
+  };
+  // Duplicate the current estimation with a new EstimateNo
+  const duplicate = async () => {
+    try {
+      const label = vessel.name.trim() || 'New Estimate';
+      
+      // Call backend API to create a duplicate with a new EstimateNo
+      const apiDto = {
+        // Don't provide estimateNo - let backend generate a new one
+        vesselName: label,
+        fixType: inputs.fixType,
+        status: 'Estimate' as const,
+        profit: result.profit,
+        tce: result.tce,
+        commodity: inputs.cargoes[0]?.name || '',
+        loadPort: inputs.ports.find((p) => p.type === 'Loading')?.port || '',
+        dischargePort: inputs.ports.find((p) => p.type === 'Discharging')?.port || '',
+        quantity: inputs.cargoes.reduce((s, c) => s + c.quantity, 0),
+        freightRate: inputs.cargoes[0]?.frt || 0,
+        dataJson: JSON.stringify({ inputs, vessel }),
+      };
+      
+      const response = await charteringApi.upsertEstimate(apiDto);
+      const returnedEstNo = response?.estimateNo;
+      
+      // Save duplicate to local state
+      upsertSavedEstimate({
+        id: uid('est'),
+        estNo: returnedEstNo || estNo,
+        vessel: label,
+        fixType: inputs.fixType,
+        status: 'Estimate',
+        profit: result.profit,
+        tce: result.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
+      });
+      
+      // Reset form for the new estimation
+      setStatus('Estimate');
+      setLocked(false);
+      setFixtureNo(null);
+      
+      addNotification(
+        `Estimation #${returnedEstNo} duplicated — ${label} (${money(result.profit)} profit)`,
+        'Chartering'
+      );
+    } catch (error) {
+      console.error('Failed to duplicate estimation:', error);
+      addNotification(
+        `Failed to duplicate estimation: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'Chartering'
+      );
+    }
   };
   // Apply a standard vessel-size template: fill the vessel particulars +
   // performance profile, keeping the (searched) vessel name intact.
@@ -1659,63 +2192,173 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
         ...prev.perf,
         full: { ballast: tpl.fullBallast, laden: tpl.fullLaden },
         eco: { ballast: tpl.ecoBallast, laden: tpl.ecoLaden },
-        mainNormal: { ...prev.perf.mainNormal, ballast: tpl.mainBallast, laden: tpl.mainLaden, idle: tpl.mainIdle, work: tpl.mainWork },
-        mainEca: { ...prev.perf.mainEca, ballast: tpl.mainBallast, laden: tpl.mainLaden, idle: tpl.mainIdle, work: tpl.mainWork },
-        subNormal: { ...prev.perf.subNormal, sea: tpl.subSea, idle: tpl.subIdle, work: tpl.subWork },
-        subEca: { ...prev.perf.subEca, sea: tpl.subSea, idle: tpl.subIdle, work: tpl.subWork },
+        // Apply template consumption to Full mode
+        fullMainNormal: { ...prev.perf.fullMainNormal, ballast: tpl.mainBallast, laden: tpl.mainLaden, idle: tpl.mainIdle, work: tpl.mainWork },
+        fullMainEca: { ...prev.perf.fullMainEca, ballast: tpl.mainBallast, laden: tpl.mainLaden, idle: tpl.mainIdle, work: tpl.mainWork },
+        fullSubNormal: { ...prev.perf.fullSubNormal, sea: tpl.subSea, idle: tpl.subIdle, work: tpl.subWork },
+        fullSubEca: { ...prev.perf.fullSubEca, sea: tpl.subSea, idle: tpl.subIdle, work: tpl.subWork },
       };
       return { ...prev, perf, ports: setLegSpeeds({ ...prev, perf }, resolveSpeedSet(perf, prev.perf.speedMode)) };
     });
     touch();
     setTplOpen(false);
   };
-  const save = () => {
-    touch();
-    const label = vessel.name.trim() || 'New Estimate';
-    upsertSavedEstimate({
-      id: estimateId,
-      estNo,
-      vessel: label,
-      fixType: inputs.fixType,
-      status,
-      profit: result.profit,
-      tce: result.tce,
-      savedAt: new Date().toLocaleString(),
-      data: { inputs, vessel },
-    });
-    if (createMode && vessel.name.trim()) {
-      const firstLoad = inputs.ports.find((p) => p.type === 'Loading')?.port ?? '';
-      const firstDisch = inputs.ports.find((p) => p.type === 'Discharging')?.port ?? '';
-      upsertCreatedVoyage({
-        vessel: vessel.name.trim(),
-        vesselType: vessel.type || '',
-        dwt: vessel.dwt > 0 ? String(Math.round(vessel.dwt)) : '',
-        built: vessel.built || 0,
-        client: voyage.client || '',
-        clientEmail: voyage.clientEmail || '',
-        service: 'PMO',
-        status: 'At Sea',
-        portFrom: firstLoad,
-        portTo: firstDisch,
-        cpSpeed: inputs.perf.full.laden || 0,
-        cpCons: inputs.perf.mainNormal.laden || 0,
-        instSpeed: inputs.perf.eco.laden || 0,
-        instCons: inputs.perf.mainNormal.laden || 0,
-        price: inputs.commercial.dailyHire || 0,
-        pricingBasis: 'Per Day',
-        costPerDay: inputs.commercial.dailyHire || 0,
-        foCost: inputs.commercial.vlsfoPrice || 0,
-        goCost: inputs.commercial.mgoPrice || 0,
-        euaCost: 0,
-        pic: voyage.pic || 'You',
-        open: 'OPEN',
-        health: 74,
-        seed: Date.now() % 10_000,
+  const save = async () => {
+    if (isSaving) return; // Prevent duplicate saves
+    
+    try {
+      setIsSaving(true);
+      touch();
+      const label = vessel.name.trim() || 'New Estimate';
+      
+      // Call backend API to create/update estimation
+      const apiDto = {
+        estimateNo: estNo && !estNo.startsWith('new-') ? estNo : undefined, // Let backend generate if not set
+        vesselName: label,
+        fixType: inputs.fixType,
+        status,
+        profit: result.profit,
+        tce: result.tce,
+        commodity: inputs.cargoes[0]?.name || '',
+        loadPort: inputs.ports.find((p) => p.type === 'Loading')?.port || '',
+        dischargePort: inputs.ports.find((p) => p.type === 'Discharging')?.port || '',
+        quantity: inputs.cargoes.reduce((s, c) => s + c.quantity, 0),
+        freightRate: inputs.cargoes[0]?.frt || 0,
+        dataJson: JSON.stringify({ inputs, vessel }),
+        bookRef: bookRefParam || undefined, // Include book reference if from book
+      };
+      
+      const response = await charteringApi.upsertEstimate(apiDto);
+      
+      // Extract the returned EstimateNo and ID from the response
+      const returnedEstNo = response?.estimateNo;
+      const returnedEstId = response?.id;
+      
+      // Update the backend ID for future deletion - only if we got a valid GUID back
+      if (returnedEstId && !returnedEstId.startsWith('est-')) {
+        setBackendEstimateId(returnedEstId);
+      }
+      
+      // If this estimate came from a book, update the book with the estimateId
+      if (bookRefParam && returnedEstId) {
+        // Update the cargo book in localStorage
+        try {
+          const cargoBookStr = localStorage.getItem('fv.chartering.cargoBook');
+          if (cargoBookStr) {
+            const cargoBook = JSON.parse(cargoBookStr);
+            const updatedBook = cargoBook.map((entry: any) => 
+              entry.id === bookRefParam 
+                ? { ...entry, estimateId: returnedEstId, estimationStatus: status }
+                : entry
+            );
+            localStorage.setItem('fv.chartering.cargoBook', JSON.stringify(updatedBook));
+          }
+        } catch { /* ignore */ }
+        
+        // Update the tonnage book in localStorage
+        try {
+          const tonnageBookStr = localStorage.getItem('fv.chartering.tonnageBook');
+          if (tonnageBookStr) {
+            const tonnageBook = JSON.parse(tonnageBookStr);
+            const updatedBook = tonnageBook.map((entry: any) => 
+              entry.id === bookRefParam 
+                ? { ...entry, estimateId: returnedEstId, estimationStatus: status }
+                : entry
+            );
+            localStorage.setItem('fv.chartering.tonnageBook', JSON.stringify(updatedBook));
+          }
+        } catch { /* ignore */ }
+      }
+      
+      // Save to local state for UI consistency
+      upsertSavedEstimate({
+        id: estimateId,
+        estNo: returnedEstNo || estNo,
+        vessel: label,
+        fixType: inputs.fixType,
+        status,
+        profit: result.profit,
+        tce: result.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
       });
+      
+      // Update sidebar status to reflect saved state (or create new entry if not existing)
+      if (voyage?.id) {
+        setEstimationStatus(voyage.id, status);
+      }
+      
+      // Show success notification with Estimation Number
+      addNotification(
+        `Estimation #${returnedEstNo || estNo} created — ${label} (${money(result.profit)} profit)`,
+        'Chartering'
+      );
+    } catch (error) {
+      console.error('Failed to save estimation:', error);
+      addNotification(
+        `Failed to save estimation: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'Chartering'
+      );
+    } finally {
+      setIsSaving(false);
     }
-    addNotification(`Estimate saved — ${label} (${money(result.profit)} profit)`, 'Chartering');
   };
   const discard = () => newEstimate();
+  const deleteEstimate = () => {
+    if (!estimateId) {
+      addNotification('No estimation to delete.', 'Chartering');
+      return;
+    }
+    // Show confirmation dialog
+    setShowDeleteConfirm(true);
+  };
+
+  const handleDeleteConfirm = () => {
+    setShowDeleteConfirm(false);
+
+    // Store current state in case we need to restore it
+    const previousInputs = inputs;
+    const previousVessel = vessel;
+    const previousStatus = status;
+    const previousLocked = locked;
+    const previousFixtureNo = fixtureNo;
+    const previousScenarios = scenarios;
+
+    // Optimistically reset form to create mode
+    setInputs(seedInputs(voyage, true));
+    setVessel(seedVessel(voyage, true));
+    setStatus('Estimate');
+    setLocked(false);
+    setFixtureNo(null);
+    setScenarios([]);
+
+    // Delete from backend
+    void (async () => {
+      try {
+        // For backend-only operation: use backendEstimateId if available (GUID),
+        // otherwise use the draft ID. Backend delete will be called for GUIDs.
+        const idToDelete = backendEstimateId || estimateId;
+        await deleteSavedEstimate(idToDelete);
+
+        addNotification('Estimation deleted.', 'Chartering');
+      } catch (error) {
+        // Restore the previous state if deletion fails
+        setInputs(previousInputs);
+        setVessel(previousVessel);
+        setStatus(previousStatus);
+        setLocked(previousLocked);
+        setFixtureNo(previousFixtureNo);
+        setScenarios(previousScenarios);
+
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Failed to delete estimation:', error);
+        addNotification(
+          `Failed to delete estimation: ${errorMsg}`,
+          'Chartering'
+        );
+      }
+    })();
+  };
   // Build and print a PDF report. When Compare is open with variants, the
   // report is the comparison table; otherwise it is the single-estimate sheet.
   const exportPdf = () => {
@@ -1797,8 +2440,26 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     setTimeout(() => win.print(), 300);
   };
   const changeStatus = (next: EstStatus) => {
-    if (locked) return;
+    if (locked && next !== 'Cancelled') return; // Allow cancel even when locked
     setStatus(next);
+    // Update backend state
+    if (voyage) setEstimationStatus(voyage.id, next);
+    // Save to backend if in a saveable state
+    if (next === 'On Subs' || next === 'Cancelled') {
+      touch();
+      const label = vessel.name.trim() || 'New Estimate';
+      upsertSavedEstimate({
+        id: estimateId,
+        estNo: estNo,
+        vessel: label,
+        fixType: inputs.fixType,
+        status: next,
+        profit: result.profit,
+        tce: result.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
+      });
+    }
   };
   const markFixed = () => {
     if (locked) return;
@@ -1807,18 +2468,52 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     setCpDate(cpdd ? cpddToIso(cpdd) : new Date().toISOString().slice(0, 10));
     setFixOpen(true);
   };
-  const confirmFixed = () => {
+  const confirmFixed = async () => {
     if (!voyage || !cpDate) return;
-    setStatus('Fixed');
-    const [y, m, d] = cpDate.split('-');
-    setCpdd(voyage.id, `${d}.${m}.${y}`);
-    // Monthly fixture sequence derived deterministically from the voyage.
-    const seq = (Math.abs(Math.round(voyage.seed ?? 0)) % 99) + 1;
-    const fno = makeFixtureNo(seq);
-    setFixtureNo(fno);
-    setFixtureNumber(voyage.id, fno);
-    setLocked(true);
-    setFixOpen(false);
+    
+    try {
+      // Set status and save to backend
+      setStatus('Fixed');
+      const [y, m, d] = cpDate.split('-');
+      const cpddStr = `${d}.${m}.${y}`;
+      setCpdd(voyage.id, cpddStr);
+      
+      // Monthly fixture sequence derived deterministically from the voyage.
+      const seq = (Math.abs(Math.round(voyage.seed ?? 0)) % 99) + 1;
+      const fno = makeFixtureNo(seq);
+      setFixtureNo(fno);
+      setFixtureNumber(voyage.id, fno);
+      setLocked(true);
+      setFixOpen(false);
+      
+      // Save to local state
+      const label = vessel.name.trim() || 'New Estimate';
+      upsertSavedEstimate({
+        id: estimateId,
+        estNo: estNo,
+        vessel: label,
+        fixType: inputs.fixType,
+        status: 'Fixed',
+        profit: result.profit,
+        tce: result.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
+      });
+      
+      // Update backend state
+      if (voyage) setEstimationStatus(voyage.id, 'Fixed');
+      
+      addNotification(
+        `Estimation #${estNo} marked as Fixed — Charter Party Date: ${cpddStr} — Fixture No: ${fno}`,
+        'Chartering'
+      );
+    } catch (error) {
+      console.error('Failed to mark as fixed:', error);
+      addNotification(
+        `Failed to mark as fixed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'Chartering'
+      );
+    }
   };
   // Reopen a fixed estimate for editing — un-locks the form and reverts to
   // "On Subs" so details can be changed and re-fixed.
@@ -1829,46 +2524,493 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   };
   // Cancel works from any state, including after the estimate has been fixed.
   const cancelEstimate = () => {
-    setLocked(false);
-    setStatus('Cancelled');
-    setFixtureNo(null);
+    const confirmed = window.confirm(
+      'Are you sure you want to cancel this fixture?\n\nThis action will mark the estimation as Cancelled and cannot be undone.'
+    );
+    if (!confirmed) return;
+    
+    try {
+      setLocked(false);
+      setStatus('Cancelled');
+      setFixtureNo(null);
+      
+      // Update backend state
+      if (voyage) setEstimationStatus(voyage.id, 'Cancelled');
+      
+      // Save to local state
+      const label = vessel.name.trim() || 'New Estimate';
+      upsertSavedEstimate({
+        id: estimateId,
+        estNo: estNo,
+        vessel: label,
+        fixType: inputs.fixType,
+        status: 'Cancelled',
+        profit: result.profit,
+        tce: result.tce,
+        savedAt: new Date().toLocaleString(),
+        data: { inputs, vessel },
+      });
+      
+      addNotification(
+        `Estimation #${estNo} cancelled — ${label}`,
+        'Chartering'
+      );
+    } catch (error) {
+      console.error('Failed to cancel estimation:', error);
+      addNotification(
+        `Failed to cancel estimation: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'Chartering'
+      );
+    }
   };
   // Hand the fixed voyage over to Operations and notify the team to assign a PIC.
   const copyToOperations = () => {
     if (!voyage || status !== 'Fixed') return;
-    const firstLoad = inputs.ports.find((p) => p.type === 'Loading')?.port ?? voyage.portFrom ?? '';
-    const firstDisch = inputs.ports.find((p) => p.type === 'Discharging')?.port ?? voyage.portTo ?? '';
+
+    // Extract ports from estimation
+    const deliveryPort = inputs.ports.find((p) => p.type === 'Delivery')?.port || '';
+    const loadingPorts = inputs.ports.filter((p) => p.type === 'Loading' || p.type === 'Part Loading');
+    const dischargingPorts = inputs.ports.filter((p) => p.type === 'Discharging' || p.type === 'Part Discharging');
+    const redeliveryPort = inputs.ports.find((p) => p.type === 'Redelivery')?.port || '';
+    
+    const firstLoad = loadingPorts[0]?.port ?? voyage.portFrom ?? '';
+    const firstDisch = dischargingPorts[0]?.port ?? voyage.portTo ?? '';
+    const cargo = inputs.cargoes[0];
+    
+    // Format dates to recap format (dd-mm-yyyy)
+    const formatDateToRecap = (isoDate: string): string => {
+      if (!isoDate) return '';
+      const date = new Date(isoDate);
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const year = date.getFullYear();
+      return `${day}-${month}-${year}`;
+    };
+    
+    // Build ETA plan with legs from estimation
+    const buildEtaLegList = () => {
+      const legs: any[] = [];
+      for (let i = 0; i < inputs.ports.length; i++) {
+        const port = inputs.ports[i];
+        
+        // Sea leg to this port (if there's a previous port)
+        if (i > 0) {
+          const prevPort = inputs.ports[i - 1];
+          legs.push({
+            from: prevPort.port,
+            to: port.port,
+            kind: 'sea',
+            type: port.type === 'Discharging' || port.type === 'Part Discharging' ? 'Laden' : 'Ballast',
+            distNonEca: String(port.distance - port.ecaDistance),
+            distEca: String(port.ecaDistance),
+            speed: String(port.speed),
+            wf: String(port.wf),
+            portDays: '',
+            consVlsfo: String(inputs.perf.fullMainNormal.laden),
+            consMgo: String(inputs.perf.fullSubNormal.sea),
+            supVlsfo: '',
+            supMgo: '',
+            tz: '0',
+          });
+        }
+        
+        // Port leg
+        if (port.type !== 'Ballast' && port.type !== 'Delivery') {
+          legs.push({
+            from: port.port,
+            to: port.port,
+            kind: 'port',
+            type: port.type,
+            distNonEca: '0',
+            distEca: '0',
+            speed: '',
+            wf: '',
+            portDays: String(port.idle + port.work),
+            consVlsfo: String(inputs.perf.fullMainNormal.idle + inputs.perf.fullMainNormal.work),
+            consMgo: String(inputs.perf.fullSubNormal.idle + inputs.perf.fullSubNormal.work),
+            supVlsfo: '',
+            supMgo: '',
+            tz: '0',
+          });
+        }
+      }
+      return legs;
+    };
+    
+    // Start date from estimation
+    const startDate = new Date(inputs.startDate);
+    const startDateStr = formatDateToRecap(inputs.startDate);
+
+    // Distribute the estimation's cargoes across the vessel's actual physical holds (from the
+    // fleet record) instead of creating exactly one hold per cargo — so e.g. a single-grade
+    // cargo on a 5-hold vessel still shows 5 holds, not 1.
+    const vesselHoldCount = (() => {
+      const match = vessels.find((v) => v.name.trim().toLowerCase() === vessel.name.trim().toLowerCase());
+      const n = Number(match?.holds);
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : Math.max(1, inputs.cargoes.length);
+    })();
+    const totalCargoQty = inputs.cargoes.reduce((s, c) => s + c.quantity, 0) || 1;
+    const holdsList: { name: string; cargo: string; qty: string }[] = [];
+    inputs.cargoes.forEach((c, ci) => {
+      const isLast = ci === inputs.cargoes.length - 1;
+      const share = isLast ? vesselHoldCount - holdsList.length : Math.max(1, Math.round(vesselHoldCount * (c.quantity / totalCargoQty)));
+      const perHoldQty = share > 0 ? c.quantity / share : 0;
+      for (let h = 0; h < share; h++) {
+        holdsList.push({ name: `Hold ${holdsList.length + 1}`, cargo: c.name, qty: String(Math.round(perHoldQty)) });
+      }
+    });
+    while (holdsList.length < vesselHoldCount) holdsList.push({ name: `Hold ${holdsList.length + 1}`, cargo: '', qty: '0' });
+
+    // Create comprehensive recap object
+    const recap: any = {
+      vesselName: vessel.name.trim() || '',
+      vesselEmail: '',
+      draftBallast: String(vessel.draft),
+      draftLaden: String(vessel.draft),
+      voyageFixType: inputs.fixType,
+      owners: '',
+      cpDate: cpdd || startDateStr,
+      laycanStart: startDateStr,
+      laycanEnd: startDateStr,
+      ownersBroker: '',
+      hirePerDay: String(Math.round(inputs.commercial.dailyHire)),
+      charterers: cargo?.account || '',
+      charterersLaycanStart: '',
+      charterersLaycanEnd: '',
+      charterersBroker: '',
+      freightPerMt: cargo ? String(cargo.frt) : '',
+      demDespatch: String(loadingPorts[0]?.dem || 0),
+      despatchTerm: '',
+      deliveryPort: deliveryPort,
+      deliveryTerm: '',
+      deliveryDateTime: startDateStr + ' 00:00',
+      redeliveryPort: redeliveryPort,
+      redeliveryTerm: '',
+      redeliveryDateTime: formatDateToRecap(addDays(startDate, Math.ceil(result.voyageDays)).toISOString()) + ' 00:00',
+      deliveryNotices: '',
+      wxClause: '',
+      ilohc: String(inputs.commercial.ilohc),
+      cve: String(inputs.commercial.cev),
+      adcom: inputs.commercial.hAddCommPct ? `${inputs.commercial.hAddCommPct}%` : '',
+      brokerage: String(inputs.cargoes[0]?.brkgPct || ''),
+      pniClub: '',
+      arbitrationPlace: '',
+      governingLaw: '',
+      sanctionsClause: '',
+      ballastBonus: String(inputs.commercial.ballastBonus || 0),
+      redeliveryNotices: '',
+      hullCleaningClause: '',
+      cargoName: inputs.cargoes.map((c) => c.name).join(' / '),
+      holdCount: String(vesselHoldCount),
+      cpQuantity: cargo ? String(cargo.quantity) : '',
+      holdCleaning: '',
+      finalQtyLoaded: cargo ? String(cargo.quantity) : '',
+      blIssueDate: '',
+      loadPort: loadingPorts.map((p) => p.port).join(' + '),
+      norAtLoadPort: '',
+      loadRate: loadingPorts[0] ? String(loadingPorts[0].ldRate) : '',
+      pdaLoadPort: '',
+      frtPaymentTerms: cargo?.term || '',
+      dischargePort: dischargingPorts.map((p) => p.port).join(' + '),
+      norAtDPort: '',
+      dischRate: dischargingPorts[0] ? String(dischargingPorts[0].ldRate) : '',
+      pdaDPort: '',
+      freeDa: '',
+      loiOblDPort: '',
+      loiStatus: '',
+      foCons: String(Math.round(result.vlsfoCons)),
+      foPrice: String(inputs.commercial.vlsfoPrice),
+      doCons: String(Math.round(result.mgoCons)),
+      doPrice: String(inputs.commercial.mgoPrice),
+      portDaLoad: loadingPorts[0] ? String(loadingPorts[0].portCharge) : '',
+      portDaDisch: dischargingPorts[0] ? String(dischargingPorts[0].portCharge) : '',
+      otherCost: String(inputs.expenses.reduce((s, e) => s + e.amount, 0)),
+      miscIncome: '',
+      cpSpeed: String(inputs.perf.full.laden),
+      cpCons: String(inputs.perf.fullMainNormal.laden),
+      cpConsByFuel: {},
+      hireCurrency: inputs.currency,
+      freightCurrency: inputs.currency,
+      cargoQtyUnit: cargo?.unit || '',
+      charterHirePerDay: String(Math.round(inputs.commercial.dailyHireOut)),
+      charterHireCurrency: inputs.currency,
+      firstHirePeriodDays: String(Math.ceil(result.voyageDays / 15) * 15 || ''),
+      firstHireInclude: '',
+      firstHireDays: '',
+      firstHireBasis: 'PRO RATA',
+      hireEveryDays: '15',
+      charterFirstHirePeriodDays: String(Math.ceil(result.voyageDays / 15) * 15 || ''),
+      charterFirstHireInclude: '',
+      charterFirstHireDays: '',
+      charterFirstHireBasis: 'PRO RATA',
+      charterHireEveryDays: '15',
+      hirePayState: {},
+      charterHirePayState: {},
+      freightPaymentDays: '',
+      freightPaymentBasis: '',
+      serviceProviders: [],
+      additionalVoyageLegs: inputs.ports.map((p, index) => ({ p, index })).filter(({ p }) => /bunker/i.test(p.type)).map(({ p, index }) => ({
+        id: `est-bunker-${p.id}`,
+        type: 'Bunker Port',
+        port: p.port,
+        term: p.laytimeTerm || 'Upon arrival',
+        rate: String(p.ldRate || ''),
+        pda: String(p.portCharge || ''),
+        dateTime: result.perLeg[index]?.arrival || '',
+        notice: 'Bunker supply schedule',
+        loi: '',
+        loiStatus: '',
+      })),
+      bunkerSpecs: '',
+      bunkers: [
+        { fuel: 'VLSFO', bod: String(Math.round(result.vlsfoCons)), expBor: inputs.commercial.borQty ? String(Math.round(inputs.commercial.borQty)) : '', cpPrice: String(inputs.commercial.vlsfoPrice), bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+        { fuel: 'ULSFO', bod: String(Math.round(result.ulsfoCons)), expBor: '', cpPrice: String(inputs.commercial.ulsfoPrice || ''), bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+        { fuel: 'MGO', bod: String(Math.round(result.mgoCons)), expBor: '', cpPrice: String(inputs.commercial.mgoPrice), bookedPrice: '', masterReq: '', actualSupply: '', actualBor: '' },
+      ],
+      pnlNotes: {},
+      etaPlan: {
+        startDep: startDateStr + ' 00:00',
+        startRobVlsfo: String(Math.round(result.vlsfoCons * 1.15)),
+        startRobMgo: String(Math.round(result.mgoCons * 0.1)),
+        weatherMargin: '',
+        perf: {
+          speedMode: inputs.perf.speedMode,
+          full: { ballast: String(inputs.perf.full.ballast), laden: String(inputs.perf.full.laden) },
+          eco: { ballast: String(inputs.perf.eco.ballast), laden: String(inputs.perf.eco.laden) },
+          customs: inputs.perf.customs.map((c) => ({ id: c.id, name: c.name, ballast: String(c.ballast), laden: String(c.laden) })),
+          fullMainNormal: {
+            type: String(inputs.perf.fullMainNormal.type),
+            ballast: String(inputs.perf.fullMainNormal.ballast),
+            laden: String(inputs.perf.fullMainNormal.laden),
+            idle: String(inputs.perf.fullMainNormal.idle),
+            work: String(inputs.perf.fullMainNormal.work),
+          },
+          fullMainEca: {
+            type: String(inputs.perf.fullMainEca.type),
+            ballast: String(inputs.perf.fullMainEca.ballast),
+            laden: String(inputs.perf.fullMainEca.laden),
+            idle: String(inputs.perf.fullMainEca.idle),
+            work: String(inputs.perf.fullMainEca.work),
+          },
+          fullSubNormal: { type: String(inputs.perf.fullSubNormal.type), sea: String(inputs.perf.fullSubNormal.sea), idle: String(inputs.perf.fullSubNormal.idle), work: String(inputs.perf.fullSubNormal.work) },
+          fullSubEca: { type: String(inputs.perf.fullSubEca.type), sea: String(inputs.perf.fullSubEca.sea), idle: String(inputs.perf.fullSubEca.idle), work: String(inputs.perf.fullSubEca.work) },
+          ecoMainNormal: {
+            type: String(inputs.perf.ecoMainNormal.type),
+            ballast: String(inputs.perf.ecoMainNormal.ballast),
+            laden: String(inputs.perf.ecoMainNormal.laden),
+            idle: String(inputs.perf.ecoMainNormal.idle),
+            work: String(inputs.perf.ecoMainNormal.work),
+          },
+          ecoMainEca: {
+            type: String(inputs.perf.ecoMainEca.type),
+            ballast: String(inputs.perf.ecoMainEca.ballast),
+            laden: String(inputs.perf.ecoMainEca.laden),
+            idle: String(inputs.perf.ecoMainEca.idle),
+            work: String(inputs.perf.ecoMainEca.work),
+          },
+          ecoSubNormal: { type: String(inputs.perf.ecoSubNormal.type), sea: String(inputs.perf.ecoSubNormal.sea), idle: String(inputs.perf.ecoSubNormal.idle), work: String(inputs.perf.ecoSubNormal.work) },
+          ecoSubEca: { type: String(inputs.perf.ecoSubEca.type), sea: String(inputs.perf.ecoSubEca.sea), idle: String(inputs.perf.ecoSubEca.idle), work: String(inputs.perf.ecoSubEca.work) },
+          customMainNormal: {
+            type: String(inputs.perf.customMainNormal.type),
+            ballast: String(inputs.perf.customMainNormal.ballast),
+            laden: String(inputs.perf.customMainNormal.laden),
+            idle: String(inputs.perf.customMainNormal.idle),
+            work: String(inputs.perf.customMainNormal.work),
+          },
+          customMainEca: {
+            type: String(inputs.perf.customMainEca.type),
+            ballast: String(inputs.perf.customMainEca.ballast),
+            laden: String(inputs.perf.customMainEca.laden),
+            idle: String(inputs.perf.customMainEca.idle),
+            work: String(inputs.perf.customMainEca.work),
+          },
+          customSubNormal: { type: String(inputs.perf.customSubNormal.type), sea: String(inputs.perf.customSubNormal.sea), idle: String(inputs.perf.customSubNormal.idle), work: String(inputs.perf.customSubNormal.work) },
+          customSubEca: { type: String(inputs.perf.customSubEca.type), sea: String(inputs.perf.customSubEca.sea), idle: String(inputs.perf.customSubEca.idle), work: String(inputs.perf.customSubEca.work) },
+          mainNormal: {
+            type: 'VLSFO',
+            ballast: String(inputs.perf.fullMainNormal.ballast),
+            laden: String(inputs.perf.fullMainNormal.laden),
+            idle: String(inputs.perf.fullMainNormal.idle),
+            work: String(inputs.perf.fullMainNormal.work),
+          },
+          mainEca: {
+            type: 'ULSFO',
+            ballast: String(inputs.perf.fullMainEca.ballast),
+            laden: String(inputs.perf.fullMainEca.laden),
+            idle: String(inputs.perf.fullMainEca.idle),
+            work: String(inputs.perf.fullMainEca.work),
+          },
+          subNormal: { type: 'MGO', sea: String(inputs.perf.fullSubNormal.sea), idle: String(inputs.perf.fullSubNormal.idle), work: String(inputs.perf.fullSubNormal.work) },
+          subEca: { type: 'MGO', sea: String(inputs.perf.fullSubEca.sea), idle: String(inputs.perf.fullSubEca.idle), work: String(inputs.perf.fullSubEca.work) },
+        },
+        legs: buildEtaLegList(),
+      },
+      stowage: {
+        lightship: String(Math.round(vessel.dwt * 0.2)),
+        autoBunker: true,
+        constants: '500',
+        freshWater: '150',
+        ballastWater: '150',
+        refDisplacement: String(Math.round(vessel.dwt * 1.2)),
+        points: [
+          {
+            name: 'Lightship',
+            displacement: String(Math.round(vessel.dwt * 0.2)),
+            density: '1.000',
+            vlsfo: '0',
+            mgo: '0',
+            bw: '0',
+            fw: '0',
+            constants: '0',
+          },
+          {
+            name: 'VLSFO On Board',
+            displacement: String(Math.round(result.vlsfoCons * 1.15)),
+            density: '0.890',
+            vlsfo: String(Math.round(result.vlsfoCons * 1.15)),
+            mgo: '0',
+            bw: '0',
+            fw: '0',
+            constants: '0',
+          },
+          {
+            name: 'MGO On Board',
+            displacement: String(Math.round(result.mgoCons * 0.1)),
+            density: '0.860',
+            vlsfo: '0',
+            mgo: String(Math.round(result.mgoCons * 0.1)),
+            bw: '0',
+            fw: '0',
+            constants: '0',
+          },
+          {
+            name: 'Ballast Water',
+            displacement: '150',
+            density: '1.025',
+            vlsfo: '0',
+            mgo: '0',
+            bw: '150',
+            fw: '0',
+            constants: '0',
+          },
+          {
+            name: 'Fresh Water',
+            displacement: '150',
+            density: '1.000',
+            vlsfo: '0',
+            mgo: '0',
+            bw: '0',
+            fw: '150',
+            constants: '0',
+          },
+          {
+            name: 'Stores & Constants',
+            displacement: '500',
+            density: '1.000',
+            vlsfo: '0',
+            mgo: '0',
+            bw: '0',
+            fw: '0',
+            constants: '500',
+          },
+        ],
+        holds: holdsList.map((h) => ({
+          name: h.name,
+          cargo: h.cargo,
+          qty: h.qty,
+          capacity: '',
+          grainCap: '',
+          baleCap: '',
+          tankTopArea: '',
+          tankTopMax: '',
+        })),
+        draft: {
+          tpc: String(vessel.tpc),
+          densityFrom: '',
+          densityTo: '',
+          draftCurrent: String(vessel.draft),
+          dispSW: '',
+          vlsfo: String(Math.round(result.vlsfoCons * 1.15)),
+          mgo: String(Math.round(result.mgoCons * 0.1)),
+          bw: '',
+          fw: '',
+          constants: '',
+          shipSurveyQty: cargo ? String(cargo.quantity) : '',
+          shoreScaleQty: cargo ? String(cargo.quantity) : '',
+          loiTolerancePct: '0.5',
+        },
+        grades: inputs.cargoes.map((c) => ({
+          grade: c.name,
+          sf: cargoStowageFactor(c.name),
+          qty: String(c.quantity),
+          sfAuto: true,
+        })),
+        // Build ports from ALL ports in estimation, not just first/last
+        ports: inputs.ports
+          .filter((p) => p.port) // Only include ports with names
+          .map((p) => ({
+            name: p.port,
+            maxDraft: '',
+            density: '',
+            remarks: p.type,
+          })),
+        summerDraft: String(vessel.draft),
+        winterDraft: String(vessel.draft),
+        tropicalDraft: String(vessel.draft),
+      },
+      freightLaytime: undefined,
+      notes: inputs.remark || '',
+    };
+    
+    // Save voyage in Voyage system - use ONLY estimation data for ports
     const saved = upsertCreatedVoyage({
       id: voyage.id,
-      vessel: vessel.name.trim() || voyage.vessel || 'New Voyage',
-      imo: voyage.imo || '',
-      vesselType: vessel.type || voyage.vesselType || '',
-      dwt: vessel.dwt > 0 ? String(Math.round(vessel.dwt)) : (voyage.dwt || ''),
-      built: vessel.built || voyage.built || 0,
-      client: voyage.client || '',
-      clientEmail: voyage.clientEmail || '',
-      pic: voyage.pic || 'You',
-      service: voyage.service || 'PMO',
+      vessel: vessel.name.trim() || '',
+      imo: '',
+      vesselType: vessel.type || '',
+      dwt: vessel.dwt > 0 ? String(Math.round(vessel.dwt)) : '',
+      built: vessel.built || 0,
+      client: '',
+      clientEmail: '',
+      pic: '',
+      service: '',
       status: 'At Sea',
       portFrom: firstLoad,
       portTo: firstDisch,
-      cpSpeed: inputs.perf.full.laden || voyage.cpSpeed || 0,
-      cpCons: inputs.perf.mainNormal.laden || voyage.cpCons || 0,
-      instSpeed: inputs.perf.eco.laden || voyage.instSpeed || 0,
-      instCons: inputs.perf.mainNormal.laden || voyage.instCons || 0,
-      price: inputs.commercial.dailyHire || voyage.price || 0,
-      pricingBasis: voyage.pricingBasis || 'Per Day',
-      costPerDay: inputs.commercial.dailyHire || voyage.costPerDay || 0,
-      foCost: inputs.commercial.vlsfoPrice || voyage.foCost || 0,
-      goCost: inputs.commercial.mgoPrice || voyage.goCost || 0,
-      euaCost: voyage.euaCost || 0,
-      openTasks: voyage.openTasks || 0,
-      open: voyage.open || 'OPEN',
-      health: voyage.health || 74,
-      seed: voyage.seed || (Date.now() % 10_000),
+      cpSpeed: inputs.perf.full.laden || 0,
+      cpCons: inputs.perf.fullMainNormal.laden || 0,
+      instSpeed: inputs.perf.eco.laden || 0,
+      instCons: inputs.perf.ecoMainNormal.laden || 0,
+      price: inputs.commercial.dailyHire || 0,
+      pricingBasis: '',
+      costPerDay: inputs.commercial.dailyHire || 0,
+      foCost: inputs.commercial.vlsfoPrice || 0,
+      goCost: inputs.commercial.mgoPrice || 0,
+      euaCost: 0,
+      openTasks: 0,
+      open: 'OPEN',
+      health: 74,
+      seed: Date.now() % 10_000,
     });
+    
+    // Save the comprehensive recap to Operations module
+    void (async () => {
+      try {
+        const { writeOpsRecapRaw, writeOpsEstBaseline } = await import('../data/opsRecap');
+        const recapJson = JSON.stringify(recap);
+        writeOpsRecapRaw(saved.id, recapJson);
+        // Snapshot the fixed estimate so the Live P&L "Estimated" column stays put.
+        writeOpsEstBaseline(saved.id, recapJson);
+      } catch (error) {
+        console.error('Failed to save operations recap:', error);
+      }
+    })();
+    
     handoverToOperations(saved.id);
-    addNotification(`New voyage ${saved.id} — ${saved.vessel} fixed & sent to Operations. Please assign a PIC.`, 'Operations');
+    addNotification(
+      `Fixture ${estNo} copied to Operations — ${saved.vessel} | Load: ${firstLoad} | Disch: ${firstDisch} | ${money(result.profit)} profit | ${fmt(result.tce, 0)}/day TCE`,
+      'Operations'
+    );
   };
 
   /* -------- compare scenarios -------- */
@@ -1878,8 +3020,8 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     basis,
     ballastSpeed: inputs.perf.full.ballast,
     ladenSpeed: inputs.perf.full.laden,
-    foBallast: inputs.perf.mainNormal.ballast,
-    foLaden: inputs.perf.mainNormal.laden,
+    foBallast: activeMain.normal.ballast,
+    foLaden: activeMain.normal.laden,
     dailyHire: inputs.commercial.dailyHire,
     hAddCommPct: inputs.commercial.hAddCommPct,
     qty: inputs.cargoes[0]?.quantity ?? 0,
@@ -1903,9 +3045,9 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   const removeScenario = (id: string) => setScenarios((s) => s.filter((x) => x.id !== id));
 
   const stat = STATUS_META[status];
-  const activeCanals = inputs.canals.list.join(', ');
   // Port-type dropdown values from the admin store (+ math-critical Ballast/Laden).
-  const legTypes = ['Ballast', 'Laden', ...opts.portTypes];
+  const legacyPortType = (value: string) => ({ Bunkering: 'Bunker', 'Dry Dock': 'DryDock', Redelivery: 'ReDelivery', Waiting: 'Idle / Waiting', Idle: 'Idle / Waiting', Other: 'Idle / Waiting', 'Bunker Port': 'Bunker' } as Record<string, string>)[value] || value;
+  const legTypes = ['Ballast', 'Laden', ...PORT_TYPE_OPTIONS];
   // Drive currency-aware money() formatting for this render.
   ACTIVE_CURRENCY = inputs.currency;
 
@@ -1915,10 +3057,24 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
     'Summer Zone Entry',
   ];
   const openLq = () => {
+    // Calculate bunker requirements based on voyage data
+    const totalSeaDays = result.perLeg.reduce((sum, leg) => sum + (leg?.sea ?? 0), 0);
+    // Use loaded main engine consumption as average for voyage bunker estimation (MT/day)
+    const mainFoConsumption = getActiveMainConsumption().normal.laden ?? 30; // Default to 30 MT/day if not set
+    const estimatedVlsfo = Math.round(mainFoConsumption * totalSeaDays * 1.15); // 15% buffer for reserve
+    const estimatedMgo = Math.round(estimatedVlsfo * 0.15); // ~15% of VLSFO for maneuvering/port ops
+    
     setLq((s) => ({
       ...s,
       summerDwt: s.summerDwt || vessel.dwt,
       lightship: s.lightship || Math.round(vessel.dwt * 0.2),
+      densityAtPort: s.densityAtPort || 1.025,
+      // Only set bunker quantities if not already manually entered
+      vlsfo: s.vlsfo > 0 ? s.vlsfo : estimatedVlsfo,
+      mgo: s.mgo > 0 ? s.mgo : estimatedMgo,
+      bw: s.bw > 0 ? s.bw : 150, // Typical ballast water in port
+      fw: s.fw > 0 ? s.fw : 150, // Fresh water for crew
+      constants: s.constants > 0 ? s.constants : 500, // Stores, spares, provisions
       point: s.point || lqPoints[0] || '',
     }));
     setLqOpen(true);
@@ -1985,7 +3141,18 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
   );
 
   return (
-    <div className="fv-ce">
+    <>
+      <ConfirmationDialog
+        isOpen={showDeleteConfirm}
+        title="Delete Estimation"
+        message="Delete this estimation? This action cannot be undone."
+        isDangerous={true}
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setShowDeleteConfirm(false)}
+        confirmText="Delete"
+        cancelText="Cancel"
+      />
+      <div className="fv-ce">
       {fixOpen && (
         <ToolModal title="Mark Fixed — Charter Party Date" onClose={() => setFixOpen(false)}>
           <p className="fv-ce__lq-hint">Select the Charter Party (CP) date. This is recorded as the CPDD, so a fix marked a few days late still carries the correct date.</p>
@@ -2073,10 +3240,19 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
           >
             <i className="fas fa-paste" /> {quickPasteOpen ? 'Hide Paste Box' : 'Paste Details'}
           </button>
-          <button type="button" className="fv-ce__btn" onClick={addCargoVariant}><i className="fas fa-clone" /> Duplicate</button>
+          <button type="button" className="fv-ce__btn" onClick={duplicate}><i className="fas fa-clone" /> Duplicate</button>
           <button type="button" className={`fv-ce__btn${compareOpen ? ' fv-ce__btn--on' : ''}`} onClick={() => setCompareOpen((v) => !v)}><i className="fas fa-scale-balanced" /> Compare</button>
-          <button type="button" className="fv-ce__btn fv-ce__btn--primary" onClick={save}><i className="fas fa-floppy-disk" /> Save</button>
+          <button 
+            type="button" 
+            className="fv-ce__btn fv-ce__btn--primary" 
+            onClick={save}
+            disabled={isSaving}
+          >
+            <i className={`fas ${isSaving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />
+            {isSaving ? ' Saving...' : ' Save'}
+          </button>
           <button type="button" className="fv-ce__btn" onClick={discard}><i className="fas fa-rotate-left" /> Discard</button>
+          <button type="button" className="fv-ce__btn fv-ce__btn--danger" onClick={deleteEstimate} title="Delete this estimation permanently"><i className="fas fa-trash" /> Delete</button>
           <button type="button" className="fv-ce__btn" onClick={() => setTplOpen(true)}><i className="fas fa-file-lines" /> Template</button>
           <button type="button" className="fv-ce__btn" onClick={exportPdf}><i className="fas fa-file-pdf" /> PDF</button>
           <button type="button" className="fv-ce__btn fv-ce__btn--amber" onClick={() => changeStatus('On Subs')} disabled={locked}><i className="fas fa-hourglass-half" /> On Subs</button>
@@ -2093,7 +3269,7 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
         </div>
       </header>
 
-      {(blankDraft || quickPasteOpen) && (
+      {quickPasteOpen && (
         <section className="fv-ce__quickfill">
           <div className="fv-ce__quickfill-head">
             <h3>Paste Vessel & Cargo Details</h3>
@@ -2307,19 +3483,19 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
               <tbody>
                 <tr>
                   <td>Normal</td>
-                  <td>{fuelCell(inputs.perf.mainNormal.type, (v) => patchMain('mainNormal', { type: v }))}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainNormal.ballast, (n) => patchMain('mainNormal', { ballast: n }), 56)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainNormal.laden, (n) => patchMain('mainNormal', { laden: n }), 56)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainNormal.idle, (n) => patchMain('mainNormal', { idle: n }), 50)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainNormal.work, (n) => patchMain('mainNormal', { work: n }), 50)}</td>
+                  <td>{fuelCell(activeMain.normal.type, (v) => patchMain(activeMain.normalKey, { type: v }))}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.normal.ballast, (n) => patchMain(activeMain.normalKey, { ballast: n }), 56)}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.normal.laden, (n) => patchMain(activeMain.normalKey, { laden: n }), 56)}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.normal.idle, (n) => patchMain(activeMain.normalKey, { idle: n }), 50)}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.normal.work, (n) => patchMain(activeMain.normalKey, { work: n }), 50)}</td>
                 </tr>
                 <tr>
                   <td>ECA</td>
-                  <td>{fuelCell(inputs.perf.mainEca.type, (v) => patchMain('mainEca', { type: v }))}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainEca.ballast, (n) => patchMain('mainEca', { ballast: n }), 56)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainEca.laden, (n) => patchMain('mainEca', { laden: n }), 56)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainEca.idle, (n) => patchMain('mainEca', { idle: n }), 50)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.mainEca.work, (n) => patchMain('mainEca', { work: n }), 50)}</td>
+                  <td>{fuelCell(activeMain.eca.type, (v) => patchMain(activeMain.ecaKey, { type: v }))}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.eca.ballast, (n) => patchMain(activeMain.ecaKey, { ballast: n }), 56)}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.eca.laden, (n) => patchMain(activeMain.ecaKey, { laden: n }), 56)}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.eca.idle, (n) => patchMain(activeMain.ecaKey, { idle: n }), 50)}</td>
+                  <td className="fv-ce__r">{numCell(activeMain.eca.work, (n) => patchMain(activeMain.ecaKey, { work: n }), 50)}</td>
                 </tr>
               </tbody>
             </table>
@@ -2339,17 +3515,17 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
               <tbody>
                 <tr>
                   <td>Normal</td>
-                  <td>{fuelCell(inputs.perf.subNormal.type, (v) => patchSub('subNormal', { type: v }))}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.subNormal.sea, (n) => patchSub('subNormal', { sea: n }), 50)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.subNormal.idle, (n) => patchSub('subNormal', { idle: n }), 50)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.subNormal.work, (n) => patchSub('subNormal', { work: n }), 50)}</td>
+                  <td>{fuelCell(activeSub.normal.type, (v) => patchSub(activeSub.normalKey, { type: v }))}</td>
+                  <td className="fv-ce__r">{numCell(activeSub.normal.sea, (n) => patchSub(activeSub.normalKey, { sea: n }), 50)}</td>
+                  <td className="fv-ce__r">{numCell(activeSub.normal.idle, (n) => patchSub(activeSub.normalKey, { idle: n }), 50)}</td>
+                  <td className="fv-ce__r">{numCell(activeSub.normal.work, (n) => patchSub(activeSub.normalKey, { work: n }), 50)}</td>
                 </tr>
                 <tr>
                   <td>ECA</td>
-                  <td>{fuelCell(inputs.perf.subEca.type, (v) => patchSub('subEca', { type: v }))}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.subEca.sea, (n) => patchSub('subEca', { sea: n }), 50)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.subEca.idle, (n) => patchSub('subEca', { idle: n }), 50)}</td>
-                  <td className="fv-ce__r">{numCell(inputs.perf.subEca.work, (n) => patchSub('subEca', { work: n }), 50)}</td>
+                  <td>{fuelCell(activeSub.eca.type, (v) => patchSub(activeSub.ecaKey, { type: v }))}</td>
+                  <td className="fv-ce__r">{numCell(activeSub.eca.sea, (n) => patchSub(activeSub.ecaKey, { sea: n }), 50)}</td>
+                  <td className="fv-ce__r">{numCell(activeSub.eca.idle, (n) => patchSub(activeSub.ecaKey, { idle: n }), 50)}</td>
+                  <td className="fv-ce__r">{numCell(activeSub.eca.work, (n) => patchSub(activeSub.ecaKey, { work: n }), 50)}</td>
                 </tr>
               </tbody>
             </table>
@@ -2542,10 +3718,6 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
           </div>
         }
       >
-        <div className="fv-ce__port-summary">
-          Total Duration: {fmt(result.voyageDays, 2)} Days (Ballast: {fmt(result.ballastDays, 2)}, Laden: {fmt(result.ladenDays, 2)}, ECA: {fmt(result.ecaDays, 2)}, Port: {fmt(result.portDays, 2)}) · (Port local time) {result.startStr} ~ {result.endStr}
-          {activeCanals && <> · Canals: {activeCanals}</>}
-        </div>
         <div className="fv-ce__tablewrap">
           <table className="fv-ce__table">
             <thead>
@@ -2577,7 +3749,7 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
                   <tr key={p.id}>
                     <td className="fv-ce__num">{idx + 1}</td>
                     <td>
-                      <select className="fv-ce__cell-select" value={p.type} disabled={locked} onChange={(e) => updatePort(p.id, { type: e.target.value as LegType })}>
+                      <select className="fv-ce__cell-select" value={legacyPortType(p.type)} disabled={locked} onChange={(e) => updatePort(p.id, { type: e.target.value as LegType })}>
                         {legTypes.map((t) => (
                           <option key={t} value={t}>
                             {t}
@@ -2595,18 +3767,42 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
                     <td>{optCell(p.laytimeTerm, (v) => updatePort(p.id, { laytimeTerm: v }), opts.laytimeTerms, 96)}</td>
                     <td className="fv-ce__r">{autoNumCell(p.idle, (n) => updatePort(p.id, { idle: n }))}</td>
                     <td className="fv-ce__r">
-                      {p.ldRate > 0 && (handledQty[p.id] ?? 0) > 0
-                        ? <span className="fv-ce__calc" title="From L/D rate × cargo handled">{fmt(leg ? leg.work : portWorkDays(p, handledQty[p.id] ?? 0), 2)}</span>
-                        : autoNumCell(p.work, (n) => updatePort(p.id, { work: n }))}
+                      {leg ? <span className="fv-ce__calc" title="Auto-calculated from L/D rate × cargo handled">{fmt(leg.work, 2)}</span> : <span className="fv-ce__calc">—</span>}
                     </td>
                     <td className="fv-ce__r">{autoNumCell(p.dem, (n) => updatePort(p.id, { dem: n }))}</td>
                     <td className="fv-ce__r">
-                      {leg && (leg.dem > 0 || leg.des > 0)
-                        ? <span className={`fv-ce__calc ${leg.dem > 0 ? 'fv-ce__pos' : 'fv-ce__neg'}`} title={leg.dem > 0 ? 'Demurrage (income)' : 'Despatch (cost)'}>{leg.dem > 0 ? `+${fmt(leg.dem)}` : `-${fmt(leg.des)}`}</span>
-                        : <span className="fv-ce__calc">—</span>}
+                      {leg ? (
+                        leg.dem > 0 ? (
+                          <span className="fv-ce__calc fv-ce__dem" title="Demurrage (charterer cost)">-{fmt(leg.dem)}</span>
+                        ) : leg.des > 0 ? (
+                          <span className="fv-ce__calc fv-ce__des" title="Despatch (owner benefit)">+{fmt(leg.des)}</span>
+                        ) : (
+                          <span className="fv-ce__calc">0</span>
+                        )
+                      ) : (
+                        <span className="fv-ce__calc">—</span>
+                      )}
                     </td>
                     <td className="fv-ce__r">{autoNumCell(p.portCharge, (n) => updatePort(p.id, { portCharge: n }))}</td>
-                    <td className="fv-ce__calc">{leg?.arrival ?? '—'}</td>
+                    <td className="fv-ce__calc">
+                      {idx === 0 ? (
+                        <input 
+                          type="datetime-local" 
+                          className="fv-ce__arrival-date-input"
+                          value={manualStartDate ? `${manualStartDate}T00:00` : ''}
+                          disabled={locked}
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              const dateStr = e.target.value.split('T')[0];
+                              setManualStartDate(dateStr);
+                            }
+                          }}
+                          title="Edit first port arrival date"
+                        />
+                      ) : (
+                        leg?.arrival ?? '—'
+                      )}
+                    </td>
                     <td className="fv-ce__calc">{leg?.departure ?? '—'}</td>
                     <td>
                       <span className="fv-ce__row-actions">
@@ -2721,19 +3917,19 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
               </thead>
               <tbody>
                 <tr>
-                  <td>{inputs.perf.mainNormal.type}</td>
+                  <td>{getActiveMainConsumption().normal.type}</td>
                   <td className="fv-ce__r">{autoNumCell(inputs.commercial.vlsfoPrice, (n) => patchComm({ vlsfoPrice: n }))}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.vlsfoCons)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.vlsfoExp)}</td>
                 </tr>
                 <tr>
-                  <td>{inputs.perf.subNormal.type}</td>
+                  <td>{getActiveSubConsumption().normal.type}</td>
                   <td className="fv-ce__r">{autoNumCell(inputs.commercial.mgoPrice, (n) => patchComm({ mgoPrice: n }))}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.mgoCons)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.mgoExp)}</td>
                 </tr>
                 <tr>
-                  <td>{inputs.perf.mainEca.type} <span className="fv-ce__unit">(ECA)</span></td>
+                  <td>{getActiveMainConsumption().eca.type} <span className="fv-ce__unit">(ECA)</span></td>
                   <td className="fv-ce__r">{autoNumCell(inputs.commercial.ulsfoPrice, (n) => patchComm({ ulsfoPrice: n }))}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.ulsfoCons)}</td>
                   <td className="fv-ce__r fv-ce__calc">{fmt(result.ulsfoExp)}</td>
@@ -2873,5 +4069,6 @@ export function ChateringEstimationPage({ mode }: { mode?: 'create' } = {}) {
         </div>
       </Section>
     </div>
+    </>
   );
 }

@@ -1,4 +1,6 @@
-import { useSyncExternalStore } from 'react';
+import { useSyncExternalStore, useEffect } from 'react';
+import { accountsApi, type FinancialTransactionDto } from '../api/accountsApi';
+import { appendConfigHistory, newConfigHistoryId } from './acctConfigHistory';
 
 /**
  * Accounts — the single financial source of truth for ODAS.
@@ -65,6 +67,10 @@ export interface AuditEntry {
 
 export interface FinTxn {
   id: string;
+  /** Real database GUID (PUT /api/accounts/transactions/{id} requires a GUID, not the
+   * human-readable transactionNo held in `id`) — undefined until the create round-trip
+   * resolves for bridge-created transactions. */
+  backendId?: string;
   kind: TxnKind;
   category: TxnCategory;
   module: string;
@@ -257,7 +263,63 @@ function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
+function mapDtoToFinTxn(dto: FinancialTransactionDto): FinTxn {
+  let audit: AuditEntry[] = [];
+  try { if (dto.auditJson) audit = JSON.parse(dto.auditJson); } catch { /* ignore */ }
+
+  return {
+    id: dto.transactionNo || dto.id,
+    backendId: dto.id,
+    kind: dto.kind,
+    category: (dto.category as TxnCategory) || 'Freight',
+    module: dto.module,
+    company: dto.company,
+    vessel: dto.vesselName,
+    voyage: dto.voyage,
+    reference: dto.reference,
+    fixture: dto.fixture ?? undefined,
+    counterparty: dto.counterparty,
+    invoiceNo: dto.invoiceNo,
+    currency: dto.currency,
+    amount: dto.amount,
+    exchangeRate: dto.exchangeRate,
+    invoiceDate: dto.invoiceDate,
+    dueDate: dto.dueDate,
+    dueIso: dto.dueIso,
+    status: (dto.status as TxnStatus) || 'Draft',
+    approval: (dto.approval as Approval) || 'Approved',
+    priority: (dto.priority as Priority) || 'Medium',
+    pic: dto.pic,
+    bank: dto.bank ?? undefined,
+    method: dto.method ?? undefined,
+    paymentDate: dto.paymentDate ?? undefined,
+    paymentRef: dto.paymentRef ?? undefined,
+    swiftDocUrl: dto.swiftDocUrl ?? undefined,
+    remarks: dto.remarks ?? undefined,
+    audit: audit.length > 0 ? audit : [{ at: stamp(), user: dto.module, action: 'Loaded from server' }],
+  };
+}
+
+export async function syncAccountsFromBackend(): Promise<FinTxn[]> {
+  try {
+    const list = await accountsApi.getTransactions();
+    if (list && list.length > 0) {
+      const mapped = list.map(mapDtoToFinTxn);
+      txns = mapped;
+      autoMarkOverdue();
+      emit();
+      return mapped;
+    }
+  } catch {
+    // fallback
+  }
+  return txns;
+}
+
 export function useAccountTxns(): FinTxn[] {
+  useEffect(() => {
+    void syncAccountsFromBackend();
+  }, []);
   return useSyncExternalStore(subscribe, getAccountTxns, getAccountTxns);
 }
 
@@ -265,7 +327,64 @@ export function updateTxn(id: string, patch: Partial<FinTxn>, audit?: Omit<Audit
   txns = txns.map((x) => {
     if (x.id !== id) return x;
     const at = stamp();
-    return { ...x, ...patch, audit: audit ? [{ ...audit, at }, ...x.audit] : x.audit };
+    const updated = { ...x, ...patch, audit: audit ? [{ ...audit, at }, ...x.audit] : x.audit };
+
+    // Mirror every audited per-transaction change into the fleet-wide Configuration History —
+    // this is already a single, discrete, committed action (dropdown select / button click), so
+    // it is logged immediately, never fragmented per keystroke.
+    if (audit) {
+      appendConfigHistory([{
+        id: newConfigHistoryId(),
+        at: new Date().toISOString(),
+        by: audit.user,
+        field: `${updated.invoiceNo} · ${updated.vessel} — ${audit.action}`,
+        before: audit.from ?? '—',
+        after: audit.to ?? '—',
+      }]);
+    }
+
+    // Push update to backend. Requires the real database GUID (backendId), not the
+    // human-readable transactionNo held in `id` — the PUT route only accepts a GUID.
+    if (updated.backendId) {
+      void (async () => {
+        try {
+          await accountsApi.updateTransaction(updated.backendId!, {
+            transactionNo: updated.id,
+            kind: updated.kind,
+            category: updated.category,
+            module: updated.module,
+            company: updated.company,
+            vesselName: updated.vessel,
+            voyage: updated.voyage,
+            reference: updated.reference,
+            fixture: updated.fixture,
+            counterparty: updated.counterparty,
+            invoiceNo: updated.invoiceNo,
+            currency: updated.currency,
+            amount: updated.amount,
+            exchangeRate: updated.exchangeRate,
+            invoiceDate: updated.invoiceDate,
+            dueDate: updated.dueDate,
+            dueIso: updated.dueIso,
+            status: updated.status,
+            approval: updated.approval,
+            priority: updated.priority,
+            pic: updated.pic,
+            bank: updated.bank,
+            method: updated.method,
+            paymentDate: updated.paymentDate,
+            paymentRef: updated.paymentRef,
+            swiftDocUrl: updated.swiftDocUrl,
+            remarks: updated.remarks,
+            auditJson: updated.audit ? JSON.stringify(updated.audit) : undefined,
+          });
+        } catch {
+          /* fallback */
+        }
+      })();
+    }
+
+    return updated;
   });
   emit();
 }
@@ -350,6 +469,45 @@ export function addPayable(p: PayableInput): void {
   };
   txns = [txn, ...txns];
   emit();
+
+  // Push new payable to backend, then backfill the real GUID so later status updates work.
+  void (async () => {
+    try {
+      const created = await accountsApi.createTransaction({
+        transactionNo: txn.id,
+        kind: txn.kind,
+        category: txn.category,
+        module: txn.module,
+        company: txn.company,
+        vesselName: txn.vessel,
+        voyage: txn.voyage,
+        reference: txn.reference,
+        fixture: txn.fixture,
+        counterparty: txn.counterparty,
+        invoiceNo: txn.invoiceNo,
+        currency: txn.currency,
+        amount: txn.amount,
+        exchangeRate: txn.exchangeRate,
+        invoiceDate: txn.invoiceDate,
+        dueDate: txn.dueDate,
+        dueIso: txn.dueIso,
+        status: txn.status,
+        approval: txn.approval,
+        priority: txn.priority,
+        pic: txn.pic,
+        bank: txn.bank,
+        method: txn.method,
+        remarks: txn.remarks,
+        auditJson: JSON.stringify(txn.audit),
+      });
+      if (created?.id) {
+        txns = txns.map((x) => (x.id === txn.id ? { ...x, backendId: created.id } : x));
+        emit();
+      }
+    } catch {
+      /* fallback */
+    }
+  })();
 }
 
 export interface ReceivableInput {
@@ -401,6 +559,137 @@ export function addReceivable(p: ReceivableInput): void {
   };
   txns = [txn, ...txns];
   emit();
+
+  // Push new receivable to backend, then backfill the real GUID so later status updates work.
+  // (Previously this function never persisted at all — only addPayable did.)
+  void (async () => {
+    try {
+      const created = await accountsApi.createTransaction({
+        transactionNo: txn.id,
+        kind: txn.kind,
+        category: txn.category,
+        module: txn.module,
+        company: txn.company,
+        vesselName: txn.vessel,
+        voyage: txn.voyage,
+        reference: txn.reference,
+        fixture: txn.fixture,
+        counterparty: txn.counterparty,
+        invoiceNo: txn.invoiceNo,
+        currency: txn.currency,
+        amount: txn.amount,
+        exchangeRate: txn.exchangeRate,
+        invoiceDate: txn.invoiceDate,
+        dueDate: txn.dueDate,
+        dueIso: txn.dueIso,
+        status: txn.status,
+        approval: txn.approval,
+        priority: txn.priority,
+        pic: txn.pic,
+        bank: txn.bank,
+        method: txn.method,
+        remarks: txn.remarks,
+        auditJson: JSON.stringify(txn.audit),
+      });
+      if (created?.id) {
+        txns = txns.map((x) => (x.id === txn.id ? { ...x, backendId: created.id } : x));
+        emit();
+      }
+    } catch {
+      /* fallback */
+    }
+  })();
+}
+
+/* ----------------------------------------------------- manual creation (Accounts UI) */
+
+export interface ManualTxnInput {
+  kind: TxnKind;
+  category: TxnCategory;
+  module?: string;
+  vessel: string;
+  voyage?: string;
+  counterparty: string;
+  invoiceNo: string;
+  currency?: string;
+  amount: number;
+  invoiceDate?: string;
+  dueDate?: string;
+  dueIso: string;
+  priority?: Priority;
+  remarks?: string;
+}
+
+/** Raised directly from the Accounts "New Transaction" form (manual entries, not bridged from another module). */
+export async function createManualTxn(p: ManualTxnInput): Promise<FinTxn> {
+  if (txns.some((x) => x.invoiceNo === p.invoiceNo)) {
+    throw new Error(`Invoice No "${p.invoiceNo}" already exists.`);
+  }
+  const at = stamp();
+  const txn: FinTxn = {
+    id: `TXN-${p.invoiceNo}`,
+    kind: p.kind,
+    category: p.category,
+    module: p.module ?? 'Accounts',
+    company: 'ODAS Shipping Ltd',
+    vessel: p.vessel,
+    voyage: p.voyage ?? '',
+    reference: p.voyage ?? p.invoiceNo,
+    fixture: undefined,
+    counterparty: p.counterparty,
+    invoiceNo: p.invoiceNo,
+    currency: p.currency ?? 'USD',
+    amount: p.amount,
+    exchangeRate: p.currency === 'EUR' ? 1.08 : p.currency === 'CNY' ? 0.14 : p.currency === 'SGD' ? 0.74 : 1,
+    invoiceDate: p.invoiceDate ?? at,
+    dueDate: p.dueDate ?? at,
+    dueIso: p.dueIso,
+    status: 'Draft',
+    approval: 'Pending',
+    priority: p.priority ?? 'Medium',
+    pic: 'Accounts',
+    method: p.kind === 'Payable' ? 'TT' : 'Incoming TT',
+    remarks: p.remarks,
+    audit: [{ at, user: 'Accounts', action: 'Transaction created manually in Accounts' }],
+  };
+  // Persist first so a backend failure surfaces to the form instead of silently going local-only.
+  const created = await accountsApi.createTransaction({
+    transactionNo: txn.id,
+    kind: txn.kind,
+    category: txn.category,
+    module: txn.module,
+    company: txn.company,
+    vesselName: txn.vessel,
+    voyage: txn.voyage,
+    reference: txn.reference,
+    counterparty: txn.counterparty,
+    invoiceNo: txn.invoiceNo,
+    currency: txn.currency,
+    amount: txn.amount,
+    exchangeRate: txn.exchangeRate,
+    invoiceDate: txn.invoiceDate,
+    dueDate: txn.dueDate,
+    dueIso: txn.dueIso,
+    status: txn.status,
+    approval: txn.approval,
+    priority: txn.priority,
+    pic: txn.pic,
+    method: txn.method,
+    remarks: txn.remarks,
+    auditJson: JSON.stringify(txn.audit),
+  });
+  const final = created ? { ...txn, id: created.transactionNo || created.id, backendId: created.id } : txn;
+  txns = [final, ...txns];
+  emit();
+  appendConfigHistory([{
+    id: newConfigHistoryId(),
+    at: new Date().toISOString(),
+    by: 'Accounts',
+    field: 'New Transaction Created',
+    before: '—',
+    after: `${final.invoiceNo} · ${final.vessel} · ${final.currency} ${final.amount}`,
+  }]);
+  return final;
 }
 
 export function findTxnByInvoice(invoiceNo: string): FinTxn | undefined {
@@ -412,15 +701,17 @@ export function findTxnByInvoice(invoiceNo: string): FinTxn | undefined {
 export type AcctBucket = 'overdue' | 'due' | 'upcoming' | 'settled';
 
 export const ACCOUNT_TABS: { key: AcctBucket; label: string }[] = [
-  { key: 'overdue', label: 'Overdue' },
   { key: 'due', label: 'Due' },
+  { key: 'overdue', label: 'Overdue' },
   { key: 'upcoming', label: 'Upcoming' },
   { key: 'settled', label: 'Settled' },
 ];
 
 /** Coarse monitoring bucket for the left sidebar status tabs. */
 export function bucketOfTxn(t: FinTxn): AcctBucket {
-  if (t.status === 'Paid' || t.status === 'Received' || t.status === 'Cancelled') return 'settled';
+  // Terminal / post-payment statuses are settled — never age them as due/overdue.
+  const settled = new Set<TxnStatus>(['Paid', 'Received', 'Cancelled', 'Closed', 'Reconciled', 'Payment Executed', 'Bank Confirmation']);
+  if (settled.has(t.status)) return 'settled';
   if (isOverdue(t)) return 'overdue';
   return daysUntil(t.dueIso) <= 7 ? 'due' : 'upcoming';
 }

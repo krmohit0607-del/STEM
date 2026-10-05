@@ -12,10 +12,13 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
+import { CycloneLayer } from './CycloneLayer';
+import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
-import { MapLayersControl } from './MapLayersControl';
+import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapLayersControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
+import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
 /**
  * Route Simulator page — `/route-simulator`.
@@ -669,6 +672,14 @@ const MAP_BOUNDS: L.LatLngBoundsExpression = [
   [55, 115],
 ];
 
+// Clamp vertical panning to just inside the poles so the grey area past the
+// tiled world is never revealed; left wide open horizontally (worldCopyJump
+// handles the wrap).
+const WORLD_PAN_BOUNDS: L.LatLngBoundsExpression = [
+  [-85, -1_000_000],
+  [85, 1_000_000],
+];
+
 function shipIcon(color: string, isActive: boolean): L.DivIcon {
   const size = isActive ? 30 : 24;
   return L.divIcon({
@@ -701,6 +712,7 @@ function RouteMap({
   activeRouteId,
   onSelectRoute,
 }: RouteMapProps) {
+  const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
   // Memoize icons so we don't recreate them on every render.
   const icons = useMemo(() => {
     const map = new Map<string, { active: L.DivIcon; inactive: L.DivIcon }>();
@@ -719,6 +731,8 @@ function RouteMap({
         bounds={MAP_BOUNDS}
         minZoom={2}
         maxZoom={10}
+        maxBounds={WORLD_PAN_BOUNDS}
+        maxBoundsViscosity={1.0}
         worldCopyJump
         scrollWheelZoom
         style={{ height: '100%', width: '100%' }}
@@ -777,12 +791,15 @@ function RouteMap({
           );
         })}
 
-        <MapLayersControl position="topright" />
+        <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
+        {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
         <WeatherFieldControl position="topright" />
         <AreaConstraintsControl position="topright" />
         <WeatherPointControl position="topright" />
         <PortsControl position="topright" />
         <RulerControl position="topright" />
+        <CycloneLayer position="topright" />
+        <WeatherAlertsControl position="topright" />
         <MapCursorPosition />
       </MapContainer>
 
