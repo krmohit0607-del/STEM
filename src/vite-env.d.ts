@@ -9,6 +9,12 @@ interface ImportMetaEnv {
    * same-origin relative requests (when the SPA is served by the backend).
    */
   readonly VITE_FLEETVIEW_API_URL?: string;
+  /**
+   * Absolute origin of the main MultiTenantSaaS backend API (e.g. the deployed
+   * Azure App Service URL). Leave unset in development to use the Vite proxy
+   * and same-origin relative `/api/...` requests.
+   */
+  readonly VITE_API_BASE_URL?: string;
 }
 
 interface ImportMeta {

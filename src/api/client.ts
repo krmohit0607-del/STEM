@@ -23,6 +23,15 @@ const ACCESS_TOKEN_KEY = 'saas.accessToken';
 const REFRESH_TOKEN_KEY = 'saas.refreshToken';
 const AUTH_STORE_KEY = 'saas.authStore';
 
+// Absolute backend origin (e.g. the deployed Azure App Service URL). Leave unset in dev
+// to keep using the Vite proxy; set VITE_API_BASE_URL for builds served from a different
+// origin than the API (see .env.production).
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+
+function resolveUrl(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `${API_BASE_URL}${url}`;
+}
+
 export const tokenStorage = {
   getAccessToken(): string | null {
     return (
@@ -73,7 +82,7 @@ async function tryRefreshToken(): Promise<string | null> {
   if (!currentRefreshToken) return null;
 
   try {
-    const response = await fetch('/api/auth/refresh-token', {
+    const response = await fetch(resolveUrl('/api/auth/refresh-token'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -118,7 +127,7 @@ async function request<T>(
     headers.set('Authorization', `Bearer ${accessToken}`);
   }
 
-  const response = await fetch(url, {
+  const response = await fetch(resolveUrl(url), {
     ...init,
     method,
     headers,
