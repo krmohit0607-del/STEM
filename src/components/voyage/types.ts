@@ -278,6 +278,7 @@ export const CP_ALLOWABLE_FUEL_METHOD_OPTIONS = [
   'Double About',
   'Gaz Energy',
   'Half Knots',
+  'Time Gain',
 ];
 export const CP_ABOUT_SPEED_UNIT_OPTIONS = ['Kts', '%'];
 export const OPTIMIZATION_MODE_OPTIONS = [

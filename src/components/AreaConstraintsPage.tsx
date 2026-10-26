@@ -12,6 +12,7 @@ import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
+import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import {
   ZONE_STYLES,
   getZoneStyle,
@@ -776,6 +777,7 @@ export function AreaConstraintsPage({ mode = 'voyage' }: { mode?: 'admin' | 'voy
           )}
           <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
           <WeatherFieldControl position="topright" />
+          <MapWeatherLegendControl position="topleft" />
           <AreaConstraintsControl position="topright" constraints={mapConstraints} selectedId={selectedId ?? undefined} onConstraintClick={(id) => { const constraint = data.find((c) => c.id === id); if (constraint) select(constraint); }} />
           <WeatherPointControl position="topright" />
           <PortsControl position="topright" />

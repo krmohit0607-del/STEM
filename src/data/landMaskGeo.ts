@@ -11,6 +11,7 @@
  */
 
 import landData from './landPolygons.json';
+import { chaikinSmoothRing } from './ringSmoothing';
 
 type Ring = number[][];
 type Polygon = Ring[]; // first ring = outer, rest = holes
@@ -164,22 +165,27 @@ export function landPolygonsInBounds(bounds: LonLatBounds): Polygon[] {
   // At a zoomed-out (world) view, essentially every coastline on Earth falls
   // inside the viewport at full 1:50m vertex detail, which is what made the
   // land-clip boolean op slow (and, past a point, unreliable) at low zoom.
-  // Full detail isn't visually distinguishable at that scale anyway, so
-  // simplify proportionally to how much of the world is in view; a normal,
+  // Simplify proportionally to how much of the world is in view (capped, so
+  // even a whole-world viewport keeps a recognisable coastline shape rather
+  // than collapsing into a handful of straight edges); a normal,
   // reasonably-zoomed-in viewport gets epsilon 0 (no simplification, full
-  // coastline precision).
+  // coastline precision). Whenever simplification does kick in, the result
+  // is additionally Chaikin-smoothed below — simplification alone leaves a
+  // visibly "boxy" straight-edged silhouette, which smoothing turns back
+  // into an organic curve approximating the real coastline instead.
   const viewportDeg = bounds.east - bounds.west;
-  const epsilon = viewportDeg > 40 ? viewportDeg * 0.0025 : 0;
+  const epsilon = viewportDeg > 40 ? Math.min(0.15, viewportDeg * 0.001) : 0;
   const out: Polygon[] = [];
   for (const p of POLYGONS) {
     if (p.maxLat < padded.south || p.minLat > padded.north || p.maxLon < padded.west || p.minLon > padded.east) {
       continue;
     }
-    const outer = simplifyRing(clipRingToBounds(p.polygon[0], padded), epsilon);
+    const smooth = (ring: Ring) => (epsilon > 0 ? chaikinSmoothRing(ring, 2) : ring);
+    const outer = smooth(simplifyRing(clipRingToBounds(p.polygon[0], padded), epsilon));
     if (outer.length < 3) continue;
     const holes = p.polygon
       .slice(1)
-      .map((h) => simplifyRing(clipRingToBounds(h, padded), epsilon))
+      .map((h) => smooth(simplifyRing(clipRingToBounds(h, padded), epsilon)))
       .filter((h) => h.length >= 3);
     out.push([outer, ...holes]);
   }

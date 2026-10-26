@@ -10,6 +10,8 @@ export interface VesselPosition {
   lat: number;
   lon: number;
   label?: string;
+  /** ISO timestamp of the report row this position was taken from, if known. */
+  dateTimeIso?: string;
 }
 
 let current: VesselPosition | null = null;
@@ -18,7 +20,12 @@ const listeners = new Set<() => void>();
 function sameAsCurrent(pos: VesselPosition | null): boolean {
   if (pos === current) return true;
   if (!pos || !current) return false;
-  return pos.lat === current.lat && pos.lon === current.lon && pos.label === current.label;
+  return (
+    pos.lat === current.lat &&
+    pos.lon === current.lon &&
+    pos.label === current.label &&
+    pos.dateTimeIso === current.dateTimeIso
+  );
 }
 
 export function setVesselPosition(pos: VesselPosition | null): void {

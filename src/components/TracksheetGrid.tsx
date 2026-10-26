@@ -14,25 +14,45 @@
  *   - Weather Factors    : Wind, Wave, Curr, AvgF
  *   - Rpt Sent           : W, F, I
  *
- * The grid is fed by `STUB_ROWS` for now. When the
- * `/api/voyage/{id}/tracksheet` endpoint is exposed, replace the stub
- * with the API response — every cell maps 1:1 to a `TrackRow` field so
- * the markup does not need to change.
+ * The grid is fed by the real `/api/performance/tracksheet` endpoint (see
+ * `performanceApi.getTracksheet`/`saveTracksheet`) — no local dummy/demo rows
+ * are shown here. `STUB_ROWS` below is kept only as sample data for a few
+ * other report pages (Forecast, Performance Report, …) that haven't been
+ * wired to live per-voyage tracksheet data yet.
  */
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useSelectedLegNo } from '../data/selectedLeg';
+import { buildView } from './voyage/buildView';
 import { fetchPointWeatherAt } from '../data/openMeteo';
 import { setVesselPosition } from '../data/vesselPosition';
 import { setRouteReportMarkers } from '../data/routeReportMarkers';
 import { useActiveSimRoute } from '../data/routeSimulatorStore';
-import { loadVoyageShared } from '../data/voyageOverrides';
+import { loadVoyageShared, mergeVoyageShared, subscribeVoyageShared } from '../data/voyageOverrides';
 import { queueCommsDraft } from '../data/commsStore';
 import { performanceApi, type TracksheetRowApiDto } from '../api/performanceApi';
 import {
+  beaufort,
+  currentFactor,
+  DEFAULT_DEADWEIGHT_MT,
+  loadWeatherFactorTableFromBackend,
+  parseDeadweightMt,
+  waveFactor,
+  windFactor,
+} from '../data/weatherFactorTable';
+import {
+  type GwdmReport,
+  classifyGoodWeatherRows,
+  currentsOptionFromLabel,
+  goodWeatherMethodFromOption,
+} from '../data/goodWeatherDayMethod';
+import {
   fromDateInput,
   fromTimeInput,
+  rowDateTimeToIso,
+  isoToRowDateTime,
   toDateInput,
   toTimeInput,
 } from '../data/dateFields';
@@ -292,8 +312,24 @@ function rowEpoch(date: string, time: string): number | null {
   return Date.UTC(+dm[1], +dm[2] - 1, +dm[3], hh, mm);
 }
 
+/** A blank report row for manual entry / seeding, with just the report type
+ *  and date/time filled in. */
+function blankTrackRow(rt: string, date = '', time = ''): TrackRow {
+  return {
+    id: `row-${Date.now()}`,
+    nextPort: '',
+    rt, date, time, hrs: null, lat: '', lng: '',
+    vlsfoRob: null, vlsfoBunkered: null, vlsfoCorrected: null,
+    lsmgoRob: null, lsmgoBunkered: null, lsmgoCorrected: null,
+    noneRob: null, noneBunkered: null, noneCorrected: null,
+    distR: null, distO: null, dtgO: null, avgSpeedO: null,
+    rpm: null, enginePower: null, slip: null, course: null, amount: null,
+    windO: '', wavesO: '', windF: 0, waveF: 0, currF: 0, avgF: '',
+  };
+}
+
 /** Steaming hours = date/time gap from the previous report. */
-function computeHrs(prev: TrackRow, cur: TrackRow): number | null {
+export function computeHrs(prev: TrackRow, cur: TrackRow): number | null {
   const a = rowEpoch(prev.date, prev.time);
   const b = rowEpoch(cur.date, cur.time);
   if (a == null || b == null) return null;
@@ -305,13 +341,21 @@ export type ConsFuel = 'vlsfo' | 'lsmgo' | 'none';
 
 /**
  * Fuel consumption (MT) for row `i`: the drop in ROB since the previous report
- * that carried a reading, plus any bunkers taken on this report. Returns null
- * until a prior reading exists. Shared by the tracksheet Cons columns and the
- * Interim Dashboard performance chart so both views stay in sync.
+ * that carried a reading, plus any bunkers taken on a Fuel-Changeover ("FC")
+ * report. Mirrors the legacy `FuelModel` formula:
+ *   - Departure ("D") / Resume ("R") rows always report `0` consumption.
+ *   - Otherwise: `previousRob - currentRob`, with `Bunkered` added back only
+ *     when the current row's report type is "FC" (fuel changeover).
+ *   - The result is NOT clamped to zero — a negative value (e.g. from a
+ *     bunker-survey ROB correction) is reported as-is, same as upstream.
+ * Returns null until a prior reading exists. Shared by the tracksheet Cons
+ * columns and the Interim Dashboard performance chart so both views stay in
+ * sync.
  */
 export function computeCons(
   rows: Pick<
     TrackRow,
+    | 'rt'
     | 'vlsfoRob' | 'vlsfoBunkered'
     | 'lsmgoRob' | 'lsmgoBunkered'
     | 'noneRob' | 'noneBunkered'
@@ -324,12 +368,15 @@ export function computeCons(
     | 'vlsfoBunkered'
     | 'lsmgoBunkered'
     | 'noneBunkered';
-  const cur = rows[i]?.[robKey];
+  const curRow = rows[i];
+  if (curRow?.rt === 'D' || curRow?.rt === 'R') return 0;
+  const cur = curRow?.[robKey];
   if (cur == null) return null;
   for (let j = i - 1; j >= 0; j--) {
     const prev = rows[j][robKey];
     if (prev != null) {
-      return Math.max(0, prev - cur + (rows[i][bunkKey] ?? 0));
+      const bunkered = curRow.rt === 'FC' ? (curRow[bunkKey] ?? 0) : 0;
+      return prev - cur + bunkered;
     }
   }
   return null;
@@ -405,6 +452,20 @@ function compass16(deg: number | null): string {
   return COMPASS16[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
 }
 
+/**
+ * Course made good (initial great-circle bearing, deg) from one position to
+ * another — used as the vessel's heading for the wind/wave/current relative-
+ * angle factor lookups, since reports don't carry a separate logged heading.
+ */
+function bearingDeg(aLat: number, aLon: number, bLat: number, bLon: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const y = Math.sin(toRad(bLon - aLon)) * Math.cos(toRad(bLat));
+  const x =
+    Math.cos(toRad(aLat)) * Math.sin(toRad(bLat)) -
+    Math.sin(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.cos(toRad(bLon - aLon));
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 /** Great-circle distance between two positions in nautical miles. */
 function distanceNm(aLat: number, aLon: number, bLat: number, bLon: number): number {
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -422,8 +483,9 @@ function nearestRouteVertex(
   path: Array<[number, number]>,
   lat: number,
   lon: number,
-): { pos: [number, number]; distNm: number } | null {
+): { pos: [number, number]; distNm: number; idx: number } | null {
   if (path.length === 0) return null;
+  let bestIdx = 0;
   let bestPos = path[0];
   let bestDist = distanceNm(lat, lon, bestPos[0], bestPos[1]);
   for (let i = 1; i < path.length; i += 1) {
@@ -432,20 +494,79 @@ function nearestRouteVertex(
     if (d < bestDist) {
       bestDist = d;
       bestPos = p;
+      bestIdx = i;
     }
   }
-  return { pos: bestPos, distNm: bestDist };
+  return { pos: bestPos, distNm: bestDist, idx: bestIdx };
+}
+
+/** Cumulative route distance (NM) from the start of `path` up to vertex `idx`. */
+function cumulativeRouteDistanceNm(path: Array<[number, number]>, idx: number): number {
+  let total = 0;
+  for (let i = 1; i <= idx && i < path.length; i += 1) {
+    total += distanceNm(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+  }
+  return total;
 }
 
 const REPORT_ROUTE_SNAP_MAX_NM = 160;
 
-/** Beaufort force from wind speed (knots). */
-function beaufort(kn: number): number {
-  const thresholds = [1, 4, 7, 11, 17, 22, 28, 34, 41, 48, 56, 64];
-  let bf = 0;
-  for (let i = 0; i < thresholds.length; i++) if (kn >= thresholds[i]) bf = i + 1;
-  return bf;
+/**
+ * System-observed distance (NM) for report row `i`: the route-geometry
+ * distance between the previous report's position and this one, mirroring
+ * the legacy `PointsCollectionModel.GetDistO`. Departure ("D") / Resume ("R")
+ * rows always report `0`. Falls back to the row's own manually-entered
+ * `distO` when no active route is available or a position can't be matched
+ * to it (so existing manually-entered data is preserved).
+ */
+export function computeDistO(
+  rows: Pick<TrackRow, 'rt' | 'lat' | 'lng' | 'distO'>[],
+  i: number,
+  path: Array<[number, number]>,
+): number | null {
+  const cur = rows[i];
+  if (cur.rt === 'D' || cur.rt === 'R') return 0;
+  if (path.length < 2 || i === 0) return cur.distO;
+  const prev = rows[i - 1];
+  const prevLat = parseCoord(prev.lat);
+  const prevLon = parseCoord(prev.lng);
+  const curLat = parseCoord(cur.lat);
+  const curLon = parseCoord(cur.lng);
+  if (prevLat == null || prevLon == null || curLat == null || curLon == null) return cur.distO;
+  const prevVertex = nearestRouteVertex(path, prevLat, prevLon);
+  const curVertex = nearestRouteVertex(path, curLat, curLon);
+  if (!prevVertex || !curVertex) return cur.distO;
+  if (prevVertex.distNm > REPORT_ROUTE_SNAP_MAX_NM || curVertex.distNm > REPORT_ROUTE_SNAP_MAX_NM) {
+    return cur.distO;
+  }
+  const dist = cumulativeRouteDistanceNm(path, curVertex.idx) - cumulativeRouteDistanceNm(path, prevVertex.idx);
+  return round2(Math.max(0, dist));
 }
+
+/**
+ * Distance to go (NM) for report row `i`: remaining route distance from this
+ * report's position to the voyage destination, mirroring the legacy
+ * `PointsCollectionModel.GetDistanceToGo`. Arrival ("A") rows always report
+ * `0`. Falls back to the row's own manually-entered `dtgO` when no active
+ * route is available or the position can't be matched to it.
+ */
+export function computeDtg(
+  rows: Pick<TrackRow, 'rt' | 'lat' | 'lng' | 'dtgO'>[],
+  i: number,
+  path: Array<[number, number]>,
+): number | null {
+  const cur = rows[i];
+  if (cur.rt === 'A') return 0;
+  if (path.length < 2) return cur.dtgO;
+  const curLat = parseCoord(cur.lat);
+  const curLon = parseCoord(cur.lng);
+  if (curLat == null || curLon == null) return cur.dtgO;
+  const curVertex = nearestRouteVertex(path, curLat, curLon);
+  if (!curVertex || curVertex.distNm > REPORT_ROUTE_SNAP_MAX_NM) return cur.dtgO;
+  const total = cumulativeRouteDistanceNm(path, path.length - 1);
+  return round2(Math.max(0, total - cumulativeRouteDistanceNm(path, curVertex.idx)));
+}
+
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -536,6 +657,20 @@ export function TracksheetGrid() {
     ? `${selectedVoyage.portFrom} → ${selectedVoyage.portTo}`
     : 'Singapore → Rotterdam';
 
+  // The active leg follows the leg picked in the top header (ODAS row)
+  // dropdown — same source the Interim Dashboard reads its CP config from —
+  // so the Tracksheet's good/bad-weather-day highlighting always agrees
+  // with the Interim Dashboard's "Good Weather %" classification.
+  const legs = useMemo(
+    () => (selectedVoyage ? buildView(selectedVoyage).legs : []),
+    [selectedVoyage],
+  );
+  const selectedLegNo = useSelectedLegNo();
+  const activeLeg = useMemo(
+    () => legs.find((leg) => leg.no === selectedLegNo) ?? legs[0],
+    [legs, selectedLegNo],
+  );
+
   // Fuel column groups shown in the grid. VLSFO + LSMGO are always present; a
   // third group appears only when a 3rd fuel type was configured on the voyage
   // (Create/Edit Voyage → 3rd Fuel Type). `key` maps to the row field prefix.
@@ -549,9 +684,7 @@ export function TracksheetGrid() {
     return groups;
   }, [selectedVoyage?.id]);
 
-  const [rows, setRows] = useState<TrackRow[]>(() =>
-    STUB_ROWS.map((r, i) => ({ ...r, id: `row-${i}`, nextPort: '' })),
-  );
+  const [rows, setRows] = useState<TrackRow[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -560,9 +693,61 @@ export function TracksheetGrid() {
   const [forecasting, setForecasting] = useState(false);
   const [forecastData, setForecastData] = useState<{ lat: number; lng: number; label: string; windSpd: string; wavHt: string; time: string }[] | null>(null);
 
+  // Good/bad weather day classification per row — reuses the exact ported
+  // GWDM test (`classifyGoodWeatherRows`) the Interim Dashboard's "Good
+  // Weather %" is built on, driven by the active leg's CP Good Weather
+  // Method / Min Hours / Currents settings. Rows inside a "good weather"
+  // block are highlighted green in the grid (see the `<tr>` render below).
+  const goodWeatherByIndex = useMemo<boolean[]>(() => {
+    if (rows.length === 0) return [];
+    const method = goodWeatherMethodFromOption(activeLeg?.cpGoodWeatherSelection ?? '');
+    const minGoodHours = Number(activeLeg?.cpMinHours) || 0;
+    const currentsOption = currentsOptionFromLabel(activeLeg?.cpCurrents ?? '');
+    const reports: GwdmReport[] = rows.map((row, i) => ({
+      hours: i > 0 ? computeHrs(rows[i - 1], row) ?? 0 : 0,
+      windFactor: row.windF,
+      waveFactor: row.waveF,
+      currentFactor: row.currF,
+      isStart: row.rt === 'D' || row.rt === 'R',
+      isEstimate: row.rt.trim() === '',
+    }));
+    return classifyGoodWeatherRows(reports, method, minGoodHours, currentsOption);
+  }, [rows, activeLeg]);
+
+  // Keep the Departure/COSP ("D") row's date+time mirrored to the shared
+  // voyage ETD — connected to Waypoint details' first waypoint and CP & Leg
+  // Details' LEG-1 ETD. If nothing has been shared yet but a "D" row already
+  // has a date+time, adopt that as the starting value.
+  const syncEtdRef = useRef<() => void>(() => {});
+  syncEtdRef.current = () => {
+    const voyageId = selectedVoyage?.id;
+    const shared = loadVoyageShared(voyageId)?.etdIso;
+    setRows((prev) => {
+      const idx = prev.findIndex((row) => row.rt === 'D');
+      if (idx < 0) {
+        // No Departure/COSP report yet (and nothing else entered either) —
+        // seed a real first report from the shared voyage ETD instead of
+        // leaving the Tracksheet blank or showing unrelated dummy dates.
+        if (!shared || prev.length > 0) return prev;
+        const { date, time } = isoToRowDateTime(shared);
+        if (!date || !time) return prev;
+        return [blankTrackRow('D', date, time)];
+      }
+      const rowIso = rowDateTimeToIso(prev[idx].date, prev[idx].time);
+      if (shared) {
+        if (shared === rowIso) return prev;
+        const { date, time } = isoToRowDateTime(shared);
+        if (!date || !time) return prev;
+        return prev.map((row, i) => (i === idx ? { ...row, date, time } : row));
+      }
+      if (rowIso) mergeVoyageShared(voyageId, { etdIso: rowIso });
+      return prev;
+    });
+  };
+
   // Load any previously-saved tracksheet for this voyage from the Performance
-  // module's own backend/database; falls back to the bundled stub rows (demo
-  // data) when nothing has been saved for this voyage yet.
+  // module's own backend/database — no local dummy/demo fallback; an empty
+  // result just seeds the Departure report from the shared ETD (above).
   useEffect(() => {
     const voyageId = selectedVoyage?.id;
     if (!voyageId) return;
@@ -572,12 +757,20 @@ export function TracksheetGrid() {
         const saved = await performanceApi.getTracksheet(voyageId);
         if (!cancelled && saved.length > 0) setRows(saved);
       } catch {
-        /* keep stub rows on failure — backend may be offline */
+        /* backend may be offline — syncEtdRef below still seeds a Departure
+           report locally so the grid isn't just blank. */
+      } finally {
+        if (!cancelled) syncEtdRef.current();
       }
     })();
     return () => {
       cancelled = true;
     };
+  }, [selectedVoyage?.id]);
+
+  useEffect(() => {
+    syncEtdRef.current();
+    return subscribeVoyageShared(selectedVoyage?.id, () => syncEtdRef.current());
   }, [selectedVoyage?.id]);
 
   const allChecked = rows.length > 0 && checkedIds.length === rows.length;
@@ -713,17 +906,7 @@ export function TracksheetGrid() {
    * row; otherwise it is appended at the bottom.
    */
   const addRow = () => {
-    const newRow: TrackRow = {
-      id: `row-${Date.now()}`,
-      nextPort: '',
-      rt: 'N', date: '', time: '', hrs: null, lat: '', lng: '',
-      vlsfoRob: null, vlsfoBunkered: null, vlsfoCorrected: null,
-      lsmgoRob: null, lsmgoBunkered: null, lsmgoCorrected: null,
-      noneRob: null, noneBunkered: null, noneCorrected: null,
-      distR: null, distO: null, dtgO: null, avgSpeedO: null,
-      rpm: null, enginePower: null, slip: null, course: null, amount: null,
-      windO: '', wavesO: '', windF: 0, waveF: 0, currF: 0, avgF: '',
-    };
+    const newRow = blankTrackRow('N');
     setRows((prev) => {
       // Insert after the last selected row (by grid order); append when none.
       let insertAt = prev.length;
@@ -746,7 +929,17 @@ export function TracksheetGrid() {
   const validateSelected = async () => {
     setValidating(true);
     try {
-      const sample = async (lat: number, lon: number, when: Date) => {
+      // The wind/wave calibration table is backend/database-backed (global
+      // reference data) — fetch it once per session (memoized) so Validate
+      // uses the live table, falling back to the embedded defaults offline.
+      await loadWeatherFactorTableFromBackend(() => performanceApi.getWeatherFactors());
+      const deadweightMt = parseDeadweightMt(selectedVoyage?.dwt) ?? DEFAULT_DEADWEIGHT_MT;
+
+      // `courseDeg` is the segment's course-made-good (bearing from the
+      // previous report's position to this one) — the vessel heading used to
+      // turn each weather factor's "from"/"towards" direction into a
+      // relative angle (0=head, 180=following/stern) for the table lookups.
+      const sample = async (lat: number, lon: number, when: Date, courseDeg: number) => {
         const res = await fetchPointWeatherAt(lat, lon, when);
         const wind = res.wind;
         const waves = res.waves;
@@ -757,9 +950,18 @@ export function TracksheetGrid() {
         const wavesO = waves
           ? `${compass16(waves.directionDeg)}${waves.magnitude.toFixed(1)}`
           : '';
-        const windF = wind ? round2(-wind.magnitude / 40) : 0;
-        const waveF = waves ? round2(-waves.magnitude / 6) : 0;
-        const currF = curr ? round2(-curr.magnitude) : 0;
+        const windF =
+          wind && wind.directionDeg != null
+            ? round2(windFactor(deadweightMt, wind.magnitude, wind.directionDeg, courseDeg))
+            : 0;
+        const waveF =
+          waves && waves.directionDeg != null
+            ? round2(waveFactor(deadweightMt, waves.magnitude, waves.directionDeg, courseDeg))
+            : 0;
+        const currF =
+          curr && curr.directionDeg != null
+            ? round2(currentFactor(curr.magnitude, curr.directionDeg, courseDeg))
+            : 0;
         return { windO, wavesO, windF, waveF, currF, avgF: `${windF} / ${waveF} / ${currF}` };
       };
 
@@ -789,12 +991,32 @@ export function TracksheetGrid() {
           lon1 != null;
 
         if (canExpand) {
+          const courseDeg = bearingDeg(lat0!, lon0!, lat1!, lon1!);
+          // Time-weighted average factors for the real report row, mirroring
+          // the legacy `UpdateAverageFactorsOnly`: each sampled point
+          // (including the three interpolated 6-hourly points and the report
+          // itself) contributes `factor * elapsedHoursSincePreviousPoint`,
+          // summed and divided by the total elapsed hours across the block.
+          let weightedWind = 0;
+          let weightedWave = 0;
+          let weightedCurr = 0;
+          let weightedHours = 0;
+          let segStartEpoch = startEpoch!;
+          const accumulate = (factors: { windF: number; waveF: number; currF: number }, epoch: number) => {
+            const hours = (epoch - segStartEpoch) / 3_600_000;
+            weightedWind += factors.windF * hours;
+            weightedWave += factors.waveF * hours;
+            weightedCurr += factors.currF * hours;
+            weightedHours += hours;
+            segStartEpoch = epoch;
+          };
           for (let k = 1; k <= 3; k++) {
             const f = k / 4;
             const epoch = startEpoch! + (endEpoch! - startEpoch!) * f;
             const lat = lat0! + (lat1! - lat0!) * f;
             const lon = lon0! + (lon1! - lon0!) * f;
-            const wx = await sample(lat, lon, new Date(epoch));
+            const wx = await sample(lat, lon, new Date(epoch), courseDeg);
+            accumulate(wx, epoch);
             const iso = new Date(epoch);
             const pad = (x: number) => String(x).padStart(2, '0');
             const lerp = (a: number | null, b: number | null) =>
@@ -827,14 +1049,34 @@ export function TracksheetGrid() {
               ...wx,
             });
           }
-          const wxEnd = await sample(lat1!, lon1!, new Date(endEpoch!));
-          out.push({ ...cur, ...wxEnd });
+          const wxEnd = await sample(lat1!, lon1!, new Date(endEpoch!), courseDeg);
+          accumulate(wxEnd, endEpoch!);
+          const avgWind = weightedHours > 0 ? round2(weightedWind / weightedHours) : wxEnd.windF;
+          const avgWave = weightedHours > 0 ? round2(weightedWave / weightedHours) : wxEnd.waveF;
+          const avgCurr = weightedHours > 0 ? round2(weightedCurr / weightedHours) : wxEnd.currF;
+          out.push({ ...cur, ...wxEnd, avgF: `${avgWind} / ${avgWave} / ${avgCurr}` });
         } else {
           out.push(cur);
         }
       }
       setRows(out);
       setCheckedIds([]);
+
+      // Persist the freshly-validated weather factors immediately, rather
+      // than requiring a separate manual "Save" click afterward — mirrors
+      // `saveSelected`'s payload shape.
+      const voyageId = selectedVoyage?.id;
+      if (voyageId) {
+        setSaveError(null);
+        try {
+          const payload: TracksheetRowApiDto[] = out.map(({ id, nextPort, ...rest }) => ({ id, nextPort, ...rest }));
+          await performanceApi.saveTracksheet(voyageId, selectedVoyage?.imo ?? '', payload);
+          setSavedFlash(true);
+          window.setTimeout(() => setSavedFlash(false), 1500);
+        } catch {
+          setSaveError('Validated, but could not save — check your connection and try again.');
+        }
+      }
     } finally {
       setValidating(false);
     }
@@ -849,7 +1091,13 @@ export function TracksheetGrid() {
     const lat = last ? parseCoord(last.lat) : null;
     const lon = last ? parseCoord(last.lng) : null;
     if (lat != null && lon != null) {
-      setVesselPosition({ lat, lon, label: vesselName });
+      const epoch = last ? rowEpoch(last.date, last.time) : null;
+      setVesselPosition({
+        lat,
+        lon,
+        label: vesselName,
+        dateTimeIso: epoch != null ? new Date(epoch).toISOString() : undefined,
+      });
     }
   }, [rows, vesselName]);
 
@@ -876,6 +1124,24 @@ export function TracksheetGrid() {
       return changed ? next : prev;
     });
   }, [activeRoute?.id]);
+
+  // Keep the stored DistO / DistanceToGo fields in sync with the
+  // route-geometry calculation (so CSV export, saved payloads, and map
+  // markers all see the same calculated numbers the grid displays).
+  useEffect(() => {
+    const routePath = activeRoute?.path ?? [];
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((row, i) => {
+        const distO = computeDistO(prev, i, routePath);
+        const dtgO = computeDtg(prev, i, routePath);
+        if (distO === row.distO && dtgO === row.dtgO) return row;
+        changed = true;
+        return { ...row, distO, dtgO };
+      });
+      return changed ? next : prev;
+    });
+  }, [activeRoute?.id, activeRoute?.path, rows]);
 
   // Publish tracksheet reports (D/A/N/SC/FC/...) plus validated in-between
   // 6-hour breakup points so the active route map can render them.
@@ -904,8 +1170,13 @@ export function TracksheetGrid() {
       })
       .filter((m): m is NonNullable<typeof m> => m != null);
     setRouteReportMarkers(markers);
-    return () => setRouteReportMarkers([]);
   }, [rows]);
+
+  // Only clear the published markers when the Tracksheet itself truly
+  // unmounts (the whole bottom drawer collapses), not on every `rows`
+  // change — so switching to the Route Simulator tab (which no longer
+  // unmounts this component) keeps the report markers on the map.
+  useEffect(() => () => setRouteReportMarkers([]), []);
 
   const exportCsv = () => {
     const header = CSV_COLS.map((c) => String(c.key)).join(',');
@@ -971,9 +1242,17 @@ export function TracksheetGrid() {
   };
 
   const updateStr = (rowIndex: number, field: StrField, raw: string) => {
-    setRows((prev) =>
-      prev.map((row, i) => (i === rowIndex ? { ...row, [field]: raw } : row)),
-    );
+    setRows((prev) => {
+      const next = prev.map((row, i) => (i === rowIndex ? { ...row, [field]: raw } : row));
+      // The Departure/COSP ("D") report's date+time is the voyage's single
+      // shared ETD — also connected to Waypoint details' first waypoint and
+      // CP & Leg Details' LEG-1 ETD (see data/voyageOverrides.ts `etdIso`).
+      if ((field === 'date' || field === 'time') && next[rowIndex]?.rt === 'D') {
+        const iso = rowDateTimeToIso(next[rowIndex].date, next[rowIndex].time);
+        if (iso) mergeVoyageShared(selectedVoyage?.id, { etdIso: iso });
+      }
+      return next;
+    });
   };
 
   /** Editable numeric cell. */
@@ -1209,7 +1488,11 @@ export function TracksheetGrid() {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={r.id}>
+            <tr
+              key={r.id}
+              className={goodWeatherByIndex[i] ? 'fv-tracksheet__row--good-weather' : undefined}
+              title={goodWeatherByIndex[i] ? 'Good weather day (per CP Good Weather Method)' : undefined}
+            >
               <td className="fv-tracksheet__check-cell">
                 <input
                   type="checkbox"
@@ -1245,12 +1528,25 @@ export function TracksheetGrid() {
               ))}
 
               {numCell(i, 'distR', 2)}
-              {numCell(i, 'distO', 1)}
-              {numCell(i, 'dtgO', 1)}
+              <td
+                className="fv-tracksheet__num fv-tracksheet__calc"
+                title="System-observed distance since the previous report, calculated from the active route geometry (falls back to the stored value when no route is matched)."
+              >
+                {n(computeDistO(rows, i, activeRoute?.path ?? []), 1)}
+              </td>
+              <td
+                className="fv-tracksheet__num fv-tracksheet__calc"
+                title="Remaining route distance to the voyage destination, calculated from the active route geometry (falls back to the stored value when no route is matched)."
+              >
+                {n(computeDtg(rows, i, activeRoute?.path ?? []), 1)}
+              </td>
 
               <td className="fv-tracksheet__num fv-tracksheet__calc">
                 {n(
-                  computeSpeed(r.distO, i > 0 ? computeHrs(rows[i - 1], r) : null),
+                  computeSpeed(
+                    computeDistO(rows, i, activeRoute?.path ?? []),
+                    i > 0 ? computeHrs(rows[i - 1], r) : null,
+                  ),
                   1,
                 )}
               </td>
@@ -1273,7 +1569,12 @@ export function TracksheetGrid() {
                 2,
                 r.currF < 0 ? 'fv-tracksheet__perf-loss' : '',
               )}
-              {textCell(i, 'avgF', 'fv-tracksheet__num fv-tracksheet__avgf')}
+              <td
+                className="fv-tracksheet__num fv-tracksheet__calc fv-tracksheet__avgf"
+                title="Time-weighted average of Wind / Wave / Current factors across the report interval — calculated, not editable."
+              >
+                {r.avgF}
+              </td>
             </tr>
           ))}
         </tbody>

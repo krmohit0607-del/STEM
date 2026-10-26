@@ -94,3 +94,20 @@ export function fromTimeInput(iso: string): string {
   if (!m) return '';
   return `${m[1]}${m[2]}`;
 }
+
+/** Combine a Tracksheet row's compact `date` (`25Jun2026`) + `time` (`1200`)
+ *  into `YYYY-MM-DDTHH:mm` (the shared ETD / `datetime-local` format), or
+ *  `''` when either half can't be parsed. */
+export function rowDateTimeToIso(date: string, time: string): string {
+  const d = toDateInput(date);
+  const t = toTimeInput(time);
+  return d && t ? `${d}T${t}` : '';
+}
+
+/** Split `YYYY-MM-DDTHH:mm` back into a Tracksheet row's compact `date` +
+ *  `time` fields. */
+export function isoToRowDateTime(iso: string): { date: string; time: string } {
+  const m = iso.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/);
+  if (!m) return { date: '', time: '' };
+  return { date: fromDateInput(m[1]), time: fromTimeInput(m[2]) };
+}

@@ -4,7 +4,14 @@ import L, { type LatLngBoundsLiteral } from 'leaflet';
 
 import { resolveWorldPort, useWorldPorts, type WorldPort } from '../data/ports';
 import { useSavedPorts } from '../data/savedPorts';
+import { useSelectedVoyage } from '../data/selectedVoyage';
 import { bumpSavedRoutes } from '../data/optimizationStore';
+import {
+  readSavedRoutesRaw,
+  writeSavedRoutesRaw,
+  tagRouteWithVoyage,
+  writeRouteEditorRouteId,
+} from '../data/savedRoutesStore';
 import { setActiveSimRoute } from '../data/routeSimulatorStore';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
@@ -12,6 +19,7 @@ import { CycloneLayer } from './CycloneLayer';
 import { WeatherAlertsControl } from './WeatherAlertsControl';
 import { WeatherPointControl } from './WeatherPointControl';
 import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
+import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
@@ -112,6 +120,7 @@ function matches(value: string, ports: WorldPort[]): WorldPort[] {
 export function RouteExplorerSearchPage() {
   const ports = useWorldPorts();
   const savedPorts = useSavedPorts();
+  const selectedVoyage = useSelectedVoyage();
   const [departure, setDeparture] = useState('');
   const [arrival, setArrival] = useState('');
   const [activeInput, setActiveInput] = useState<'departure' | 'arrival'>('departure');
@@ -258,24 +267,25 @@ export function RouteExplorerSearchPage() {
   const addToVoyage = (route: RouteOption) => {
     const path = route.path || [[route.from.lat, route.from.lon], [route.to.lat, route.to.lon]];
     const passageId = `explorer-${route.passage?.id ?? Date.now()}`;
-    const savedRoute = {
-      id: passageId,
-      name: route.passage?.name || `${route.from.name} → ${route.to.name}`,
-      savedAt: new Date().toISOString(),
-      waypoints: routeWaypoints(path, route.from.name, route.to.name),
-    };
-    let existing: Array<{ id: string; name: string; savedAt: string; waypoints: ReturnType<typeof routeWaypoints> }> = [];
-    try {
-      const raw = localStorage.getItem('fv.savedRoutes');
-      const parsed = raw ? JSON.parse(raw) : [];
-      existing = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      existing = [];
-    }
+    const savedRoute = tagRouteWithVoyage(
+      {
+        id: passageId,
+        name: route.passage?.name || `${route.from.name} → ${route.to.name}`,
+        savedAt: new Date().toISOString(),
+        waypoints: routeWaypoints(path, route.from.name, route.to.name),
+      },
+      selectedVoyage?.id,
+    );
+    const existing = readSavedRoutesRaw() as Array<{
+      id: string;
+      name: string;
+      savedAt: string;
+      waypoints: ReturnType<typeof routeWaypoints>;
+    }>;
     const next = [savedRoute, ...existing.filter((item) => item.id !== passageId)];
     try {
-      localStorage.setItem('fv.savedRoutes', JSON.stringify(next));
-      localStorage.setItem('fv.routeEditorRouteId', passageId);
+      writeSavedRoutesRaw(next);
+      writeRouteEditorRouteId(selectedVoyage?.id, passageId);
     } catch {
       setMessage('Unable to add route to the voyage simulator storage.');
       return;
@@ -342,7 +352,7 @@ export function RouteExplorerSearchPage() {
       ) : (
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
       )}
-      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />{overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}<WeatherFieldControl position="topright" /><AreaConstraintsControl position="topright" /><WeatherPointControl position="topright" /><PortsControl position="topright" /><RulerControl position="topright" /><CycloneLayer position="topright" /><WeatherAlertsControl position="topright" />
+      <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />{overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}<WeatherFieldControl position="topright" /><MapWeatherLegendControl position="topleft" /><AreaConstraintsControl position="topright" /><WeatherPointControl position="topright" /><PortsControl position="topright" /><RulerControl position="topright" /><CycloneLayer position="topright" /><WeatherAlertsControl position="topright" />
       {showNearbyCircle && <Circle center={[nearbyCenter.lat, nearbyCenter.lon]} radius={radius * 1852} pathOptions={{ color: '#aeb7c5', weight: 1, fillColor: '#d8dee8', fillOpacity: 0.13, dashArray: '4 4' }} />}
       {mapFrom && <Marker position={[mapFrom.lat, mapFrom.lon]} icon={systemPortIcon()}><Tooltip>{mapFrom.name}</Tooltip></Marker>}
       {mapTo && (!mapFrom || mapFrom.lat !== mapTo.lat || mapFrom.lon !== mapTo.lon) && <Marker position={[mapTo.lat, mapTo.lon]} icon={systemPortIcon()}><Tooltip>{mapTo.name}</Tooltip></Marker>}

@@ -5,6 +5,14 @@ import type { PerformanceReport } from '../data/reports';
 /** Mirrors the backend's `TracksheetRowDto` (see PerformanceController.cs). */
 export type TracksheetRowApiDto = Omit<TrackRow, 'id' | 'nextPort'> & { id: string; nextPort: string };
 
+export interface WeatherFactorEntryApiDto {
+  weather: string;
+  deadWeight: number;
+  magnitude: number;
+  angle: number;
+  value: number;
+}
+
 export interface PerformanceReportApiDto {
   voyageId: string;
   vesselImo: string;
@@ -21,6 +29,11 @@ export interface PerformanceReportApiDto {
 export const performanceApi = {
   async getTracksheet(voyageId: string): Promise<TracksheetRowApiDto[]> {
     return api.get<TracksheetRowApiDto[]>(`/api/performance/tracksheet?voyageId=${encodeURIComponent(voyageId)}`);
+  },
+
+  /** The wind/wave weather-factor calibration table (global reference data). */
+  async getWeatherFactors(): Promise<WeatherFactorEntryApiDto[]> {
+    return api.get<WeatherFactorEntryApiDto[]>('/api/performance/weather-factors');
   },
 
   async saveTracksheet(voyageId: string, vesselImo: string, rows: TracksheetRowApiDto[]): Promise<TracksheetRowApiDto[]> {

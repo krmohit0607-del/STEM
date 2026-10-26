@@ -7,6 +7,7 @@ import { findBestOptimizedRoute } from '../data/routeOptimizer';
 import { RouteEditorMap, type EditorPoint } from './RouteEditorMap';
 import { RouteEditingTabs } from './RouteEditingTabs';
 import { PortInput } from './PortInput';
+import { readSavedRoutesRaw, writeSavedRoutesRaw } from '../data/savedRoutesStore';
 
 /**
  * Plot Route on Map page — `/plot-route`.
@@ -16,9 +17,11 @@ import { PortInput } from './PortInput';
  * from scratch between them. Pins are draggable and the running list of
  * waypoints (with coordinates and leg distance) is shown beside the map.
  *
- * Nothing is persisted or sent to the backend yet — this is a standalone
- * planning surface. Hook the waypoint list up to the route endpoints when
- * they are exposed for the React app.
+ * Saved routes (`fv.savedRoutes`, shared with the Route Explorer) are now
+ * also persisted to the backend database via the Settings API — see
+ * `data/savedRoutesStore.ts`. The plotted route itself isn't yet linked to
+ * a specific voyage/order; hook that up when the route endpoints are
+ * exposed for the React app.
  */
 
 interface PlotPoint {
@@ -139,25 +142,12 @@ interface SavedRoute {
   waypoints: SavedWaypoint[];
 }
 
-const SAVED_ROUTES_KEY = 'fv.savedRoutes';
-
 function readSavedRoutes(): SavedRoute[] {
-  try {
-    const raw = window.localStorage.getItem(SAVED_ROUTES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as SavedRoute[]) : [];
-  } catch {
-    return [];
-  }
+  return readSavedRoutesRaw() as SavedRoute[];
 }
 
 function writeSavedRoutes(routes: SavedRoute[]): void {
-  try {
-    window.localStorage.setItem(SAVED_ROUTES_KEY, JSON.stringify(routes));
-  } catch {
-    /* storage unavailable — ignore */
-  }
+  writeSavedRoutesRaw(routes);
 }
 
 export function PlotRoutePage() {

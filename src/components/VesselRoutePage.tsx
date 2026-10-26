@@ -25,6 +25,7 @@ const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
 import { LeftSidebar } from './LeftSidebar';
 import { BottomPanel } from './BottomPanel';
 import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapLayersControl';
+import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
@@ -274,6 +275,7 @@ export function VesselRoutePage() {
                 <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
                 {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
                 <WeatherFieldControl position="topright" />
+                <MapWeatherLegendControl position="topleft" />
                 <AreaConstraintsControl position="topright" />
                 <WeatherPointControl position="topright" />
                 <PortsControl position="topright" />

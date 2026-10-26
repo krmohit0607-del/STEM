@@ -20,6 +20,21 @@ export interface SimRouteGeometry {
   path: Array<[number, number]>;
 }
 
+/** A waypoint-level RPM/MCR override (and/or drift instruction) entered in
+ *  the Waypoint details panel. */
+export interface WaypointEngineOverride {
+  pos: [number, number];
+  /** Pre-formatted waypoint name/position label, for display in reports. */
+  label?: string;
+  rpmMin?: number;
+  rpmMax?: number;
+  mcrMin?: number;
+  mcrMax?: number;
+  /** When set, the vessel drifts at this waypoint until this ISO date/time
+   *  before resuming the voyage. */
+  driftUntil?: string;
+}
+
 export interface ActiveSimRoute extends SimRouteGeometry {
   label: string;
   distanceNm: number;
@@ -32,6 +47,14 @@ export interface ActiveSimRoute extends SimRouteGeometry {
   timeHours?: number[];
   /** ISO departure time (ETD) the simulation timeline should start from. */
   etdIso?: string;
+  /**
+   * Waypoints where the user set a Min/Max RPM or MCR to sail at, and/or a
+   * drift-until time. The optimizer uses the RPM/MCR (in preference to the
+   * Limits & Constraints settings) for any waypoint within the portion of the
+   * route being re-optimized; the Route Simulator's guidance export surfaces
+   * both the RPM/MCR and drift instructions to the vessel.
+   */
+  waypointOverrides?: WaypointEngineOverride[];
 }
 
 /** A vessel marker at its current simulated position along a route. */
@@ -62,6 +85,13 @@ let editCompareRoute: ActiveSimRoute | null = null;
 // Forecast hour (hours ahead of now) the map weather layers should show while a
 // simulation is playing; null hands control back to the manual weather slider.
 let simWeatherHour: number | null = null;
+// Forecast hour (hours ahead of now) the manual weather timeline is currently
+// scrubbed to; null when the weather control isn't mounted/active. The Route
+// Simulator reads this (while its own playback is idle) so dragging the
+// weather timeline also moves the vessel along the route whenever that time
+// falls within the voyage's ETD-ETA window — the mirror-image bridge of
+// `simWeatherHour` above.
+let weatherScrubHour: number | null = null;
 
 const listeners = new Set<() => void>();
 
@@ -122,12 +152,21 @@ export function setSimWeatherHour(hour: number | null): void {
   emit();
 }
 
+/**
+ * Publish (or clear) the manual weather timeline's current scrub position
+ * (hours ahead of now). See `weatherScrubHour` above.
+ */
+export function setWeatherScrubHour(hour: number | null): void {
+  weatherScrubHour = hour;
+  emit();
+}
+
 // --- Route edit-mode bridge --------------------------------------------------
 // The "Duplicate & Edit" control lives in the Route Simulator panel, but the
 // editable route is owned by the Route Explorer map. The panel issues commands;
 // the map reports whether an edit is in progress so the panel can swap the
 // button for Activate / Discard.
- type RouteEditAction = 'start' | 'activate' | 'discard' | 'clear';
+ type RouteEditAction = 'start' | 'activate' | 'discard' | 'clear' | 'save';
 
 /** Clear the currently published non-saved route from the simulator. */
 export function clearActiveSimRoute(): void {
@@ -183,6 +222,11 @@ export function useMapRouteWaypoints(): SimWaypointDot[] {
 /** Forecast hour driven by the simulation, or null when it is idle. */
 export function useSimWeatherHour(): number | null {
   return useSyncExternalStore(subscribe, () => simWeatherHour);
+}
+
+/** The manual weather timeline's current scrub position, or null when it isn't active. */
+export function useWeatherScrubHour(): number | null {
+  return useSyncExternalStore(subscribe, () => weatherScrubHour);
 }
 
 /** Whether the Route Explorer map currently has a route edit in progress. */

@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react';
 
 import type { MarketFactors, OptimizedRoute } from './routeMetrics';
+import { readSavedRoutesRaw, writeSavedRoutesRaw, writeActiveRouteId } from './savedRoutesStore';
+import { mergeVoyageShared } from './voyageOverrides';
 
 /**
  * Cross-component store for the Optimization feature.
@@ -113,9 +115,6 @@ export function useSavedRoutesVersion(): number {
 
 // --- "Follow route" bridge into the Route Simulator --------------------------
 
-const SAVED_ROUTES_KEY = 'fv.savedRoutes';
-const ACTIVE_ROUTE_KEY = 'fv.activeRouteId';
-
 interface SavedWaypoint {
   lat: string;
   lon: string;
@@ -125,6 +124,7 @@ interface SavedRoute {
   name: string;
   savedAt: string;
   waypoints: SavedWaypoint[];
+  voyageId?: string;
 }
 
 /** Decimal degrees → `33° 51.2' N` style string (matches the simulator). */
@@ -138,21 +138,12 @@ function decToDM(value: number, isLat: boolean): string {
 }
 
 /**
- * Save an optimized route as a normal saved route, mark it active, and ask
- * the drawer to open the Route Simulator (which draws the active route on
- * the map for the voyage).
+ * Save an optimized route as a normal saved route (tagged with the given
+ * voyage), mark it active for that voyage, and ask the drawer to open the
+ * Route Simulator (which draws the active route on the map for the voyage).
  */
-export function followOptimizedRoute(route: OptimizedRoute): void {
-  let saved: SavedRoute[] = [];
-  try {
-    const raw = window.localStorage.getItem(SAVED_ROUTES_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) saved = parsed as SavedRoute[];
-    }
-  } catch {
-    /* ignore */
-  }
+export function followOptimizedRoute(route: OptimizedRoute, voyageId: string | undefined): void {
+  const saved = readSavedRoutesRaw() as SavedRoute[];
 
   const id = `opt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const newRoute: SavedRoute = {
@@ -163,15 +154,15 @@ export function followOptimizedRoute(route: OptimizedRoute): void {
       lat: decToDM(lat, true),
       lon: decToDM(lon, false),
     })),
+    ...(voyageId ? { voyageId } : {}),
   };
 
-  try {
-    window.localStorage.setItem(SAVED_ROUTES_KEY, JSON.stringify([...saved, newRoute]));
-    // The simulator's SimRoute id for a saved route is `saved-<id>`.
-    window.localStorage.setItem(ACTIVE_ROUTE_KEY, `saved-${id}`);
-  } catch {
-    /* ignore */
-  }
+  writeSavedRoutesRaw([...saved, newRoute]);
+  // The simulator's SimRoute id for a saved route is `saved-<id>`.
+  writeActiveRouteId(voyageId, `saved-${id}`);
+  // Following/activating a route is a deliberate "this is now the route"
+  // action, so this voyage's "Auto Route" (CP & Leg Details) turns off.
+  if (voyageId) mergeVoyageShared(voyageId, { leg1AutoRoute: false });
 
   bumpSavedRoutes();
   requestPanelView('simulator');

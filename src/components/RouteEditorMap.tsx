@@ -20,6 +20,7 @@ import { WeatherPointControl } from './WeatherPointControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { MapCursorPosition } from './MapCursorPosition';
 import { MapLayersControl, readMapLayerId, readOverlayLayers, type MapLayerId, type OverlayLayerId } from './MapLayersControl';
+import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
 const toRad = (d: number) => (d * Math.PI) / 180;
@@ -101,7 +102,9 @@ export function legPositions(
  *   waypoint at the clicked position (`onAddPoint`).
  * - Existing waypoints render as numbered, draggable markers connected
  *   by a polyline; dragging one updates its position (`onMovePoint`).
- * - Clicking a marker deletes it (`onDeletePoint`).
+ * - Clicking a marker deletes it (`onDeletePoint`), unless `onSelectPoint`
+ *   is provided, in which case clicking selects it instead (and deleting is
+ *   left entirely to the host, e.g. a delete button in a details panel).
  *
  * Coordinates are plain decimal degrees here; the parent converts to /
  * from the degree-minute strings used by the waypoint table.
@@ -207,10 +210,20 @@ interface RouteEditorMapProps {
   activeWaypoints?: Array<{ pos: [number, number]; color: string }>;
   /** Called when a ship marker is clicked, to select that route. */
   onSelectRoute?: (id: string) => void;
+  /** Called when a waypoint marker is clicked, to select it (e.g. expanding
+   *  its details in a host panel). When provided, this replaces the default
+   *  click/double-click-to-delete behavior for waypoint markers entirely —
+   *  deleting then happens only via the host's own UI (e.g. a delete button
+   *  in the Waypoint details panel). */
+  onSelectPoint?: (id: string) => void;
   onAddPoint: (lat: number, lon: number) => void;
   onInsertPoint: (afterIndex: number, lat: number, lon: number) => void;
   onMovePoint: (id: string, lat: number, lon: number) => void;
   onDeletePoint: (id: string) => void;
+  /** When true, suppresses the floating top-left chart-opacity/weather-legend
+   *  control — set this when the host page already renders `<MapWeatherLegendBar>`
+   *  inline in its own top toolbar (e.g. Route Explorer's Optimize / View on MT row). */
+  legendBarInHostToolbar?: boolean;
 }
 
 /** Cache of waypoint icons keyed by kind+selected so re-renders reuse the same
@@ -334,25 +347,68 @@ function ClickCapture({
 }
 
 /**
- * Fits the map to the waypoints once, on the first render that has any
- * points. After that the user's zoom/pan is left untouched so editing,
- * adding, deleting or dragging waypoints never resets the view.
+ * Fits the map to the waypoints automatically — every time the route data
+ * meaningfully changes (e.g. a voyage's route loads in stages: an initial
+ * version followed shortly by the final one once auto-generation/background
+ * computation finishes) — until the user manually pans or zooms, at which
+ * point their control of the view takes over permanently and further data
+ * changes (editing, adding/deleting/dragging waypoints) never reset it.
  */
 function FitBounds({ points }: { points: EditorPoint[] }) {
   const map = useMap();
-  const hasFit = useRef(false);
+  const userInteracted = useRef(false);
+  // Guards against our own programmatic `fitBounds`/`setView` calls below —
+  // those fire the same 'zoomstart'/'dragstart'-family events as a genuine
+  // user gesture, so without this the very first auto-fit would immediately
+  // (and permanently) mark itself as "the user took over".
+  const programmatic = useRef(false);
+
   useEffect(() => {
-    if (hasFit.current || points.length === 0) return;
-    hasFit.current = true;
+    const markInteracted = () => {
+      if (programmatic.current) return;
+      userInteracted.current = true;
+    };
+    map.on('dragstart zoomstart', markInteracted);
+    return () => {
+      map.off('dragstart zoomstart', markInteracted);
+    };
+  }, [map]);
+
+  useEffect(() => {
+    if (userInteracted.current || points.length === 0) return;
+    programmatic.current = true;
+    // The container's measured size can still be stale (e.g. the side panel
+    // or bottom drawer hasn't finished its own layout pass yet when a
+    // voyage's route first arrives) — invalidating first makes the fit/zoom
+    // below compute against the real size, and forces Leaflet to reposition
+    // every layer (route polylines *and* the weather field), instead of
+    // only correcting once the user happens to pan/zoom manually.
+    map.invalidateSize();
     if (points.length === 1) {
       map.setView([points[0].lat, points[0].lon], Math.max(map.getZoom(), 4));
-      return;
+    } else {
+      const bounds = getAntimeridianAwareBounds(points.map((p) => [p.lat, p.lon]));
+      if (bounds) map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40], maxZoom: 9 });
     }
-    const bounds = getAntimeridianAwareBounds(points.map((p) => [p.lat, p.lon]));
-    if (bounds) map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40], maxZoom: 9 });
-    // Only the first non-empty render fits; deliberately ignore later changes.
+    // Belt-and-braces: explicitly ask every moveend-listening layer (the
+    // weather field in particular — see `WeatherFieldLayer.tsx`) to redraw
+    // once more shortly after, in case the panel/drawer layout was still
+    // settling when the above ran against a still-stale container size.
+    const t = window.setTimeout(() => {
+      map.invalidateSize();
+      map.fire('moveend');
+      // Release the guard only once any animation from the fit above has
+      // had time to fully settle, so a real user gesture that happens to
+      // land right afterwards is still correctly recognised.
+      programmatic.current = false;
+    }, 300);
+    return () => window.clearTimeout(t);
+    // Deliberately keyed on the points themselves (not just their count) —
+    // a route that loads in stages (e.g. a short placeholder followed by
+    // the final land-avoiding path) changes point count *and* positions, and
+    // either should re-fit as long as the user hasn't taken control yet.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [points.length]);
+  }, [points.length, points[0]?.lat, points[0]?.lon, points[points.length - 1]?.lat, points[points.length - 1]?.lon]);
   return null;
 }
 
@@ -390,10 +446,12 @@ export function RouteEditorMap({
   plannedRouteColor = '#58a6ff',
   activeWaypoints = [],
   onSelectRoute,
+  onSelectPoint,
   onAddPoint,
   onInsertPoint,
   onMovePoint,
   onDeletePoint,
+  legendBarInHostToolbar = false,
 }: RouteEditorMapProps) {
   const [baseLayer, setBaseLayer] = useState<MapLayerId>(() => readMapLayerId());
   const [overlayLayers, setOverlayLayers] = useState<OverlayLayerId[]>(() => readOverlayLayers());
@@ -581,10 +639,18 @@ export function RouteEditorMap({
           })}
           eventHandlers={{
             click: () => {
+              if (onSelectPoint) {
+                onSelectPoint(p.id);
+                return;
+              }
               if (editable && !p.isPort && !p.locked) onDeletePoint(p.id);
             },
             dblclick: (e) => {
               if (e.originalEvent) L.DomEvent.stop(e.originalEvent);
+              // When `onSelectPoint` is wired up (e.g. Route Explorer's
+              // Waypoint details panel), deleting moves to that panel's own
+              // delete button instead of a map click.
+              if (onSelectPoint) return;
               if (editable && !p.isPort && !p.locked) onDeletePoint(p.id);
             },
             drag: (e) => {
@@ -768,6 +834,7 @@ export function RouteEditorMap({
       <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
       {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
       <WeatherFieldControl position="topright" />
+      {!legendBarInHostToolbar && <MapWeatherLegendControl position="topleft" />}
       <AreaConstraintsControl position="topright" />
       <WeatherPointControl position="topright" />
       <PortsControl position="topright" />

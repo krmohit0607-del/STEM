@@ -74,6 +74,7 @@ const LOCAL_SETTING_MIGRATIONS: Array<[string, string]> = [
   ['fv.savedPassages', 'savedPassages'],
   ['fv.cargoMaster', 'cargoMaster'],
   ['fv.areaConstraints.deleted', 'areaConstraints.deleted'],
+  ['fv.savedRoutes', 'routes.savedRoutes'],
 ];
 
 async function defaultSettingValue(settingKey: string): Promise<unknown> {

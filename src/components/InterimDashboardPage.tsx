@@ -10,6 +10,9 @@ import { InterimTabs } from './InterimTabs';
 import { ReportEmailComposer } from './ReportEmailComposer';
 import { STUB_ROWS as TRACKSHEET_ROWS, computeCons, type TrackRow } from './TracksheetGrid';
 import type { LegRow } from './voyage/types';
+import { performanceApi } from '../api/performanceApi';
+import { useActiveSimRoute } from '../data/routeSimulatorStore';
+import { computeInterimResult, cpConfigFromLeg, type InterimCpConfig } from '../data/interimCalculations';
 
 /** One noon-to-noon day plotted on the performance graph (sourced from the
  *  tracksheet). Speed and FO/GO consumption are normalised to 24 hours. */
@@ -267,197 +270,6 @@ const STUB_CP: CpDetails = {
   goodWeatherDef: 'BF ≤ 4, Wave ≤ 2.5 m, Current ≤ 0.5 kt',
 };
 
-const STUB_NOON_REPORTS: NoonReportRow[] = [
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 13, 10:00Z',
-    hoursSlr: 24,
-    distance: '244 NM',
-    sog: '10.2 kt',
-    fo: '35.72 MT',
-    doGo: '0.32 MT',
-    sigWaveHeight: '2.2 m',
-    bf: 4,
-    currentFactor: '-0.2 kt',
-    rpm: 68,
-    mePower: '7,896 kW',
-    received: 'Jun 13, 10:35Z',
-    delayedBy: '0.6 hrs',
-    fullReport: [
-      ['Position', '12°34\'N / 045°12\'E'],
-      ['Course', '094°'],
-      ['Heading', '096°'],
-      ['Wind Direction', 'NE'],
-      ['Wind Force (BF)', '4'],
-      ['Sea State', '3'],
-      ['Swell Direction', 'NE'],
-      ['Swell Height', '2.2 m'],
-      ['Air Temp', '28.5 °C'],
-      ['Sea Temp', '29.1 °C'],
-      ['ROB FO', '1,245 MT'],
-      ['ROB GO', '85 MT'],
-    ],
-  },
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 12, 10:00Z',
-    hoursSlr: 24,
-    distance: '250 NM',
-    sog: '10.4 kt',
-    fo: '34.74 MT',
-    doGo: '0 MT',
-    sigWaveHeight: '1.8 m',
-    bf: 3,
-    currentFactor: '-0.4 kt',
-    rpm: 69,
-    mePower: '7,635 kW',
-    received: 'Jun 12, 10:58Z',
-    delayedBy: '1.0 hrs',
-    fullReport: [
-      ['Position', '12°02\'N / 042°48\'E'],
-      ['Course', '094°'],
-      ['Wind Force (BF)', '3'],
-      ['Sea State', '2'],
-      ['Swell Height', '1.8 m'],
-      ['ROB FO', '1,280 MT'],
-      ['ROB GO', '85 MT'],
-    ],
-  },
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 11, 10:00Z',
-    hoursSlr: 23,
-    distance: '242 NM',
-    sog: '10.5 kt',
-    fo: '30.46 MT',
-    doGo: '0 MT',
-    sigWaveHeight: '1.7 m',
-    bf: 4,
-    currentFactor: '-0.2 kt',
-    rpm: 70,
-    mePower: '6,872 kW',
-    received: 'Jun 11, 10:58Z',
-    delayedBy: '1.0 hrs',
-    fullReport: [
-      ['Position', '11°25\'N / 040°33\'E'],
-      ['Course', '094°'],
-      ['Wind Force (BF)', '4'],
-      ['Sea State', '3'],
-      ['ROB FO', '1,314 MT'],
-      ['ROB GO', '85 MT'],
-    ],
-  },
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 10, 11:00Z',
-    hoursSlr: 24,
-    distance: '254 NM',
-    sog: '10.6 kt',
-    fo: '39.65 MT',
-    doGo: '0.3 MT',
-    sigWaveHeight: '2.1 m',
-    bf: 4,
-    currentFactor: '-0.2 kt',
-    rpm: 72,
-    mePower: '8,742 kW',
-    received: 'Jun 10, 12:12Z',
-    delayedBy: '1.2 hrs',
-    fullReport: [
-      ['Position', '10°44\'N / 038°20\'E'],
-      ['Course', '094°'],
-      ['Wind Force (BF)', '4'],
-      ['Sea State', '3'],
-      ['ROB FO', '1,344 MT'],
-      ['ROB GO', '84 MT'],
-    ],
-  },
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 09, 11:00Z',
-    hoursSlr: 24,
-    distance: '258 NM',
-    sog: '10.8 kt',
-    fo: '39.53 MT',
-    doGo: '0.02 MT',
-    sigWaveHeight: '2.2 m',
-    bf: 4,
-    currentFactor: '-0.0 kt',
-    rpm: 72,
-    mePower: '8,699 kW',
-    received: 'Jun 09, 11:54Z',
-    delayedBy: '0.9 hrs',
-    fullReport: [
-      ['Position', '10°02\'N / 036°05\'E'],
-      ['Course', '094°'],
-      ['Wind Force (BF)', '4'],
-      ['Sea State', '3'],
-      ['ROB FO', '1,383 MT'],
-      ['ROB GO', '84 MT'],
-    ],
-  },
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 08, 11:00Z',
-    hoursSlr: 24,
-    distance: '261 NM',
-    sog: '10.9 kt',
-    fo: '38.52 MT',
-    doGo: '0.15 MT',
-    sigWaveHeight: '1.9 m',
-    bf: 4,
-    currentFactor: '-0.1 kt',
-    rpm: 72,
-    mePower: '8,482 kW',
-    received: 'Jun 08, 15:13Z',
-    delayedBy: '4.2 hrs',
-    fullReport: [
-      ['Position', '09°20\'N / 033°50\'E'],
-      ['Course', '094°'],
-      ['Wind Force (BF)', '4'],
-      ['Sea State', '3'],
-      ['ROB FO', '1,422 MT'],
-      ['ROB GO', '84 MT'],
-    ],
-  },
-  {
-    reportType: 'Noon Report',
-    initial: true,
-    current: true,
-    timestamp: 'Jun 07, 11:00Z',
-    hoursSlr: 24,
-    distance: '276 NM',
-    sog: '11.5 kt',
-    fo: '38.32 MT',
-    doGo: '0.01 MT',
-    sigWaveHeight: '1.5 m',
-    bf: 4,
-    currentFactor: '-0.0 kt',
-    rpm: 73,
-    mePower: '8,412 kW',
-    received: 'Jun 07, 11:58Z',
-    delayedBy: '1.0 hrs',
-    fullReport: [
-      ['Position', '08°36\'N / 031°30\'E'],
-      ['Course', '094°'],
-      ['Wind Force (BF)', '4'],
-      ['Sea State', '2'],
-      ['ROB FO', '1,460 MT'],
-      ['ROB GO', '84 MT'],
-    ],
-  },
-];
 
 function formatHours(value: number): string {
   return `${value.toFixed(2)} HRS`;
@@ -607,7 +419,7 @@ export function InterimDashboardPage() {
   const cpDetails = useMemo<CpDetails>(() => {
     if (!activeLeg) return STUB_CP;
     const defaultSpeedRow = activeLeg.speedCons.find((row) => row.isDefault) ?? activeLeg.speedCons[0];
-    const speedKn = Number(activeLeg.cpAboutSpeed || defaultSpeedRow?.speed || STUB_CP.speedKn) || STUB_CP.speedKn;
+    const speedKn = Number(defaultSpeedRow?.speed || STUB_CP.speedKn) || STUB_CP.speedKn;
     const consFoPerDay = Number(defaultSpeedRow?.dailyCons1 || STUB_CP.consFoPerDay) || STUB_CP.consFoPerDay;
     const consGoPerDay = Number(defaultSpeedRow?.dailyCons2 || STUB_CP.consGoPerDay) || STUB_CP.consGoPerDay;
     const windLimit = activeLeg.cpWinds || '4';
@@ -625,6 +437,52 @@ export function InterimDashboardPage() {
     };
   }, [activeLeg]);
 
+  // Full CP configuration for the interim calculation engine (Step 3 port) —
+  // the same per-leg CP/good-weather fields edited in the Voyage Details
+  // page (`LegsSection`), translated into the engine's strategy-key types.
+  const interimCpConfig = useMemo<InterimCpConfig>(
+    () => cpConfigFromLeg(activeLeg, cpDetails.speedKn),
+    [activeLeg, cpDetails.speedKn],
+  );
+
+  // Live tracksheet rows for the selected voyage, same backend source as the
+  // Tracksheet grid itself. `loadFailed` is only set when the fetch itself
+  // errors (e.g. backend offline) — a successful fetch that returns zero
+  // rows means the voyage genuinely has no reports yet, and the dashboard
+  // must show that real (empty/zero) state, not demo data standing in for it.
+  const [liveRows, setLiveRows] = useState<TrackRow[]>([]);
+  const [tracksheetLoadFailed, setTracksheetLoadFailed] = useState(false);
+  useEffect(() => {
+    const voyageId = selectedVoyage?.id;
+    if (!voyageId) {
+      setLiveRows([]);
+      setTracksheetLoadFailed(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const saved = await performanceApi.getTracksheet(voyageId);
+        if (!cancelled) {
+          setLiveRows(saved);
+          setTracksheetLoadFailed(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setLiveRows([]);
+          setTracksheetLoadFailed(true);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVoyage?.id]);
+  const activeRoute = useActiveSimRoute();
+  const trackRows = tracksheetLoadFailed
+    ? TRACKSHEET_ROWS.map((r, i) => ({ ...r, id: `stub-${i}`, nextPort: '' }))
+    : liveRows;
+
   const toggleSeries = (key: string) => {
     setVisibleSeries((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -637,7 +495,7 @@ export function InterimDashboardPage() {
   // FO/GO consumption is derived from the ROB deltas between noon reports and
   // normalised, along with speed, to a 24-hour basis.
   const chartDays = useMemo<ChartDay[]>(() => {
-    const noon = TRACKSHEET_ROWS.filter((r) => r.rt === 'N');
+    const noon = trackRows.filter((r) => r.rt === 'N');
     return noon.map((r, idx) => {
       const hours = r.hrs && r.hrs > 0 ? r.hrs : 24;
       const factor = 24 / hours;
@@ -657,7 +515,7 @@ export function InterimDashboardPage() {
         current: r.currF,
       };
     });
-  }, []);
+  }, [trackRows]);
 
   // Measure the chart container so the SVG can be drawn at the real pixel width
   // (viewBox = container width). This makes it fill edge-to-edge on any screen
@@ -675,112 +533,67 @@ export function InterimDashboardPage() {
   }, []);
 
   const interimSummaryRows = useMemo<InterimSummaryRow[]>(() => {
-    const reports = STUB_NOON_REPORTS;
-    const windLimit = Number(activeLeg?.cpWinds || 4) || 4;
-    const swhLimit = Number(activeLeg?.cpSwh || 2.5) || 2.5;
-    const currentLimit = parseNum(activeLeg?.cpCurrents || '0.5') || 0.5;
-    const isGoodWeather = (row: NoonReportRow) =>
-      row.bf <= windLimit
-      && parseNum(row.sigWaveHeight) <= swhLimit
-      && Math.abs(parseNum(row.currentFactor)) <= currentLimit;
-
-    const aggregate = (rows: NoonReportRow[]) => {
-      const hours = rows.reduce((sum, row) => sum + row.hoursSlr, 0);
-      const distance = rows.reduce((sum, row) => sum + parseNum(row.distance), 0);
-      const fo = rows.reduce((sum, row) => sum + parseNum(row.fo), 0);
-      const go = rows.reduce((sum, row) => sum + parseNum(row.doGo), 0);
-      const performanceDistance = rows.reduce(
-        (sum, row) => sum + (parseNum(row.sog) - parseNum(row.currentFactor)) * row.hoursSlr,
-        0,
-      );
-      const avgSpeed = hours > 0 ? distance / hours : 0;
-      const avgPerformanceSpeed = hours > 0 ? performanceDistance / hours : 0;
-      const avgFo = hours > 0 ? (fo / hours) * 24 : 0;
-      const avgGo = hours > 0 ? (go / hours) * 24 : 0;
-      const cpHours = cpDetails.speedKn > 0 ? distance / cpDetails.speedKn : 0;
-      const cpFo = cpDetails.consFoPerDay * (hours / 24);
-      const cpGo = cpDetails.consGoPerDay * (hours / 24);
-      return {
-        hours,
-        distance,
-        fo,
-        go,
-        avgSpeed,
-        avgPerformanceSpeed,
-        avgFo,
-        avgGo,
-        projectedTime: cpHours - hours,
-        projectedFo: fo - cpFo,
-        projectedGo: go - cpGo,
-      };
-    };
-
-    const overall = aggregate(reports);
-    const goodWeather = aggregate(reports.filter(isGoodWeather));
-    const goodPct = overall.hours > 0 ? (goodWeather.hours / overall.hours) * 100 : 0;
+    const result = computeInterimResult(trackRows, interimCpConfig, activeRoute?.path ?? []);
+    const goodPct = result.goodWeatherPercent;
 
     return [
       {
         label: 'TIME @ SEA',
-        overall: {
-          primary: formatHours(overall.hours),
-        },
-        goodWeather: {
-          primary: `${formatHours(goodWeather.hours)} (${goodPct.toFixed(1)}%)`,
-        },
+        overall: { primary: formatHours(result.timeAtSea.overall) },
+        goodWeather: { primary: `${formatHours(result.timeAtSea.goodWeather)} (${goodPct.toFixed(1)}%)` },
       },
       {
         label: 'DISTANCE',
-        overall: { primary: `${overall.distance.toFixed(0)} NM` },
-        goodWeather: { primary: `${goodWeather.distance.toFixed(0)} NM` },
+        overall: { primary: `${result.distance.overall.toFixed(0)} NM` },
+        goodWeather: { primary: `${result.distance.goodWeather.toFixed(0)} NM` },
       },
       {
         label: 'AVERAGE SPEED',
-        overall: { primary: formatSpeed(overall.avgSpeed) },
-        goodWeather: { primary: formatSpeed(goodWeather.avgSpeed) },
+        overall: { primary: formatSpeed(result.averageSpeed.overall) },
+        goodWeather: { primary: formatSpeed(result.averageSpeed.goodWeather) },
       },
       {
         label: 'AVERAGE PERFORMANCE SPEED',
-        overall: { primary: formatSpeed(overall.avgPerformanceSpeed) },
-        goodWeather: { primary: formatSpeed(goodWeather.avgPerformanceSpeed) },
+        overall: { primary: formatSpeed(result.averagePerformanceSpeed.overall) },
+        goodWeather: { primary: formatSpeed(result.averagePerformanceSpeed.goodWeather) },
       },
       {
         label: 'AVERAGE VLSFO',
-        overall: { primary: formatMts(overall.avgFo) },
-        goodWeather: { primary: formatMts(goodWeather.avgFo) },
+        overall: { primary: formatMts(result.averageConsumption.vlsfo.overall) },
+        goodWeather: { primary: formatMts(result.averageConsumption.vlsfo.goodWeather) },
       },
       {
         label: 'AVERAGE LSMGO',
-        overall: { primary: formatMts(overall.avgGo) },
-        goodWeather: { primary: formatMts(goodWeather.avgGo) },
+        overall: { primary: formatMts(result.averageConsumption.lsmgo.overall) },
+        goodWeather: { primary: formatMts(result.averageConsumption.lsmgo.goodWeather) },
       },
       {
         label: 'AVERAGE NONE',
-        overall: { primary: formatMts(0) },
-        goodWeather: { primary: formatMts(0) },
+        overall: { primary: formatMts(result.averageConsumption.none.overall) },
+        goodWeather: { primary: formatMts(result.averageConsumption.none.goodWeather) },
       },
       {
         label: 'PROJECTED TIME',
-        overall: projectionTimeCell(overall.projectedTime),
-        goodWeather: projectionTimeCell(goodWeather.projectedTime),
+        overall: projectionTimeCell(result.projectedTimeLossGain.overall),
+        goodWeather: projectionTimeCell(result.projectedTimeLossGain.goodWeather),
       },
       {
         label: 'PROJECTED VLSFO',
-        overall: projectionFuelCell(overall.projectedFo),
-        goodWeather: projectionFuelCell(goodWeather.projectedFo),
+        overall: projectionFuelCell(result.projectedConsumption.vlsfo.overall),
+        goodWeather: projectionFuelCell(result.projectedConsumption.vlsfo.goodWeather),
       },
       {
         label: 'PROJECTED LSMGO',
-        overall: projectionFuelCell(overall.projectedGo),
-        goodWeather: projectionFuelCell(goodWeather.projectedGo),
+        overall: projectionFuelCell(result.projectedConsumption.lsmgo.overall),
+        goodWeather: projectionFuelCell(result.projectedConsumption.lsmgo.goodWeather),
       },
       {
         label: 'PROJECTED NONE',
-        overall: { primary: formatMts(0) },
-        goodWeather: { primary: formatMts(0) },
+        overall: projectionFuelCell(result.projectedConsumption.none.overall),
+        goodWeather: projectionFuelCell(result.projectedConsumption.none.goodWeather),
       },
     ];
-  }, [activeLeg, cpDetails]);
+  }, [trackRows, interimCpConfig, activeRoute?.path]);
 
   return (
     <div className="fv-interim">
@@ -824,6 +637,13 @@ export function InterimDashboardPage() {
           </ul>
         </div>
       </div>
+
+      {selectedVoyage && !tracksheetLoadFailed && trackRows.length === 0 && (
+        <div className="fv-interim__empty-notice">
+          <i className="fas fa-circle-info" aria-hidden="true" />
+          <span>No tracksheet reports yet for this voyage — add reports in the Tracksheet tab to see live calculations here.</span>
+        </div>
+      )}
 
       <div className="fv-interim__display-options">
         <span className="fv-interim__display-options-label">

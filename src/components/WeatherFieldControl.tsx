@@ -5,7 +5,7 @@ import L, { type ControlPosition } from 'leaflet';
 
 import { FIELD_FACTORS, getFieldFactor } from '../data/weatherField';
 import { MAX_FORECAST_HOURS, MIN_FORECAST_HOURS } from '../data/openMeteo';
-import { useSimWeatherHour } from '../data/routeSimulatorStore';
+import { useSimWeatherHour, setWeatherScrubHour } from '../data/routeSimulatorStore';
 import { WeatherFieldLayer } from './WeatherFieldLayer';
 import { MAP_CONTROL_OPEN_EVENT, notifyMapControlOpen } from './mapControlEvents';
 
@@ -68,13 +68,6 @@ function readHour(): number {
   } catch {
     return 0;
   }
-}
-
-/** Label like "Now" or "Tue 14:00" for an hour offset from now. */
-function hourLabel(offset: number): string {
-  if (offset <= 0) return 'Now';
-  const d = new Date(Date.now() + offset * 3600_000);
-  return d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
 /** UTC time-of-day for the bottom timeline's floating bubble, e.g. "15:00 UTC". */
@@ -171,10 +164,44 @@ function TopRightPortal({ children }: { children: React.ReactNode }) {
   return container ? createPortal(children, container) : null;
 }
 
+/**
+ * Reactive read of whether the weather field is on and which factor ids are
+ * selected, kept in sync with every mounted `WeatherFieldControl` via the
+ * same shared event + storage key those controls already use. `factorIds[0]`
+ * is the "primary" factor that paints the colour field, so any external
+ * legend (e.g. the map's top-of-map legend bar) should follow that one.
+ */
+export function useWeatherFieldSelection(): { on: boolean; factorIds: string[] } {
+  const [on, setOn] = useState<boolean>(() => readOn());
+  const [factorIds, setFactorIds] = useState<string[]>(() => readFactors());
+
+  useEffect(() => {
+    const sync = () => {
+      setOn(readOn());
+      setFactorIds(readFactors());
+    };
+    window.addEventListener(EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+
+  return { on, factorIds };
+}
+
 export function WeatherFieldControl({
   position = 'topright',
+  sampleOverrides,
 }: {
   position?: ControlPosition;
+  /** Per-factor-id override, used instead of live/synthetic sampling — a
+   *  locked route snapshot's frozen weather grid, for example. */
+  sampleOverrides?: Record<
+    string,
+    (lat: number, lon: number) => { magnitude: number; directionDeg: number } | null
+  >;
 } = {}) {
   const [open, setOpen] = useState(false);
   const [on, setOn] = useState<boolean>(() => readOn());
@@ -194,6 +221,16 @@ export function WeatherFieldControl({
   // manual time slider below takes over again.
   const simHour = useSimWeatherHour();
   const effectiveHour = simHour ?? hour;
+
+  // Mirror image of the above: publish the manual timeline's own scrub
+  // position so the Route Simulator can move the vessel along its route
+  // whenever that time falls within the voyage's ETD-ETA window (while the
+  // simulator's own playback is idle) — dragging the weather timeline then
+  // visibly "simulates" the voyage too, not just the weather.
+  useEffect(() => {
+    setWeatherScrubHour(on ? hour : null);
+  }, [on, hour]);
+  useEffect(() => () => setWeatherScrubHour(null), []);
 
   // Keep every mounted control in sync via the shared event + storage.
   useEffect(() => {
@@ -259,7 +296,10 @@ export function WeatherFieldControl({
   const changeRange = (days: number) => {
     setRangeDays(days);
     const span = days * 24;
-    const start = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS - span, hour - Math.floor(span / 3)));
+    // The window always starts at the currently-selected hour (never centred
+    // around it), so whatever date/time is active stays pinned to the left
+    // edge of the visible timeline.
+    const start = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS - span, hour));
     setWindowStart(start);
   };
 
@@ -274,9 +314,11 @@ export function WeatherFieldControl({
   };
 
   /** Jump straight to an arbitrary calendar date (UTC) — e.g. a month or a
-   *  year ago — keeping the current time-of-day and re-centring the window
-   *  (at the current range width) on that date. Old dates are served from
-   *  the backend's persistent weather tile cache via `MIN_FORECAST_HOURS`. */
+   *  year ago — keeping the current time-of-day and making that date the
+   *  start of the visible window (never centred/buried in the middle), so
+   *  the picked date is always the first thing shown, even when it's in the
+   *  past. Old dates are served from the backend's persistent weather tile
+   *  cache via `MIN_FORECAST_HOURS`. */
   const jumpToDate = (isoDate: string) => {
     if (!isoDate) return;
     const [y, m, d] = isoDate.split('-').map(Number);
@@ -287,7 +329,7 @@ export function WeatherFieldControl({
     setPlaying(false);
     persistHour(targetHour);
     const span = rangeDays * 24;
-    const start = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS - span, targetHour - span / 2));
+    const start = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS - span, targetHour));
     setWindowStart(start);
   };
 
@@ -332,14 +374,17 @@ export function WeatherFieldControl({
   // fetch-in-progress state.
   const primaryLive = effectiveHour >= 0 && effectiveHour <= MAX_FORECAST_HOURS;
 
-  // The first selected factor paints the colour field; the legend follows it.
-  const primary = getFieldFactor(factorIds[0]) ?? FIELD_FACTORS[0];
-
   return (
     <>
       {on &&
         factorIds.map((id, i) => (
-          <WeatherFieldLayer key={id} factorId={id} showField={i === 0} hour={effectiveHour} />
+          <WeatherFieldLayer
+            key={id}
+            factorId={id}
+            showField={i === 0}
+            hour={effectiveHour}
+            sampleOverride={sampleOverrides?.[id]}
+          />
         ))}
       <ControlPortal position={position}>
         <button
@@ -389,39 +434,6 @@ export function WeatherFieldControl({
                   )}
                 </label>
               ))}
-            </div>
-
-            <div className="fv-wf-control__time">
-              <div className="fv-wf-control__time-head">
-                <span>Forecast</span>
-                <span className="fv-wf-control__time-val">{hourLabel(hour)}</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={MAX_FORECAST_HOURS}
-                step={1}
-                value={hour}
-                onChange={(e) => persistHour(Number(e.target.value))}
-                className="fv-wf-control__time-slider"
-              />
-            </div>
-
-            <div className="fv-wf-control__legend">
-              <div className="fv-wf-control__legend-title">{primary.label}</div>
-              <div
-                className="fv-wf-control__bar"
-                style={{
-                  background: `linear-gradient(to right, ${primary.stops
-                    .map(([p, c]) => `${c} ${Math.round(p * 100)}%`)
-                    .join(', ')})`,
-                }}
-              />
-              <div className="fv-wf-control__ticks">
-                {primary.legend.map((t) => (
-                  <span key={t}>{t}</span>
-                ))}
-              </div>
             </div>
           </div>
         )}

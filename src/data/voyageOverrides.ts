@@ -28,6 +28,15 @@ export interface VoyageSharedFields {
   wslMaxSeaStateLaden: string;
   // Per-leg speed/cons profiles used by voyage details and route report defaults.
   legSpeedProfiles?: VoyageLegSpeedProfile[];
+  /** The voyage's single departure ETD (`YYYY-MM-DDTHH:mm`), kept in sync
+   *  between the Tracksheet's Departure/COSP report, the Waypoint details
+   *  first waypoint, and CP & Leg Details' LEG-1 ETD — editing any of the
+   *  three updates this value and the other two follow. */
+  etdIso?: string;
+  /** LEG-1's "Auto Route" toggle from CP & Leg Details. When true (the
+   *  default), the Route Simulator auto-generates a shortest land-avoiding
+   *  route between the voyage's ports for a voyage with no route yet. */
+  leg1AutoRoute?: boolean;
 }
 
 export interface VoyageLegSpeedConsRow {
@@ -62,6 +71,8 @@ export const SHARED_FIELD_KEYS: (keyof VoyageSharedFields)[] = [
   'wslMaxWindsLaden',
   'wslMaxSeaStateBallast',
   'wslMaxSeaStateLaden',
+  'etdIso',
+  'leg1AutoRoute',
 ];
 
 const key = (voyageId: string) => `fv.voyageShared.${voyageId}`;

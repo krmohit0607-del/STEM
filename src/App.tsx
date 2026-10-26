@@ -35,6 +35,7 @@ import { PassageDetailsPage } from './components/PassageDetailsPage';
 import { CreateVoyagePage } from './components/CreateVoyagePage';
 import { RouteExplorerPage } from './components/RouteExplorerPage';
 import { RouteExplorerSearchPage } from './components/RouteExplorerSearchPage';
+import { RouteSnapshotViewPage } from './components/RouteSnapshotViewPage';
 import { LimitsConstraintsPage } from './components/LimitsConstraintsPage';
 import { OrderConfirmationPage } from './components/OrderConfirmationPage';
 import { ReportingInstructionsPage } from './components/ReportingInstructionsPage';
@@ -414,6 +415,16 @@ export function App() {
                 <ProtectedRoute>
                   <Layout>
                     <RouteExplorerPage />
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/route-view/:id"
+              element={
+                <ProtectedRoute>
+                  <Layout showModuleChrome={false} hideFleetMenu>
+                    <RouteSnapshotViewPage />
                   </Layout>
                 </ProtectedRoute>
               }

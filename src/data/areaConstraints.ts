@@ -90,6 +90,35 @@ async function hydrateAreaConstraintSettings(): Promise<void> {
 
 void hydrateAreaConstraintSettings();
 
+const RING_EDITS_KEY = 'fv.areaConstraints.edits';
+
+function cloneEditedRings(rings: [number, number][][]): [number, number][][] {
+  return rings.map((ring) => ring.map((pt) => [pt[0], pt[1]] as [number, number]));
+}
+
+/**
+ * The full set of constraints actually in force right now — admin zones
+ * (minus any deleted, with any saved ring edits applied) plus voyage-specific
+ * ones — exactly what `AreaConstraintsPage` shows, exposed here so other
+ * consumers (e.g. the route-optimization request builder) don't have to
+ * duplicate the admin-deletion/ring-edit/voyage-overlay logic.
+ */
+export function getEffectiveAreaConstraints(voyageId?: string): AreaConstraint[] {
+  let edits: Record<string, [number, number][][]> = {};
+  try {
+    const raw = window.localStorage.getItem(RING_EDITS_KEY);
+    if (raw) edits = JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  const deleted = new Set(loadDeletedAdminIds());
+  const admin = AREA_CONSTRAINTS.filter((c) => !deleted.has(c.id)).map((c) =>
+    edits[c.id] ? { ...c, rings: cloneEditedRings(edits[c.id]) } : c
+  );
+  const voyage = voyageId ? loadVoyageConstraints(voyageId) : [];
+  return [...admin, ...voyage];
+}
+
 export const AREA_CONSTRAINTS: AreaConstraint[] = [
   {"id":"ac-1","name":"Mumbai Offshore Basin","rawName":"Mumbai Offshore Basin","zoneType":"limited-passage-zone","geomType":"limited-passage","rpmMin":"","rpmMax":"","speedMin":"","speedMax":"","rings":[[[22.63886,66.86715],[22.5426,66.93357],[22.37981,67.11805],[22.33821,67.32349],[22.04986,67.54316],[21.75388,67.99009],[21.57961,68.02181],[21.50366,68.20563],[21.27216,68.33098],[21.10244,68.41828],[21.05624,68.71999],[20.96999,69.1428],[20.39542,69.34973],[19.24842,69.77969],[18.92745,69.97062],[18.51694,70.25381],[18.23939,70.33573],[17.87299,70.59049],[17.60843,70.77096],[17.42893,71.04481],[17.30967,71.52744],[17.21936,71.56486],[17.15138,71.63555],[16.38959,71.73811],[16.19885,71.71875],[15.82254,72.29431],[16.19309,72.45024],[16.50893,73.55266],[22.55703,72.83286],[21.86825,71.10005],[23.24079,70.48768],[24.38377,67.8881]]]},
   {"id":"ac-2","name":"Chagos Bank","rawName":"Chagos Bank","zoneType":"limited-passage-zone","geomType":"limited-passage","rpmMin":"","rpmMax":"","speedMin":"","speedMax":"","rings":[[[-6.08583,67.87277],[-6.71342,67.8958],[-7.31536,68.0024],[-7.76296,68.16969],[-8.13863,68.27045],[-8.74836,68.61531],[-9.11764,68.95301],[-9.672,69.71854],[-9.83822,70.05105],[-10.17323,70.50367],[-10.49465,71.0115],[-10.66906,71.56484],[-10.80179,72.14242],[-10.74731,73.00601],[-10.67309,73.34246],[-10.50702,73.80122],[-10.03199,74.56791],[-9.78293,74.84853],[-9.33165,75.22539],[-8.90829,75.49338],[-8.25368,75.74563],[-7.67675,75.84381],[-7.1776,75.8635],[-6.67243,75.79408],[-6.09254,75.64944],[-5.36128,75.6683],[-4.4426,75.50862],[-3.8643,75.2857],[-3.45316,75.03596],[-2.9637,72.57944],[-2.28087,70.22719],[-2.50051,69.85426],[-2.99291,69.28266],[-3.27605,69.06396],[-3.8319,68.7053],[-4.49649,68.50625],[-5.11281,68.14669]]]},

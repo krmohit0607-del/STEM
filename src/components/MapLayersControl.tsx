@@ -40,6 +40,55 @@ function readNauticalOpacity(): number {
   }
 }
 
+/** Fired whenever the base layer or nautical-chart opacity changes, so every
+ *  mounted `MapLayersControl` (and other consumers, e.g. the map's
+ *  top-of-map legend bar) can stay in sync without prop-drilling. */
+const LAYERS_CHANGE_EVENT = 'fv-maplayers-change';
+function broadcastLayersChange(): void {
+  window.dispatchEvent(new Event(LAYERS_CHANGE_EVENT));
+}
+
+/** Reactive read of the current base map layer id. */
+export function useMapBaseLayerId(): MapLayerId {
+  const [value, setValue] = useState<MapLayerId>(() => readMapLayerId());
+  useEffect(() => {
+    const sync = () => setValue(readMapLayerId());
+    window.addEventListener(LAYERS_CHANGE_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(LAYERS_CHANGE_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+  return value;
+}
+
+/** Reactive read + write of the nautical chart tile opacity (0–1), shared
+ *  across every mounted control — e.g. the map's top-of-map legend bar sets
+ *  it, and the `<NauticalChartTiles>` layer (wherever it's mounted) follows. */
+export function useNauticalOpacity(): [number, (next: number) => void] {
+  const [value, setValue] = useState<number>(() => readNauticalOpacity());
+  useEffect(() => {
+    const sync = () => setValue(readNauticalOpacity());
+    window.addEventListener(LAYERS_CHANGE_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(LAYERS_CHANGE_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+  const update = (next: number) => {
+    const clamped = Math.max(0, Math.min(1, next));
+    try {
+      window.localStorage.setItem(NAUTICAL_OPACITY_KEY, String(clamped));
+    } catch {
+      /* ignore */
+    }
+    broadcastLayersChange();
+  };
+  return [value, update];
+}
+
 /**
  * Nautical chart tiles, blended between the weather field and the standard
  * base map by the same opacity slider: near 100% the (opaque) chart sits
@@ -185,7 +234,7 @@ export function MapLayersControl({
 }) {
   const [open, setOpen] = useState(false);
   const [internalValue, setInternalValue] = useState<MapLayerId>(() => readMapLayerId());
-  const [nauticalOpacity, setNauticalOpacity] = useState(() => readNauticalOpacity());
+  const [nauticalOpacity] = useNauticalOpacity();
   const value = controlledValue ?? internalValue;
 
   useEffect(() => {
@@ -208,6 +257,7 @@ export function MapLayersControl({
     setInternalValue(id);
     onChange?.(id);
     persistMapLayerId(id);
+    broadcastLayersChange();
     setOpen(false);
   };
 
@@ -217,15 +267,6 @@ export function MapLayersControl({
       : [...overlayLayers, layerId];
     onOverlayToggle?.(newLayers);
     persistOverlayLayers(newLayers);
-  };
-
-  const updateNauticalOpacity = (next: number) => {
-    setNauticalOpacity(next);
-    try {
-      window.localStorage.setItem(NAUTICAL_OPACITY_KEY, String(next));
-    } catch {
-      /* ignore */
-    }
   };
 
   const selected = MAP_LAYER_OPTIONS.find((o) => o.id === value) ?? MAP_LAYER_OPTIONS[0];
@@ -283,23 +324,6 @@ export function MapLayersControl({
             </>
           )}
 
-          {value === 'nautical' && (
-            <div className="fv-ml-control__opacity">
-              <label htmlFor="fv-nautical-opacity">Nautical chart opacity</label>
-              <input
-                id="fv-nautical-opacity"
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={nauticalOpacity}
-                onChange={(event) => updateNauticalOpacity(Number(event.target.value))}
-                aria-label="Nautical chart opacity"
-              />
-              <span>{Math.round(nauticalOpacity * 100)}%</span>
-            </div>
-          )}
-          
           <div className="fv-ml-control__selected">Base: {selected.label}</div>
           </div>
         )}

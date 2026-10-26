@@ -25,6 +25,8 @@
     "@microsoft/signalr": "9.0.6",
     "d3-array": "^3.2.4",
     "d3-contour": "^4.0.2",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.9",
     "leaflet": "1.9.4",
     "mammoth": "^1.13.0",
     "pdfjs-dist": "^4.10.38",

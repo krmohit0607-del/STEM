@@ -94,7 +94,7 @@ export interface ComputeMetricsOpts {
 /** Compute the full-voyage decision metrics for a route. */
 export function computeRouteMetrics(o: ComputeMetricsOpts): RouteMetrics {
   const distanceNm = o.distanceNm ?? pathDistanceNm(o.path);
-  const speedKn = Math.max(1, o.speedKn);
+  const speedKn = Math.max(1, Number.isFinite(o.speedKn) ? o.speedKn : 1);
   const ecaFraction = o.ecaFraction ?? 0.08;
   const durationH = distanceNm / speedKn;
   const ecaDistanceNm = distanceNm * ecaFraction;
@@ -112,8 +112,12 @@ export function computeRouteMetrics(o: ComputeMetricsOpts): RouteMetrics {
   const euaCost = euaAllowanceTons * o.market.euaCost;
   const totalCost = fuelCost + hireCost + euaCost;
 
-  const etd = o.etd;
-  const eta = new Date(etd.getTime() + durationH * 3600_000);
+  // Guard against an Invalid Date reaching `etd`/`eta` — any downstream
+  // Intl.DateTimeFormat call (used when the route table/guidance format
+  // these) throws "Invalid time value" on an Invalid Date, so never let one
+  // through from here.
+  const etd = Number.isNaN(o.etd.getTime()) ? new Date() : o.etd;
+  const eta = new Date(etd.getTime() + (Number.isFinite(durationH) ? durationH : 0) * 3600_000);
 
   // Per-waypoint ETAs from cumulative distance.
   const legEtas: LegEta[] = [];
@@ -291,9 +295,15 @@ export function generateOptimizedRoute(o: GenerateOpts): OptimizedRoute {
   const distanceNm = pathDistanceNm(path);
 
   let speedKn = Math.max(6, o.cpSpeedKn + shape.speedDelta);
-  if (o.scenarioId === 'specific-eta' && o.targetEta) {
+  // Only honour `targetEta` when it's an actual valid Date — an Invalid Date
+  // (e.g. from a cleared/incomplete date input upstream) would otherwise turn
+  // `hours`/`speedKn` into NaN and poison every downstream metric, including
+  // the resulting ETA, which later throws when formatted for display.
+  if (o.scenarioId === 'specific-eta' && o.targetEta && !Number.isNaN(o.targetEta.getTime())) {
     const hours = Math.max(1, (o.targetEta.getTime() - o.etd.getTime()) / 3600_000);
-    speedKn = Math.min(24, Math.max(6, distanceNm / hours));
+    if (!Number.isNaN(hours)) {
+      speedKn = Math.min(24, Math.max(6, distanceNm / hours));
+    }
   }
 
   // Fuel consumption scales ~ with the cube of speed relative to CP.
@@ -325,6 +335,10 @@ const dayFmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric'
 const timeFmt = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
 
 export function fmtEtaUtc(d: Date): string {
+  // See the same guard in RouteSimulatorPanel.tsx's fmtEta — Intl.DateTimeFormat
+  // throws "Invalid time value" on an Invalid Date instead of returning a
+  // placeholder string, so never let one reach `.format()`.
+  if (Number.isNaN(d.getTime())) return '--';
   return `${dayFmt.format(d)}, ${timeFmt.format(d)}Z`;
 }
 

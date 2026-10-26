@@ -24,6 +24,7 @@ const WORLD_PAN_BOUNDS: LatLngBoundsExpression = [
 ];
 import { MapCursorPosition } from './MapCursorPosition';
 import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapLayersControl';
+import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 
@@ -365,6 +366,7 @@ function VoyageOverviewInner({ row }: InnerProps) {
           <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
           {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
           <WeatherFieldControl position="topright" />
+          <MapWeatherLegendControl position="topleft" />
           <AreaConstraintsControl position="topright" />
           <WeatherPointControl position="topright" />
           <PortsControl position="topright" />

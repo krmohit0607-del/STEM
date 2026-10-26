@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { useL } from '../i18n/LocalizationProvider';
+import { mergeVoyageShared } from '../data/voyageOverrides';
 import { sampleWeatherField } from '../data/weatherField';
 import {
   ensureLiveData,
@@ -20,12 +21,36 @@ import {
   useActiveSimRoute,
   useEditCompareRoute,
   useRouteEditActive,
+  useWeatherScrubHour,
+  type WaypointEngineOverride,
 } from '../data/routeSimulatorStore';
 import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute, bumpSavedRoutes } from '../data/optimizationStore';
+import {
+  readSavedRoutesRaw,
+  writeSavedRoutesRaw,
+  readSavedRoutesForVoyage,
+  tagRouteWithVoyage,
+  readActiveRouteId,
+  writeActiveRouteId,
+} from '../data/savedRoutesStore';
 import { computeRouteMetrics, DEFAULT_MARKET_FACTORS, type RouteMetrics } from '../data/routeMetrics';
 import { openScenarioReport } from '../data/optimizationReport';
 import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
 import { unwrapRouteCoordinates } from '../data/antimeridian';
+import { useSelectedVoyage } from '../data/selectedVoyage';
+import { buildGuidanceEmail, downloadGuidancePdfFile, type GuidanceReportData } from '../data/guidanceReport';
+import {
+  readAisPositionsForVoyage,
+  deleteAisPosition,
+  useAisPositionsVersion,
+  hydrateAisPositionsFromBackend,
+  type AisPosition,
+} from '../data/aisPositionsStore';
+import {
+  publishSimulatorSelection,
+  type ComparisonCandidate,
+} from '../data/comparisonSelectionStore';
+import { ReportEmailComposer } from './ReportEmailComposer';
 import * as XLSX from 'xlsx';
 
 /**
@@ -45,6 +70,13 @@ import * as XLSX from 'xlsx';
 interface SavedWaypoint {
   lat: string;
   lon: string;
+  name?: string;
+  rpmMin?: number;
+  rpmMax?: number;
+  mcrMin?: number;
+  mcrMax?: number;
+  drift?: boolean;
+  driftUntil?: string;
 }
 
 interface SavedRoute {
@@ -52,45 +84,19 @@ interface SavedRoute {
   name: string;
   savedAt: string;
   waypoints: SavedWaypoint[];
+  /** The voyage this route was created for (absent on legacy routes). */
+  voyageId?: string;
 }
 
+function readSavedRoutes(voyageId: string | undefined): SavedRoute[] {
+  return readSavedRoutesForVoyage(voyageId) as SavedRoute[];
+}
+
+/** Used only to recognize the `storage` event for cross-tab refresh. */
 const SAVED_ROUTES_KEY = 'fv.savedRoutes';
-const ACTIVE_ROUTE_KEY = 'fv.activeRouteId';
-
-function readActiveRouteId(): string | null {
-  try {
-    return window.localStorage.getItem(ACTIVE_ROUTE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writeActiveRouteId(id: string | null): void {
-  try {
-    if (id == null) window.localStorage.removeItem(ACTIVE_ROUTE_KEY);
-    else window.localStorage.setItem(ACTIVE_ROUTE_KEY, id);
-  } catch {
-    /* ignore */
-  }
-}
-
-function readSavedRoutes(): SavedRoute[] {
-  try {
-    const raw = window.localStorage.getItem(SAVED_ROUTES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as SavedRoute[]) : [];
-  } catch {
-    return [];
-  }
-}
 
 function writeSavedRoutes(routes: SavedRoute[]): void {
-  try {
-    window.localStorage.setItem(SAVED_ROUTES_KEY, JSON.stringify(routes));
-  } catch {
-    /* storage unavailable — ignore */
-  }
+  writeSavedRoutesRaw(routes);
 }
 
 // --- Geometry / formatting helpers -------------------------------------------
@@ -109,6 +115,10 @@ const SAVED_SIM_COLORS = [
 
 /** Colour of the active route (black). */
 const ACTIVE_ROUTE_COLOR = '#000000';
+
+/** Colour of the AIS-reported track (actual positions sailed) — a dashed,
+ *  muted grey so it reads as "what actually happened" vs. the planned route. */
+const AIS_ROUTE_COLOR = '#8b949e';
 
 /** Parse a `01° 16.0' N` style string back to decimal degrees. */
 function dmToDec(raw: string): number {
@@ -147,6 +157,15 @@ function haversineNM(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
+/** Sum of great-circle leg distances along a path, in nautical miles. */
+function pathDistanceNmLocal(path: Array<[number, number]>): number {
+  let d = 0;
+  for (let i = 1; i < path.length; i += 1) {
+    d += haversineNM(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+  }
+  return d;
+}
+
 /** Initial true course from point 1 to point 2 (deg). */
 function bearingDeg(a: [number, number], b: [number, number]): number {
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -166,8 +185,9 @@ function transitHours(distanceNm: number): number {
 
 /** Format a transit duration as a compact "Xd Yh" string. */
 function formatDuration(hours: number): string {
-  const d = Math.floor(hours / 24);
-  const h = Math.round(hours % 24);
+  const totalHours = Math.round(hours);
+  const d = Math.floor(totalHours / 24);
+  const h = totalHours % 24;
   return d > 0 ? `${d}d ${h}h` : `${h}h`;
 }
 
@@ -340,8 +360,6 @@ function isLiveLoaded(bounds: LatLngBounds | null, liveId: string): boolean {
 
 // --- Cost model (rough estimates — no ECA/cost feed is wired yet) -------------
 
-const FUEL_PRICE_PER_TON = 650;
-const HIRE_PER_DAY = 12000;
 /** Approx. fuel burn per NM at service speed (t/NM). */
 const FUEL_TONS_PER_NM = 0.055;
 
@@ -363,12 +381,19 @@ const timeFmt = new Intl.DateTimeFormat('en-US', {
 });
 
 function fmtDay(d: Date): string {
+  // `Intl.DateTimeFormat.format` throws "Invalid time value" on an Invalid
+  // Date (unlike `toLocaleString`, which silently returns "Invalid Date") —
+  // guard it here as a last line of defense so a bad upstream Date never
+  // crashes the whole panel.
+  if (Number.isNaN(d.getTime())) return '--';
   return dayFmt.format(d);
 }
 function fmtCursor(d: Date): string {
+  if (Number.isNaN(d.getTime())) return '--';
   return `${dayFmt.format(d)} ${timeFmt.format(d)}Z`;
 }
 function fmtEta(d: Date): string {
+  if (Number.isNaN(d.getTime())) return '--';
   return `${dayFmt.format(d)}, ${timeFmt.format(d)}Z`;
 }
 
@@ -566,6 +591,11 @@ interface SimRoute {
   optimized?: boolean;
   scenarioId?: string;
   metrics?: RouteMetrics;
+  /** Waypoint-level RPM/MCR and/or drift-until instructions along this route. */
+  waypointOverrides?: WaypointEngineOverride[];
+  /** Set for the derived "AIS Reported Route" — the actual track sailed,
+   *  built from stored AIS positions rather than a planned/saved route. */
+  isAis?: boolean;
 }
 
 export function RouteSimulatorPanel() {
@@ -578,20 +608,34 @@ export function RouteSimulatorPanel() {
   const activeRoute = useActiveSimRoute();
   const routeEditActive = useRouteEditActive();
   const editCompareRoute = useEditCompareRoute();
+  const voyage = useSelectedVoyage();
 
   // System-generated optimized routes (from the route editor's Optimize run),
   // appended after the saved routes in the table + chart + map.
   const optimizedResults = useOptimizationResults();
   const optimizationRun = useOptimizationRun();
 
-  const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() => readSavedRoutes());
+  // AIS-reported positions — the actual track sailed (once a live feed is
+  // wired in), shown as its own comparison route alongside the planned one.
+  const aisPositionsVersion = useAisPositionsVersion();
+  const [aisManagerOpen, setAisManagerOpen] = useState(false);
+  useEffect(() => {
+    void hydrateAisPositionsFromBackend();
+  }, []);
+  const aisPositions = useMemo(
+    () => readAisPositionsForVoyage(voyage?.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [voyage?.id, aisPositionsVersion],
+  );
+
+  const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() => readSavedRoutes(voyage?.id));
   // The single "active" (primary) route for the vessel — shown black.
-  const [activeRouteId, setActiveRouteId] = useState<string | null>(() => readActiveRouteId());
+  const [activeRouteId, setActiveRouteId] = useState<string | null>(() => readActiveRouteId(voyage?.id));
   // Routes hidden from the chart/map via the row checkbox.
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
 
   useEffect(() => {
-    const refresh = () => setSavedRoutes(readSavedRoutes());
+    const refresh = () => setSavedRoutes(readSavedRoutes(voyage?.id));
     const onStorage = (e: StorageEvent) => {
       if (e.key === SAVED_ROUTES_KEY || e.key === null) refresh();
     };
@@ -601,15 +645,35 @@ export function RouteSimulatorPanel() {
       window.removeEventListener('focus', refresh);
       window.removeEventListener('storage', onStorage);
     };
-  }, []);
+  }, [voyage?.id]);
 
   // Re-read saved routes + active route when the Optimization "Follow route"
-  // action (or any in-tab change) bumps the shared version.
+  // action (or any in-tab change) bumps the shared version, or the selected
+  // voyage changes.
   const savedRoutesVersion = useSavedRoutesVersion();
   useEffect(() => {
-    setSavedRoutes(readSavedRoutes());
-    setActiveRouteId(readActiveRouteId());
-  }, [savedRoutesVersion]);
+    setSavedRoutes(readSavedRoutes(voyage?.id));
+    setActiveRouteId(readActiveRouteId(voyage?.id));
+  }, [savedRoutesVersion, voyage?.id]);
+
+  // Self-healing invariant: a voyage with at least one saved route should
+  // always have exactly one of them explicitly marked active. Without this,
+  // uploading/plotting/generating a route (which only fills the editor's
+  // live, unsaved "Planned route" draft until the user clicks Save) leaves
+  // no saved route active — so the draft becomes the sole fallback-protected
+  // route forever, and can never be deleted even once real saved routes
+  // exist. Auto-picks the most recently saved route the first time this
+  // voyage has routes but none active yet.
+  useEffect(() => {
+    if (activeRouteId || savedRoutes.length === 0) return;
+    const mostRecent = [...savedRoutes].sort(
+      (a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime(),
+    )[0];
+    if (!mostRecent) return;
+    const id = `saved-${mostRecent.id}`;
+    setActiveRouteId(id);
+    writeActiveRouteId(voyage?.id, id);
+  }, [savedRoutes, activeRouteId, voyage?.id]);
 
   // --- Playback state --------------------------------------------------------
   const [simClock, setSimClock] = useState(0);
@@ -646,6 +710,7 @@ export function RouteSimulatorPanel() {
         hours: plannedHours,
         timeHours: profile,
         sentAt: null,
+        waypointOverrides: activeRoute.waypointOverrides,
       });
     }
     // While editing, the pre-edit original is shown as its own comparison row.
@@ -675,6 +740,25 @@ export function RouteSimulatorPanel() {
       for (let k = 1; k < path.length; k += 1) {
         dist += haversineNM(path[k - 1][0], path[k - 1][1], path[k][0], path[k][1]);
       }
+      const waypointOverrides = r.waypoints
+        .filter(
+          (wp) =>
+            wp.rpmMin != null ||
+            wp.rpmMax != null ||
+            wp.mcrMin != null ||
+            wp.mcrMax != null ||
+            (wp.drift && wp.driftUntil),
+        )
+        .map((wp) => ({
+          pos: [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number],
+          label: wp.name,
+          rpmMin: wp.rpmMin,
+          rpmMax: wp.rpmMax,
+          mcrMin: wp.mcrMin,
+          mcrMax: wp.mcrMax,
+          driftUntil: wp.drift ? wp.driftUntil : undefined,
+        }))
+        .filter((o) => !Number.isNaN(o.pos[0]) && !Number.isNaN(o.pos[1]));
       base.push({
         id: `saved-${r.id}`,
         savedId: r.id,
@@ -683,6 +767,7 @@ export function RouteSimulatorPanel() {
         distanceNm: Math.round(dist),
         hours: transitHours(dist),
         sentAt: r.savedAt,
+        waypointOverrides: waypointOverrides.length > 0 ? waypointOverrides : undefined,
       });
     });
     // The active route is black; the rest take distinct palette colours.
@@ -714,10 +799,56 @@ export function RouteSimulatorPanel() {
         scenarioId: o.scenarioId,
         metrics: o.metrics,
       }));
-    return [...mapped, ...optimized];
-  }, [activeRoute, editCompareRoute, savedRoutes, activeRouteId, optimizedResults]);
+    // Append the AIS-reported track (actual positions sailed), if any exist
+    // for this voyage — distinct from every planned/saved/optimized route.
+    const aisPath = aisPositions.map((p) => [p.lat, p.lon] as [number, number]);
+    const ais: SimRoute[] =
+      aisPath.length >= 2
+        ? [
+            {
+              id: 'ais-reported',
+              savedId: null,
+              // Not run through `t()` here deliberately — this `useMemo`
+              // must not depend on the inline `t` translator (a new
+              // closure every render), or it recomputes on every render
+              // instead of only when the underlying data changes, which
+              // cascades into an infinite update loop for any cross-
+              // component subscriber of this list (e.g. the Comparison
+              // selection). The row itself still renders through `t(...)`.
+              label: 'AIS Reported Route',
+              color: AIS_ROUTE_COLOR,
+              path: aisPath,
+              distanceNm: Math.round(pathDistanceNmLocal(aisPath)),
+              hours: 0,
+              active: false,
+              sentAt: aisPositions[aisPositions.length - 1]?.timestampIso ?? null,
+              isAis: true,
+            },
+          ]
+        : [];
+    return [...mapped, ...optimized, ...ais];
+  }, [activeRoute, editCompareRoute, savedRoutes, activeRouteId, optimizedResults, aisPositions]);
 
   const hasRoutes = simRoutes.length > 0;
+
+  /** Whether `route` should be treated as "the" active route that can't be
+   *  deleted — either explicitly marked active, or (when nothing has been
+   *  explicitly marked yet) a single fallback row, so there's always exactly
+   *  one protected route instead of the list ever reaching zero through
+   *  deletion. The fallback prefers a real saved route over the editor's
+   *  live, unsaved "Planned route" mirror — the self-healing effect above
+   *  normally activates a saved route as soon as one exists, but this still
+   *  avoids the draft becoming permanently stuck as the only protected
+   *  entry in any brief window before that effect runs. */
+  const isEffectivelyActive = (route: SimRoute) => {
+    if (route.active) return true;
+    if (route.optimized) return false;
+    const hasExplicitActive = simRoutes.some((r) => r.active);
+    if (hasExplicitActive) return false;
+    const firstSaved = simRoutes.find((r) => r.savedId);
+    const fallbackId = firstSaved?.id ?? activeRoute?.id ?? simRoutes[0]?.id;
+    return route.id === fallbackId;
+  };
 
   /** Routes actually drawn on the chart/map (row checkbox toggles visibility). */
   const visibleRoutes = useMemo(
@@ -773,25 +904,46 @@ export function RouteSimulatorPanel() {
     return list;
   }, [visibleRoutes, activeSimRoute]);
 
-  // Publish the saved + optimized route lines shown on the map (visible + active).
+  // Publish the saved + optimized + AIS route lines shown on the map
+  // (visible + active).
   useEffect(() => {
     setMapCompareRoutes(
       mapRoutes
-        .filter((r) => r.savedId != null || r.optimized)
+        .filter((r) => r.savedId != null || r.optimized || r.isAis)
         .map((r) => ({ id: r.id, color: r.color, path: r.path })),
     );
   }, [mapRoutes]);
 
-  useEffect(() => () => setMapCompareRoutes([]), []);
+  // On unmount (e.g. the bottom drawer collapsing), every *other* compared
+  // route may disappear from the map, but the active route must stay drawn —
+  // so the cleanup re-publishes just that one route instead of clearing the
+  // whole list. A ref tracks the latest active geometry since this mount-only
+  // effect's closure would otherwise only see the value from first render.
+  const activeCompareRouteRef = useRef<{ id: string; color: string; path: Array<[number, number]> } | null>(null);
+  useEffect(() => {
+    activeCompareRouteRef.current =
+      activeSimRoute && (activeSimRoute.savedId != null || activeSimRoute.optimized || activeSimRoute.isAis)
+        ? { id: activeSimRoute.id, color: activeSimRoute.color, path: activeSimRoute.path }
+        : null;
+  }, [activeSimRoute]);
+  useEffect(
+    () => () =>
+      setMapCompareRoutes(activeCompareRouteRef.current ? [activeCompareRouteRef.current] : []),
+    [],
+  );
 
   // Mirror the planned route's colour (black when it's the active route) onto
   // the map, and draw waypoints for the active route only.
   const plannedColor =
     simRoutes.find((r) => r.id === 'active-planned')?.color ?? '#58a6ff';
+  const plannedColorRef = useRef(plannedColor);
+  plannedColorRef.current = plannedColor;
   useEffect(() => {
     setMapPlannedColor(plannedColor);
-    return () => setMapPlannedColor('#58a6ff');
   }, [plannedColor]);
+  // Keep the planned route's colour (e.g. black when it's also the active
+  // route) instead of resetting it to the default blue on unmount.
+  useEffect(() => () => setMapPlannedColor(plannedColorRef.current), []);
 
   const activeWaypoints = useMemo<Array<{ pos: [number, number]; color: string }>>(() => {
     // Only the active route shows its waypoints; the planned route's waypoints
@@ -810,11 +962,14 @@ export function RouteSimulatorPanel() {
     return out;
   }, [activeSimRoute, savedRoutes]);
 
+  const activeWaypointsRef = useRef(activeWaypoints);
+  activeWaypointsRef.current = activeWaypoints;
   useEffect(() => {
     setMapRouteWaypoints(activeWaypoints);
   }, [activeWaypoints]);
+  // Keep the active route's waypoint dots instead of clearing them on unmount.
+  useEffect(() => () => setMapRouteWaypoints(activeWaypointsRef.current), []);
 
-  useEffect(() => () => setMapRouteWaypoints([]), []);
 
   const simMaxHours = useMemo(
     () => visibleRoutes.reduce((m, r) => Math.max(m, r.hours), 0),
@@ -874,6 +1029,70 @@ export function RouteSimulatorPanel() {
     now.setUTCMinutes(0, 0, 0);
     return now;
   }, [activeRoute?.etdIso, simBounds, simFactorDef.liveId, liveVersion]);
+
+  /** Full-route metrics for a row — the same computation the table uses for
+   *  each route, extracted so the Comparison publish effect below can reuse
+   *  it without duplicating the fallback logic. */
+  const metricsForRoute = (r: SimRoute): RouteMetrics =>
+    r.optimized && r.metrics
+      ? r.metrics
+      : computeRouteMetrics({
+          path: r.path,
+          distanceNm: r.distanceNm,
+          speedKn: r.hours > 0 ? r.distanceNm / r.hours : SERVICE_SPEED_KN,
+          etd: simBaseDate,
+          market: DEFAULT_MARKET_FACTORS,
+          consPerDay:
+            (r.hours > 0 ? r.distanceNm / r.hours : SERVICE_SPEED_KN) * FUEL_TONS_PER_NM * 24,
+        });
+
+  // Keep the shared Comparison-selection store's "from Route Simulator"
+  // contribution in lockstep with whichever rows are currently checked —
+  // declaratively, so it can never go stale (e.g. after a voyage switch
+  // resets the checked set) the way an imperative per-click update could.
+  // Depends on a derived primitive key, not `checkedRoutes` itself — that
+  // array (like `simRoutes`) is rebuilt on every render (its `useMemo`
+  // depends on the inline `t` translator, a new closure each render), so
+  // depending on its reference directly would re-run this effect — and
+  // notify the Comparison button's subscription — on every single render,
+  // which cascades into an infinite update loop.
+  const checkedRoutesKey = checkedRoutes
+    .map((r) => `${r.id}:${r.distanceNm.toFixed(1)}:${r.hours.toFixed(2)}`)
+    .join('|');
+  useEffect(() => {
+    publishSimulatorSelection(
+      checkedRoutes
+        .filter((r) => r.path.length >= 2)
+        .map((r) => {
+          const m = metricsForRoute(r);
+          const candidate: ComparisonCandidate = {
+            key: `sim-${r.id}`,
+            label: r.label,
+            color: r.color,
+            path: r.path,
+            distanceNm: m.distanceNm,
+            durationH: m.durationH,
+            speedKn: m.speedKn,
+            ecaDistanceNm: m.ecaDistanceNm,
+            ecaDurationH: m.ecaDurationH,
+            fuelTons: m.fuelTons,
+            ecaFuelTons: m.ecaFuelTons,
+            fuelCost: m.fuelCost,
+            hireCost: m.hireCost,
+            euaCost: m.euaCost,
+            totalCost: m.totalCost,
+            co2Tons: m.co2Tons,
+            etdIso: m.etd.toISOString(),
+            etaIso: m.eta.toISOString(),
+          };
+          return candidate;
+        }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkedRoutesKey, simBaseDate]);
+  // Clear this panel's contribution when it unmounts (e.g. the drawer
+  // collapses to a different tab's content being the only one left).
+  useEffect(() => () => publishSimulatorSelection([]), []);
 
   const simWeather = useMemo(() => {
     const series = visibleRoutes.map((r) => {
@@ -948,8 +1167,38 @@ export function RouteSimulatorPanel() {
   }, [simPlaying]);
 
   const simElapsedHours = simClock * simMaxHours;
-  const cursorDate = new Date(simBaseDate.getTime() + simElapsedHours * 3600_000);
-  const simWeatherHour = clampHourFrac(simElapsedHours);
+
+  // Mirror image of the weather-hour hookup below: while this panel's own
+  // playback is actively *playing*, it drives the vessel; the moment it's
+  // paused (even mid-voyage — a lingering `simClock` must not lock this out
+  // indefinitely), the manual weather timeline takes back over, so dragging
+  // the weather timeline and this panel's own simulation always agree on
+  // "now" — never showing two different vessel positions/times at once.
+  // Uses `simBaseDate` (not a bare `activeRoute.etdIso` requirement) so this
+  // still works even when the voyage has no ETD set yet, matching every
+  // other time calculation in this panel (`cursorDate` etc.) that already
+  // falls back the same way. Before ETD or after ETA the vessel simply
+  // stays in port: `positionAtHours` already clamps out-of-range hours to
+  // the first/last waypoint, so only the weather itself keeps moving with
+  // the timeline in that case, not the ship.
+  const weatherScrubHour = useWeatherScrubHour();
+  const simIsActive = simPlaying;
+  const weatherDrivenElapsedHours = useMemo(() => {
+    if (simIsActive || weatherScrubHour == null || simMaxHours <= 0) return null;
+    const base = simBaseDate.getTime();
+    if (Number.isNaN(base)) return null;
+    const scrubbedRealTime = Date.now() + weatherScrubHour * 3600_000;
+    return (scrubbedRealTime - base) / 3600_000;
+  }, [simIsActive, weatherScrubHour, simBaseDate, simMaxHours]);
+  /** Elapsed voyage hours actually used to render the vessel marker, chart
+   *  cursor and weather read-out — the real simulation clock when it's
+   *  running, otherwise the weather timeline's position (may be negative or
+   *  beyond the voyage total; every position lookup below clamps that to
+   *  the first/last waypoint, which is exactly the "stay in port" result
+   *  wanted before ETD / after ETA). */
+  const effectiveElapsedHours = weatherDrivenElapsedHours ?? simElapsedHours;
+  const cursorDate = new Date(simBaseDate.getTime() + effectiveElapsedHours * 3600_000);
+  const simWeatherHour = clampHourFrac(effectiveElapsedHours);
 
   // Fetch the weather slice for the current simulation time so the compass
   // directions follow playback instead of remaining fixed at the initial hour.
@@ -973,19 +1222,171 @@ export function RouteSimulatorPanel() {
     return samplePath(renderPath, frac * (renderPath.length - 1));
   };
 
+  /**
+   * Build the voyage-guidance data (speed/RPM/ETA/weather/expected positions)
+   * sent to the vessel from a route row's "Send guidance" action. `remain` is
+   * the fraction of the route still ahead (1 - elapsed fraction), matching the
+   * "to go" figures already shown in that row.
+   */
+  const buildGuidanceData = (r: SimRoute, m: RouteMetrics, remain: number): GuidanceReportData => {
+    const hoursToGo = Math.max(0, r.hours - simElapsedHours);
+    // Rough RPM estimate: scale the vessel's rated RPM (parsed from its engine
+    // power particulars) by the route's speed relative to CP speed.
+    const rpmMatch = voyage?.enginePower?.match(/([\d.]+)\s*RPM/i);
+    const baseRpm = rpmMatch ? Number(rpmMatch[1]) : 90;
+    const cpSpeed = voyage?.cpSpeed || SERVICE_SPEED_KN;
+    const rpm = Math.round(baseRpm * (m.speedKn / Math.max(1, cpSpeed)));
+
+    // Waypoint-level RPM/MCR + drift-until instructions still ahead of the
+    // vessel's current simulated position, so the guidance reflects exactly
+    // what was set in the Waypoint details panel.
+    const aheadOverrides = (r.waypointOverrides ?? [])
+      .map((o) => {
+        let bestIdx = 0;
+        let bestDist = Number.POSITIVE_INFINITY;
+        r.path.forEach((p, idx) => {
+          const d = haversineNM(p[0], p[1], o.pos[0], o.pos[1]);
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = idx;
+          }
+        });
+        const hoursAt =
+          r.timeHours && r.timeHours.length === r.path.length
+            ? r.timeHours[bestIdx]
+            : r.path.length > 1
+              ? (bestIdx / (r.path.length - 1)) * r.hours
+              : 0;
+        return { o, bestDist, hoursAt };
+      })
+      .filter(({ bestDist, hoursAt }) => bestDist <= 15 && hoursAt >= simElapsedHours)
+      .sort((a, b) => a.hoursAt - b.hoursAt);
+
+    const engineInstructions = aheadOverrides
+      .filter(
+        ({ o }) => o.rpmMin != null || o.rpmMax != null || o.mcrMin != null || o.mcrMax != null,
+      )
+      .map(({ o }) => ({
+        posLabel: o.label || `${decToDM(o.pos[0], true)} ${decToDM(o.pos[1], false)}`,
+        rpmMin: o.rpmMin,
+        rpmMax: o.rpmMax,
+        mcrMin: o.mcrMin,
+        mcrMax: o.mcrMax,
+      }));
+
+    const driftAhead = aheadOverrides.find(({ o }) => o.driftUntil);
+    const driftNotice = driftAhead
+      ? {
+          posLabel:
+            driftAhead.o.label ||
+            `${decToDM(driftAhead.o.pos[0], true)} ${decToDM(driftAhead.o.pos[1], false)}`,
+          untilLabel: new Date(driftAhead.o.driftUntil!).toLocaleString(),
+        }
+      : undefined;
+
+    const intervalH = hoursToGo > 96 ? 24 : hoursToGo > 36 ? 12 : hoursToGo > 12 ? 6 : Math.max(1, hoursToGo);
+    const offsets: number[] = [];
+    if (hoursToGo <= 0) {
+      offsets.push(0);
+    } else {
+      for (let h = 0; h < hoursToGo; h += intervalH) offsets.push(h);
+      if (offsets[offsets.length - 1] !== hoursToGo) offsets.push(hoursToGo);
+    }
+    const fmtMagDir = (mag: number, unit: string, dir: number | null) =>
+      `${mag.toFixed(1)} ${unit}${dir != null ? ` / ${Math.round(dir)}°` : ''}`;
+    const points = offsets.slice(0, 15).map((offset) => {
+      const t = simElapsedHours + offset;
+      const pos = posAtHours(r, t);
+      const date = new Date(m.etd.getTime() + t * 3600_000);
+      const hourClamped = clampHour(t);
+      const wind = readoutAt(pos, WEATHER_FACTOR_BY_ID.wind, simBounds, hourClamped);
+      const waves = readoutAt(pos, WEATHER_FACTOR_BY_ID.waves, simBounds, hourClamped);
+      const swell = readoutAt(pos, WEATHER_FACTOR_BY_ID.swell, simBounds, hourClamped);
+      const current = readoutAt(pos, WEATHER_FACTOR_BY_ID.current, simBounds, hourClamped);
+      const distanceToGoNm = Math.max(0, m.distanceNm * (1 - t / Math.max(1e-6, r.hours)));
+      return {
+        dateTime: fmtEta(date),
+        latLon: `${decToDM(pos[0], true)} ${decToDM(pos[1], false)}`,
+        speedKn: m.speedKn,
+        rpm,
+        distanceToGoNm,
+        wind: fmtMagDir(wind.mag, 'kt', wind.dir),
+        waves: fmtMagDir(waves.mag, 'm', waves.dir),
+        swell: fmtMagDir(swell.mag, 'm', swell.dir),
+        current: fmtMagDir(current.mag, 'kt', current.dir),
+      };
+    });
+
+    return {
+      vessel: voyage?.vessel ?? r.label,
+      imo: voyage?.imo ?? '--',
+      client: voyage?.client ?? '--',
+      clientEmail: voyage?.clientEmail || 'master@vessel.example.com',
+      routeLabel: r.label,
+      routeRef: voyage?.routeRef ?? r.id,
+      etdLabel: fmtEta(m.etd),
+      etaLabel: fmtEta(m.eta),
+      speedKn: m.speedKn,
+      rpm,
+      distanceToGoNm: m.distanceNm * remain,
+      durationToGoLabel: formatDuration(hoursToGo),
+      ecaDistanceNm: m.ecaDistanceNm * remain,
+      ecaDurationLabel: formatDuration(m.ecaDurationH * remain),
+      fuelReqToGoMt: m.fuelTons * remain,
+      ecaFuelReqToGoMt: m.ecaFuelTons * remain,
+      co2ToGoMt: m.co2Tons * remain,
+      totalCostToGoUsd: (m.fuelCost + m.hireCost + m.euaCost) * remain,
+      fuelCostToGoUsd: m.fuelCost * remain,
+      timeCostToGoUsd: m.hireCost * remain,
+      emissionsCostToGoUsd: m.euaCost * remain,
+      points,
+      engineInstructions: engineInstructions.length > 0 ? engineInstructions : undefined,
+      driftNotice,
+      generatedAtLabel: fmtEta(new Date()),
+    };
+  };
+
+  // Guidance popup: which route the "Send guidance" (suitcase) button was
+  // opened for, snapshotted at click time so the popup acts on the figures
+  // the user saw in that row. `guidanceData` is derived once per snapshot so
+  // it stays stable while the composer below is open and being edited.
+  const [guidanceCtx, setGuidanceCtx] = useState<{ r: SimRoute; m: RouteMetrics; remain: number } | null>(null);
+  const [guidanceIncludePdf, setGuidanceIncludePdf] = useState(true);
+  const [guidancePdfBusy, setGuidancePdfBusy] = useState(false);
+  const [guidancePdfDone, setGuidancePdfDone] = useState(false);
+
+  const guidanceData = useMemo<GuidanceReportData | null>(
+    () => (guidanceCtx ? buildGuidanceData(guidanceCtx.r, guidanceCtx.m, guidanceCtx.remain) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [guidanceCtx],
+  );
+
+  /** Download the PDF guidance report straight to the browser's downloads folder. */
+  const downloadGuidancePdf = async () => {
+    if (!guidanceData || guidancePdfBusy) return;
+    setGuidancePdfBusy(true);
+    try {
+      await downloadGuidancePdfFile(guidanceData);
+      setGuidancePdfDone(true);
+      window.setTimeout(() => setGuidancePdfDone(false), 2500);
+    } finally {
+      setGuidancePdfBusy(false);
+    }
+  };
+
   /** Per-route fraction sailed + current-cursor weather on the chart factor. */
   const simLive = useMemo(() => {
     const byId: Record<string, { frac: number; weather: number }> = {};
     simRoutes.forEach((r) => {
-      const frac = r.hours > 0 ? Math.min(1, simElapsedHours / r.hours) : 0;
-      const elapsed = Math.min(simElapsedHours, r.hours);
+      const frac = r.hours > 0 ? Math.max(0, Math.min(1, effectiveElapsedHours / r.hours)) : 0;
+      const elapsed = Math.max(0, Math.min(effectiveElapsedHours, r.hours));
       byId[r.id] = {
         frac,
         weather: weatherAt(r.path, frac, simFactorDef, simBounds, clampHourFrac(elapsed)),
       };
     });
     return byId;
-  }, [simRoutes, simElapsedHours, simFactorDef, simBounds, liveVersion]);
+  }, [simRoutes, effectiveElapsedHours, simFactorDef, simBounds, liveVersion]);
 
   const selectedRoute = simRoutes.find((r) => r.id === selectedRouteId) ?? simRoutes[0] ?? null;
 
@@ -993,7 +1394,7 @@ export function RouteSimulatorPanel() {
   const readout = useMemo(() => {
     void liveVersion;
     if (!selectedRoute) return null;
-    const elapsed = Math.min(simElapsedHours, selectedRoute.hours);
+    const elapsed = Math.max(0, Math.min(effectiveElapsedHours, selectedRoute.hours));
     const pos = posAtHours(selectedRoute, elapsed);
     const heading = bearingDeg(
       posAtHours(selectedRoute, Math.max(0, elapsed - 0.5)),
@@ -1010,15 +1411,18 @@ export function RouteSimulatorPanel() {
       current: get('current'),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRoute, simLive, simElapsedHours, simBounds, liveVersion]);
+  }, [selectedRoute, simLive, effectiveElapsedHours, simBounds, liveVersion]);
 
   // Vessel markers at each route's current simulated position, mirrored onto
-  // the Route Explorer map so the live position is visible while simulating.
+  // the Route Explorer map so the live position is visible while simulating
+  // (or while the weather timeline is scrubbed — see `effectiveElapsedHours`
+  // above; before ETD / after ETA the vessel simply stays at the departure/
+  // arrival waypoint since `elapsed` is clamped to the voyage's own range).
   const shipMarkers = useMemo(
     () =>
       mapRoutes.map((r) => {
         const frac = simLive[r.id]?.frac ?? 0;
-        const elapsed = Math.min(simElapsedHours, r.hours);
+        const elapsed = Math.max(0, Math.min(effectiveElapsedHours, r.hours));
         return {
           id: r.id,
           color: r.color,
@@ -1033,7 +1437,7 @@ export function RouteSimulatorPanel() {
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mapRoutes, simLive, simElapsedHours, selectedRouteId],
+    [mapRoutes, simLive, effectiveElapsedHours, selectedRouteId],
   );
 
   useEffect(() => {
@@ -1100,17 +1504,34 @@ export function RouteSimulatorPanel() {
 
   // --- Saved-routes handlers -------------------------------------------------
   const deleteSavedRoute = (savedId: string) => {
-    const next = savedRoutes.filter((r) => r.id !== savedId);
-    setSavedRoutes(next);
-    writeSavedRoutes(next);
+    const nextAll = (readSavedRoutesRaw() as SavedRoute[]).filter((r) => r.id !== savedId);
+    writeSavedRoutes(nextAll);
+    setSavedRoutes(readSavedRoutes(voyage?.id));
     setActiveRouteId((prev) => {
       if (prev !== `saved-${savedId}`) return prev;
-      writeActiveRouteId(null);
+      writeActiveRouteId(voyage?.id, null);
       return null;
     });
   };
 
+  /** Route pending delete confirmation — shown as an in-app modal (not the
+   *  browser's native `window.confirm`) so it matches the rest of the UI. */
+  const [deleteConfirmRoute, setDeleteConfirmRoute] = useState<SimRoute | null>(null);
+
+  /** Delete a route — blocked for the active route (activate a different one
+   *  first), and confirmed via an in-app dialog for any other, so a route is
+   *  never lost by accident. */
   const deleteRoute = (route: SimRoute) => {
+    if (isEffectivelyActive(route)) return;
+    setDeleteConfirmRoute(route);
+  };
+
+  const cancelDeleteRoute = () => setDeleteConfirmRoute(null);
+
+  const confirmDeleteRoute = () => {
+    const route = deleteConfirmRoute;
+    setDeleteConfirmRoute(null);
+    if (!route) return;
     if (route.savedId) {
       deleteSavedRoute(route.savedId);
       return;
@@ -1122,10 +1543,14 @@ export function RouteSimulatorPanel() {
     clearActiveSimRoute();
   };
 
-  /** Mark a route as the single active (primary) route for the vessel. */
+  /** Mark a route as the single active (primary) route for the vessel. This
+   *  is a deliberate "activate" action, so it turns off this voyage's "Auto
+   *  Route" (CP & Leg Details) immediately — the activated route is now the
+   *  one to keep, not something to silently regenerate. */
   const setRouteActive = (routeId: string) => {
     setActiveRouteId(routeId);
-    writeActiveRouteId(routeId);
+    writeActiveRouteId(voyage?.id, routeId);
+    if (voyage?.id) mergeVoyageShared(voyage.id, { leg1AutoRoute: false });
   };
 
   /** Toggle whether a route is drawn on the chart / map. */
@@ -1141,9 +1566,11 @@ export function RouteSimulatorPanel() {
     if (name == null) return;
     const trimmed = name.trim();
     if (!trimmed) return;
-    const next = savedRoutes.map((r) => (r.id === savedId ? { ...r, name: trimmed } : r));
-    setSavedRoutes(next);
-    writeSavedRoutes(next);
+    const nextAll = (readSavedRoutesRaw() as SavedRoute[]).map((r) =>
+      r.id === savedId ? { ...r, name: trimmed } : r,
+    );
+    writeSavedRoutes(nextAll);
+    setSavedRoutes(readSavedRoutes(voyage?.id));
   };
 
   // --- Import / export / merge / split ---------------------------------------
@@ -1294,9 +1721,9 @@ export function RouteSimulatorPanel() {
         cleaned = extension === 'json' ? parseImportedJson(text) : parseRouteText(text, extension);
       }
       if (cleaned.length === 0) throw new Error('No route coordinates found');
-      const next = [...savedRoutes, ...cleaned];
-      setSavedRoutes(next);
-      writeSavedRoutes(next);
+      const tagged = cleaned.map((r) => tagRouteWithVoyage(r, voyage?.id));
+      writeSavedRoutes([...(readSavedRoutesRaw() as SavedRoute[]), ...tagged]);
+      setSavedRoutes(readSavedRoutes(voyage?.id));
       bumpSavedRoutes();
       setSavedPassageMsg(`${cleaned.length} route${cleaned.length === 1 ? '' : 's'} imported successfully.`);
     } catch {
@@ -1308,15 +1735,17 @@ export function RouteSimulatorPanel() {
   const mergeVisibleRoutes = () => {
     const toMerge = savedRoutes.filter((r) => !hiddenIds.includes(`saved-${r.id}`));
     if (toMerge.length < 2) return;
-    const merged: SavedRoute = {
-      id: `route-${Date.now()}`,
-      name: `${t('merged', 'Merged')} ${savedRoutes.length + 1}`,
-      savedAt: new Date().toISOString(),
-      waypoints: toMerge.flatMap((r) => r.waypoints),
-    };
-    const next = [...savedRoutes, merged];
-    setSavedRoutes(next);
-    writeSavedRoutes(next);
+    const merged: SavedRoute = tagRouteWithVoyage(
+      {
+        id: `route-${Date.now()}`,
+        name: `${t('merged', 'Merged')} ${savedRoutes.length + 1}`,
+        savedAt: new Date().toISOString(),
+        waypoints: toMerge.flatMap((r) => r.waypoints),
+      },
+      voyage?.id,
+    );
+    writeSavedRoutes([...(readSavedRoutesRaw() as SavedRoute[]), merged]);
+    setSavedRoutes(readSavedRoutes(voyage?.id));
   };
 
   /** Split the selected saved route into two halves at its midpoint. */
@@ -1327,21 +1756,29 @@ export function RouteSimulatorPanel() {
     if (!src || src.waypoints.length < 4) return;
     const mid = Math.ceil(src.waypoints.length / 2);
     const now = Date.now();
-    const partA: SavedRoute = {
-      id: `route-${now}-a`,
-      name: `${src.name} (A)`,
-      savedAt: new Date().toISOString(),
-      waypoints: src.waypoints.slice(0, mid),
-    };
-    const partB: SavedRoute = {
-      id: `route-${now}-b`,
-      name: `${src.name} (B)`,
-      savedAt: new Date().toISOString(),
-      waypoints: src.waypoints.slice(mid - 1),
-    };
-    const next = savedRoutes.flatMap((r) => (r.id === src.id ? [partA, partB] : [r]));
-    setSavedRoutes(next);
-    writeSavedRoutes(next);
+    const partA: SavedRoute = tagRouteWithVoyage(
+      {
+        id: `route-${now}-a`,
+        name: `${src.name} (A)`,
+        savedAt: new Date().toISOString(),
+        waypoints: src.waypoints.slice(0, mid),
+      },
+      voyage?.id,
+    );
+    const partB: SavedRoute = tagRouteWithVoyage(
+      {
+        id: `route-${now}-b`,
+        name: `${src.name} (B)`,
+        savedAt: new Date().toISOString(),
+        waypoints: src.waypoints.slice(mid - 1),
+      },
+      voyage?.id,
+    );
+    const nextAll = (readSavedRoutesRaw() as SavedRoute[]).flatMap((r) =>
+      r.id === src.id ? [partA, partB] : [r],
+    );
+    writeSavedRoutes(nextAll);
+    setSavedRoutes(readSavedRoutes(voyage?.id));
   };
 
   const mergeableCount = savedRoutes.filter(
@@ -1372,7 +1809,7 @@ export function RouteSimulatorPanel() {
     return ticks;
   }, [simMaxHours, simBaseDate]);
 
-  const cursorX = simMaxHours > 0 ? simClock * 100 : 0;
+  const cursorX = simMaxHours > 0 ? Math.max(0, Math.min(100, (effectiveElapsedHours / simMaxHours) * 100)) : 0;
 
   return (
     <div className="fv-sim2">
@@ -1609,45 +2046,34 @@ export function RouteSimulatorPanel() {
                     <th className="fv-sim2__col-name">
                       <span className="fv-sim2__col-name-label">{t('route', 'Route')}</span>
                     </th>
+                    <th>{t('etd', 'ETD')}</th>
                     <th>{t('eta', 'ETA')}</th>
-                    <th>{t('durationToGo', 'Duration to go')}</th>
-                    <th>{t('ecaTimeToGo', 'ECA time to go')}</th>
-                    <th>{t('distanceToGo', 'Distance to go')}</th>
-                    <th>{t('ecaDistanceToGo', 'ECA distance to go')}</th>
-                    <th>{t('avgSpeed', 'Avg speed')}</th>
-                    <th>{t('totalCostToGo', 'Total cost to go')}</th>
-                    <th>{t('fuelCostToGo', 'Fuel cost to go')}</th>
-                    <th>{t('hireCost', 'Hire cost')}</th>
-                    <th>{t('fuelReq', 'Fuel req.')}</th>
-                    <th>{t('ecaFuelReq', 'ECA fuel req.')}</th>
-                    <th>{t('euaCost', 'EUA cost')}</th>
-                    <th>{t('euaAllowance', 'EUA allow.')}</th>
+                    <th>{t('distanceNm', 'Distance (NM)')}</th>
+                    <th>{t('averageSpeedKnots', 'Average Speed (knots)')}</th>
+                    <th>{t('timeToGo', 'Time to Go')}</th>
+                    <th>{t('ecaDistanceNm', 'ECA Distance (NM)')}</th>
+                    <th>{t('ecaTimeToGo', 'ECA Time to Go')}</th>
+                    <th>{t('meFuelRequiredToGo', 'M/E Fuel Required to Go (MT)')}</th>
+                    <th>{t('totalCostToGo', 'Total Cost to Go (USD)')}</th>
+                    <th>{t('fuelCostToGo', 'Fuel Cost to Go (USD)')}</th>
+                    <th>{t('timeCostToGo', 'Time Cost to Go (USD)')}</th>
+                    <th>{t('emissionsCostToGo', 'Emissions Cost to Go (USD)')}</th>
+                    <th>{t('ecaFuelRequiredToGo', 'ECA Fuel Required to Go (MT)')}</th>
+                    <th>{t('meCo2EmissionsToGo', 'M/E CO2 Emissions to Go (MT)')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {simRoutes.map((r) => {
                     const frac = simLive[r.id]?.frac ?? 0;
                     const remain = 1 - frac;
-                    const distToGo = r.distanceNm * remain;
-                    const hoursToGo = r.hours * remain;
-                    const etaDate = new Date(simBaseDate.getTime() + r.hours * 3600_000);
-                    const fuelTons = r.distanceNm * FUEL_TONS_PER_NM * remain;
-                    const fuelCost = fuelTons * FUEL_PRICE_PER_TON;
-                    const hireCost = (hoursToGo / 24) * HIRE_PER_DAY;
                     const isSel = r.id === selectedRouteId;
-                    // Full-voyage decision metrics (fuel required, EUA, etc.).
-                    // Optimized routes carry their own scenario-specific metrics.
-                    const m =
-                      r.optimized && r.metrics
-                        ? r.metrics
-                        : computeRouteMetrics({
-                            path: r.path,
-                            distanceNm: r.distanceNm,
-                            speedKn: SERVICE_SPEED_KN,
-                            etd: simBaseDate,
-                            market: DEFAULT_MARKET_FACTORS,
-                            consPerDay: SERVICE_SPEED_KN * FUEL_TONS_PER_NM * 24,
-                          });
+                    const m = metricsForRoute(r);
+                    const distToGo = m.distanceNm * remain;
+                    const hoursToGo = m.durationH * remain;
+                    const fuelCostToGo = m.fuelCost * remain;
+                    const timeCostToGo = m.hireCost * remain;
+                    const emissionsCostToGo = m.euaCost * remain;
+                    const totalCostToGo = fuelCostToGo + timeCostToGo + emissionsCostToGo;
                     return (
                       <tr key={r.id} className={isSel ? 'fv-sim2__trow--sel' : undefined}
                         onClick={() => setSelectedRouteId(r.id)}>
@@ -1662,9 +2088,13 @@ export function RouteSimulatorPanel() {
                         <td className="fv-sim2__col-name">
                           <span className="fv-sim2__swatch" style={{ background: r.color }} aria-hidden="true" />
                           <span className="fv-sim2__route-meta">
-                            <span className="fv-sim2__route-name">{r.label}</span>
+                            <span className="fv-sim2__route-name">
+                              {r.isAis ? t('aisReportedRoute', r.label) : r.label}
+                            </span>
                             <span className="fv-sim2__route-sub">
-                              {r.optimized ? (
+                              {r.isAis ? (
+                                <span className="fv-sim2__badge">{t('reported', 'Reported')}</span>
+                              ) : r.optimized ? (
                                 <span className="fv-sim2__badge">{t('optimized', 'Optimized')}</span>
                               ) : r.active ? (
                                 <span className="fv-sim2__badge fv-sim2__badge--active">{t('active', 'Active')}</span>
@@ -1674,12 +2104,19 @@ export function RouteSimulatorPanel() {
                             </span>
                           </span>
                           <span className="fv-sim2__row-actions" onClick={(e) => e.stopPropagation()}>
-                            {r.optimized ? (
+                            {r.isAis ? (
+                              <button type="button" className="fv-sim2__row-btn"
+                                onClick={() => setAisManagerOpen(true)}
+                                title={t('manageAisPositions', 'Manage AIS positions')}
+                                aria-label={t('manageAisPositions', 'Manage AIS positions')}>
+                                <i className="fas fa-list-check" aria-hidden="true" />
+                              </button>
+                            ) : r.optimized ? (
                               <>
                                 <button type="button" className="fv-sim2__follow-btn"
                                   onClick={() => {
                                     const o = optimizedResults.find((x) => x.id === r.id);
-                                    if (o) followOptimizedRoute(o);
+                                    if (o) followOptimizedRoute(o, voyage?.id);
                                   }}
                                   title={t('followRoute', 'Follow route')}>
                                   <i className="fas fa-circle-check" aria-hidden="true" /> {t('follow', 'Follow')}
@@ -1694,8 +2131,13 @@ export function RouteSimulatorPanel() {
                             ) : (
                               <>
                                 <button type="button" className="fv-sim2__row-btn"
-                                  title={t('assignVoyage', 'Assign to voyage')}
-                                  aria-label={t('assignVoyage', 'Assign to voyage')}>
+                                  onClick={() => {
+                                    setGuidanceIncludePdf(true);
+                                    setGuidancePdfDone(false);
+                                    setGuidanceCtx({ r, m, remain });
+                                  }}
+                                  title={t('sendGuidance', 'Send guidance to vessel')}
+                                  aria-label={t('sendGuidance', 'Send guidance to vessel')}>
                                   <i className="fas fa-suitcase" aria-hidden="true" />
                                 </button>
                                 {r.savedId && (
@@ -1716,7 +2158,15 @@ export function RouteSimulatorPanel() {
                                 </button>
                                 <button type="button" className="fv-sim2__row-btn fv-sim2__row-btn--danger"
                                   onClick={() => deleteRoute(r)}
-                                  title={t('deleteRoute', 'Delete route')}
+                                  disabled={isEffectivelyActive(r)}
+                                  title={
+                                    isEffectivelyActive(r)
+                                      ? t(
+                                          'activeRouteCannotDelete',
+                                          'The active route can\u2019t be deleted — activate a different route first.',
+                                        )
+                                      : t('deleteRoute', 'Delete route')
+                                  }
                                   aria-label={t('deleteRoute', 'Delete route')}>
                                   <i className="fas fa-trash" aria-hidden="true" />
                                 </button>
@@ -1724,19 +2174,20 @@ export function RouteSimulatorPanel() {
                             )}
                           </span>
                         </td>
-                        <td>{fmtEta(etaDate)}</td>
-                        <td>{formatDuration(hoursToGo)}</td>
-                        <td>{formatDuration(hoursToGo * 0.06)}</td>
+                        <td>{fmtEta(m.etd)}</td>
+                        <td>{fmtEta(m.eta)}</td>
                         <td>{Math.round(distToGo).toLocaleString()} {t('nmUnit', 'NM')}</td>
-                        <td>{Math.round(distToGo * 0.07).toLocaleString()} {t('nmUnit', 'NM')}</td>
                         <td>{m.speedKn.toFixed(1)} kn</td>
-                        <td>{usd(fuelCost + hireCost)}</td>
-                        <td>{usd(fuelCost)}</td>
-                        <td>{usd(m.hireCost)}</td>
-                        <td>{Math.round(m.fuelTons).toLocaleString()} t</td>
-                        <td>{Math.round(m.ecaFuelTons).toLocaleString()} t</td>
-                        <td>{usd(m.euaCost)}</td>
-                        <td>{Math.round(m.euaAllowanceTons).toLocaleString()} t</td>
+                        <td>{formatDuration(hoursToGo)}</td>
+                        <td>{Math.round(m.ecaDistanceNm * remain).toLocaleString()} {t('nmUnit', 'NM')}</td>
+                        <td>{formatDuration(m.ecaDurationH * remain)}</td>
+                        <td>{Math.round(m.fuelTons * remain).toLocaleString()} MT</td>
+                        <td>{usd(totalCostToGo)}</td>
+                        <td>{usd(fuelCostToGo)}</td>
+                        <td>{usd(timeCostToGo)}</td>
+                        <td>{usd(emissionsCostToGo)}</td>
+                        <td>{Math.round(m.ecaFuelTons * remain).toLocaleString()} MT</td>
+                        <td>{Math.round(m.co2Tons * remain).toLocaleString()} MT</td>
                       </tr>
                     );
                   })}
@@ -1841,6 +2292,174 @@ export function RouteSimulatorPanel() {
                 disabled={exportFormat == null || exportSelIds.length === 0}
               >
                 {t('export', 'Export')}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {guidanceCtx && (
+        <div
+          className="fv-sim2__export-overlay"
+          role="presentation"
+          onClick={() => setGuidanceCtx(null)}
+        >
+          <div
+            className="fv-sim2__export fv-sim2__guidance"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('sendGuidanceTitle', 'Send guidance to vessel')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="fv-sim2__export-head">
+              <h3>{t('sendGuidanceTitle', 'Send guidance to vessel')}</h3>
+              <p className="fv-sim2__guidance-sub">{guidanceCtx.r.label}</p>
+            </header>
+
+            {guidanceData && (
+              <div className="fv-sim2__export-body fv-sim2__guidance-body">
+                <div className="fv-sim2__guidance-toolbar">
+                  <label className="fv-sim2__guidance-toggle">
+                    <input
+                      type="checkbox"
+                      checked={guidanceIncludePdf}
+                      onChange={() => setGuidanceIncludePdf((prev) => !prev)}
+                    />
+                    {t('guidanceAttachPdf', 'Attach PDF guidance report to the email')}
+                  </label>
+                  <button
+                    type="button"
+                    className="fv-sim2__guidance-download"
+                    onClick={() => void downloadGuidancePdf()}
+                    disabled={guidancePdfBusy}
+                  >
+                    <i className={`fas ${guidancePdfBusy ? 'fa-spinner fa-spin' : 'fa-file-arrow-down'}`} aria-hidden="true" />{' '}
+                    {guidancePdfDone ? t('downloaded', 'Downloaded') : t('downloadGuidancePdf', 'Download PDF guidance')}
+                  </button>
+                </div>
+                <ReportEmailComposer
+                  key={guidanceIncludePdf ? 'guidance-pdf' : 'guidance-nopdf'}
+                  build={() => buildGuidanceEmail(guidanceData, guidanceIncludePdf)}
+                />
+              </div>
+            )}
+
+            <footer className="fv-sim2__export-foot">
+              <button type="button" className="fv-sim2__export-btn" onClick={() => setGuidanceCtx(null)}>
+                {t('close', 'Close')}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {deleteConfirmRoute && (
+        <div
+          className="fv-sim2__export-overlay"
+          role="presentation"
+          onClick={cancelDeleteRoute}
+        >
+          <div
+            className="fv-sim2__export fv-sim2__confirm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label={t('confirmDeleteRouteTitle', 'Delete route')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="fv-sim2__export-head">
+              <h3>
+                <i className="fas fa-triangle-exclamation" aria-hidden="true" />{' '}
+                {t('confirmDeleteRouteTitle', 'Delete route')}
+              </h3>
+            </header>
+            <div className="fv-sim2__export-body">
+              <p>
+                {t('confirmDeleteRoute', 'Are you sure you want to delete this route?')}
+              </p>
+              <p className="fv-sim2__confirm-route-name">{deleteConfirmRoute.label}</p>
+            </div>
+            <footer className="fv-sim2__export-foot">
+              <button type="button" className="fv-sim2__export-btn" onClick={cancelDeleteRoute}>
+                {t('cancel', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                className="fv-sim2__export-btn fv-sim2__export-btn--danger"
+                onClick={confirmDeleteRoute}
+              >
+                <i className="fas fa-trash" aria-hidden="true" /> {t('delete', 'Delete')}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {aisManagerOpen && (
+        <div
+          className="fv-sim2__export-overlay"
+          role="presentation"
+          onClick={() => setAisManagerOpen(false)}
+        >
+          <div
+            className="fv-sim2__export fv-sim2__ais-manager"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('manageAisPositions', 'Manage AIS positions')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="fv-sim2__export-head">
+              <h3>
+                <i className="fas fa-satellite-dish" aria-hidden="true" />{' '}
+                {t('manageAisPositions', 'Manage AIS positions')}
+              </h3>
+              <p className="fv-sim2__guidance-sub">
+                {t(
+                  'manageAisPositionsHint',
+                  'Positions reported by the vessel\u2019s AIS feed, used to draw the actual track sailed. Remove any that look wrong.',
+                )}
+              </p>
+            </header>
+            <div className="fv-sim2__export-body">
+              {aisPositions.length === 0 ? (
+                <p>{t('noAisPositions', 'No AIS positions recorded for this voyage yet.')}</p>
+              ) : (
+                <table className="fv-sim2__table">
+                  <thead>
+                    <tr>
+                      <th>{t('dateTime', 'Date/Time')}</th>
+                      <th>{t('lat', 'Lat')}</th>
+                      <th>{t('lon', 'Lon')}</th>
+                      <th>{t('source', 'Source')}</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {aisPositions.map((p: AisPosition) => (
+                      <tr key={p.id}>
+                        <td>{fmtDay(new Date(p.timestampIso))}</td>
+                        <td>{p.lat.toFixed(4)}</td>
+                        <td>{p.lon.toFixed(4)}</td>
+                        <td>{p.source ?? '—'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="fv-sim2__row-btn fv-sim2__row-btn--danger"
+                            onClick={() => deleteAisPosition(p.id)}
+                            title={t('deletePosition', 'Delete this position')}
+                            aria-label={t('deletePosition', 'Delete this position')}
+                          >
+                            <i className="fas fa-trash" aria-hidden="true" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <footer className="fv-sim2__export-foot">
+              <button type="button" className="fv-sim2__export-btn" onClick={() => setAisManagerOpen(false)}>
+                {t('close', 'Close')}
               </button>
             </footer>
           </div>

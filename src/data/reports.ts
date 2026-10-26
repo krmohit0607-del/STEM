@@ -1,4 +1,5 @@
 import type { Voyage } from './voyages';
+import { readSavedRoutesForVoyage, readActiveRouteId } from './savedRoutesStore';
 
 /**
  * Data + templates for the Reports & Calculations section
@@ -36,11 +37,10 @@ function fmtReportDate(d: Date): string {
 
 function getSystemRouteAttachments(v: Voyage): string[] {
   try {
-    const activeRouteId = window.localStorage.getItem('fv.activeRouteId');
-    const raw = window.localStorage.getItem('fv.savedRoutes');
-    if (!activeRouteId || !raw) return [];
+    const activeRouteId = readActiveRouteId(v.id);
+    if (!activeRouteId) return [];
 
-    const routes = JSON.parse(raw) as Array<{ id?: string; waypoints?: unknown[] }>;
+    const routes = readSavedRoutesForVoyage(v.id) as Array<{ id?: string; waypoints?: unknown[] }>;
     const savedRouteId = activeRouteId.startsWith('saved-')
       ? activeRouteId.slice('saved-'.length)
       : activeRouteId;

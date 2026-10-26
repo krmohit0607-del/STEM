@@ -5,6 +5,7 @@ import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage, writeSelectedVoyageId } from '../data/selectedVoyage';
 import { NoVesselSelected } from './NoVesselSelected';
 import { loadVoyageShared, mergeVoyageShared } from '../data/voyageOverrides';
+import { fromDateTimeInput, toDateTimeInput } from '../data/dateFields';
 import { buildEmptyView, buildView, nowStamp } from './voyage/buildView';
 import { upsertCreatedVoyage } from '../data/voyages';
 import { LegsSection } from './voyage/LegsSection';
@@ -193,7 +194,7 @@ function parseClientEmailDraft(text: string): ClientEmailDraft {
 function applyShared(view: VoyageView, voyageId: string | undefined): VoyageView {
   const shared = loadVoyageShared(voyageId);
   if (!shared) return view;
-  const legs = shared.legSpeedProfiles?.length
+  let legs = shared.legSpeedProfiles?.length
     ? view.legs.map((leg, idx) => {
         const sharedLeg = shared.legSpeedProfiles?.[idx];
         if (!sharedLeg?.speedCons?.length) return leg;
@@ -208,6 +209,19 @@ function applyShared(view: VoyageView, voyageId: string | undefined): VoyageView
         };
       })
     : view.legs;
+  // LEG-1's ETD is the voyage's single shared departure time — connected to
+  // the Tracksheet's Departure/COSP report and Waypoint details' first
+  // waypoint (see data/voyageOverrides.ts `etdIso`).
+  if (shared.etdIso && legs.length > 0) {
+    const display = fromDateTimeInput(shared.etdIso);
+    if (display) legs = legs.map((leg, idx) => (idx === 0 ? { ...leg, etd: display } : leg));
+  }
+  // LEG-1's "Auto Route" toggle — read by the Route Simulator to decide
+  // whether to auto-generate a default route for this voyage.
+  if (shared.leg1AutoRoute != null && legs.length > 0) {
+    const autoRoute = shared.leg1AutoRoute;
+    legs = legs.map((leg, idx) => (idx === 0 ? { ...leg, autoRoute } : leg));
+  }
   return {
     ...view,
     serviceType: shared.serviceType ?? view.serviceType,
@@ -465,6 +479,7 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
     // Mirror the shared Market Factors + Weather Safety Limits so the Limits &
     // Constraints page reflects these edits.
     if (targetVoyageId) {
+      const leg1EtdIso = toDateTimeInput(view.legs[0]?.etd ?? '');
       mergeVoyageShared(targetVoyageId, {
         serviceType: view.serviceType,
         hireRate: view.hireRate,
@@ -478,6 +493,13 @@ export function VoyageDetailsPage({ mode = 'edit' }: VoyageDetailsPageProps = {}
         wslMaxWindsLaden: view.wslMaxWindsLaden,
         wslMaxSeaStateBallast: view.wslMaxSeaStateBallast,
         wslMaxSeaStateLaden: view.wslMaxSeaStateLaden,
+        // LEG-1's ETD is the voyage's single shared departure time —
+        // connected to the Tracksheet's Departure/COSP report and Waypoint
+        // details' first waypoint. Only overwrite the shared value when this
+        // leg actually has one, so an empty/unparsed field never clobbers it.
+        ...(leg1EtdIso ? { etdIso: leg1EtdIso } : {}),
+        // LEG-1's "Auto Route" toggle, read by the Route Simulator.
+        leg1AutoRoute: view.legs[0]?.autoRoute ?? true,
         legSpeedProfiles: view.legs.map((leg) => ({
           legNo: leg.no,
           legName: leg.name,

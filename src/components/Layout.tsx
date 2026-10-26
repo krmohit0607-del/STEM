@@ -27,11 +27,16 @@ let masterDataSynced = false;
 export function Layout({
   children,
   showModuleChrome = true,
+  hideFleetMenu = false,
 }: {
   children?: ReactNode;
   /** When false, hides the Performance-module chrome (icon sidebar, module bar,
    *  bottom panel) — used by other modules like Chartering. */
   showModuleChrome?: boolean;
+  /** When true, also hides the left vessel-list sidebar (`FleetMenu`) —
+   *  used by standalone, shareable pages (e.g. a locked route snapshot
+   *  link) that should show only their own content, not fleet navigation. */
+  hideFleetMenu?: boolean;
 }) {
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const { isLoading: fvLoading } = useFleetView();
@@ -75,7 +80,7 @@ export function Layout({
       <TopNav />
 
       <div id="main-wrapper">
-        {!isSettingsPage && <FleetMenu />}
+        {!isSettingsPage && !hideFleetMenu && <FleetMenu />}
         {showModuleChrome && <LeftSidebar />}
         <div id="portal" className="portal-container">
           {showModuleChrome && <ModuleBar />}

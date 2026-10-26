@@ -1148,6 +1148,27 @@
   font-size: 14px;
 }
 
+.fv-bottom-panel__compare {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  margin-left: 6px;
+  background: #1f6feb;
+  border: none;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  height: 26px;
+  align-self: center;
+  border-radius: 6px;
+}
+
+.fv-bottom-panel__compare:hover {
+  filter: brightness(1.1);
+}
+
 .fv-bottom-panel__toggle:hover {
   background: #243049;
   color: #fff;
@@ -1169,6 +1190,10 @@
   overflow: auto;
   flex: 1;
   min-height: 0;
+}
+
+.fv-bottom-panel__view {
+  height: 100%;
 }
 
 .fv-bottom-panel__placeholder {
@@ -1263,6 +1288,174 @@
   margin: 0;
   max-width: 420px;
   line-height: 1.5;
+}
+.fv-sim2__history {
+  padding: 8px;
+}
+.fv-sim2__history-name {
+  display: flex !important;
+  flex-direction: column;
+  align-items: flex-start !important;
+  gap: 2px;
+}
+.fv-sim2__history-name small {
+  color: var(--sim-muted);
+  font-weight: 400;
+}
+.fv-sim2__history-criteria {
+  max-width: 260px;
+  white-space: normal !important;
+  text-align: left !important;
+  color: var(--sim-muted);
+}
+.fv-sim2__history-activate {
+  border: none;
+  background: var(--sim-accent-strong);
+  color: #fff;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fv-sim2__history-activate:hover {
+  filter: brightness(1.1);
+}
+.fv-sim2__history-actions {
+  display: flex !important;
+  gap: 6px;
+  justify-content: center;
+}
+.fv-sim2__history-view {
+  border: 1px solid var(--sim-border);
+  background: transparent;
+  color: var(--sim-text);
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fv-sim2__history-view:hover {
+  background: var(--sim-hover);
+}
+.fv-snapshot {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px 20px;
+}
+.fv-snapshot--loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: var(--fv-muted, #6b7b8c);
+}
+.fv-snapshot__head h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+.fv-snapshot__vessel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--fv-text, #e6edf3);
+}
+.fv-snapshot__voyage-ports {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #6b7b8c;
+}
+.fv-snapshot__lock-note {
+  margin: 0 0 16px;
+  color: #6b7b8c;
+  font-size: 13px;
+}
+.fv-snapshot__map {
+  height: 560px;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  border: 1px solid #2a3447;
+  position: relative;
+}
+.fv-snapshot__map .leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #0d1524;
+}
+.fv-snapshot-ship i {
+  font-size: 16px;
+  filter: drop-shadow(0 0 2px #000);
+}
+.fv-snapshot__playback {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  background: var(--sim-surface, #0e1626);
+  border: 1px solid #2a3447;
+  border-radius: 8px;
+}
+.fv-snapshot__play-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: #1f6feb;
+  color: #fff;
+  cursor: pointer;
+}
+.fv-snapshot__play-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.fv-snapshot__play-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.fv-snapshot__scrub {
+  flex: 1 1 auto;
+}
+.fv-snapshot__scrub-label {
+  flex: none;
+  font-size: 12px;
+  color: #6b7b8c;
+  min-width: 110px;
+  text-align: right;
+}
+.fv-snapshot__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--sim-muted);
+}
+.fv-snapshot__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* `.fv-sim2`/`.fv-sim2__table-wrap` normally live inside the bottom panel's
+   fixed-height flex layout — override that for this free-flowing page so
+   the table and chart aren't collapsed to zero height. */
+.fv-snapshot .fv-sim2 {
+  height: auto;
+  overflow: visible;
+  margin-top: 16px;
+}
+.fv-snapshot .fv-sim2__table-wrap {
+  overflow: visible;
+}
+.fv-snapshot .fv-sim2__chart {
+  margin-top: 16px;
+  height: 280px;
 }
 
 .fv-no-vessel {
@@ -1896,6 +2089,50 @@
   font-size: 12px;
   color: #d29922;
 }
+.fv-opt-pop__anchor-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.fv-opt-pop__anchor-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #24314a;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fv-opt-pop__anchor-opt:hover {
+  border-color: #3a4a66;
+}
+.fv-opt-pop__anchor-opt--active {
+  border-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.08);
+}
+.fv-opt-pop__anchor-opt--disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.fv-opt-pop__anchor-opt input {
+  margin-top: 3px;
+  flex: none;
+}
+.fv-opt-pop__anchor-opt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.fv-opt-pop__anchor-opt-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #e6edf3;
+}
+.fv-opt-pop__anchor-opt-desc {
+  font-size: 11px;
+  color: #8b98a5;
+}
 .fv-opt-pop__grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -2058,13 +2295,101 @@
   opacity: 0.4;
   cursor: default;
 }
+.fv-sim2__export-btn--danger {
+  color: #fff;
+  background: #c0392b;
+}
+.fv-sim2__export-btn--danger:hover:not(:disabled) {
+  background: #c0392b;
+  filter: brightness(1.1);
+}
+.fv-sim2__confirm {
+  width: min(420px, calc(100vw - 32px));
+}
+.fv-sim2__confirm .fv-sim2__export-body p {
+  margin: 0 0 8px;
+  color: var(--sim-text);
+}
+.fv-sim2__confirm-route-name {
+  font-weight: 600;
+  color: var(--sim-strong) !important;
+}
+.fv-sim2__guidance {
+  width: min(720px, calc(100vw - 32px));
+}
+.fv-sim2__ais-manager {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+}
+.fv-sim2__ais-manager .fv-sim2__table th,
+.fv-sim2__ais-manager .fv-sim2__table td {
+  text-align: center;
+}
+.fv-sim2__guidance-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--sim-muted);
+}
+.fv-sim2__guidance-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+}
+.fv-sim2__guidance-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--sim-line);
+}
+.fv-sim2__guidance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sim-text);
+  cursor: pointer;
+}
+.fv-sim2__guidance-toggle input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--sim-accent-strong);
+  flex: none;
+}
+.fv-sim2__guidance-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border: 1px solid var(--sim-border);
+  border-radius: 6px;
+  background: var(--sim-surface);
+  color: var(--sim-accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fv-sim2__guidance-download:hover:not(:disabled) {
+  background: var(--sim-hover);
+  border-color: var(--sim-accent);
+}
+.fv-sim2__guidance-download:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 .fv-sim2__table-wrap {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
 }
 .fv-sim2__table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 11px;
 }
@@ -2072,7 +2397,7 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  text-align: right;
+  text-align: center;
   padding: 4px 8px;
   font-size: 9px;
   font-weight: 700;
@@ -2090,7 +2415,7 @@
   gap: 8px;
 }
 .fv-sim2__table tbody td {
-  text-align: right;
+  text-align: center;
   padding: 3px 8px;
   color: var(--sim-text);
   white-space: nowrap;
@@ -5376,6 +5701,14 @@
   color: #f85149;
 }
 
+/* Good weather day highlight — every row in a GWDM "good weather" block
+   gets a green tint across the whole row (overrides the calc-cell and
+   even-row-striping backgrounds via !important, since those are per-cell
+   rules that would otherwise win on specificity). */
+.fv-tracksheet__table tr.fv-tracksheet__row--good-weather td {
+  background: rgba(63, 185, 80, 0.16) !important;
+}
+
 /* Tracksheet â€” light theme ------------------------------------------- */
 .fv-light .fv-tracksheet {
   background: #ffffff;
@@ -5436,6 +5769,9 @@
 }
 .fv-light .fv-tracksheet__table td.fv-tracksheet__nextport {
   color: #1d5fb8;
+}
+.fv-light .fv-tracksheet__table tr.fv-tracksheet__row--good-weather td {
+  background: #e3f4e1 !important;
 }
 
 /* Map controls (right-side floating bar) ----------------------------- */
@@ -8128,6 +8464,19 @@
   border-radius: 4px;
 }
 
+.fv-interim__empty-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 16px 0;
+  padding: 10px 14px;
+  background: #1f2a1f;
+  border: 1px solid #3a4a35;
+  border-radius: 4px;
+  color: #c9d8c0;
+  font-size: 13px;
+}
+
 .fv-interim__cp-title {
   margin: 0 0 6px;
   font-size: 13px;
@@ -10546,7 +10895,10 @@ select.fv-voyage__input {
 /* Route Explorer / Simulator page (/route-explorer) ------------------- */
 .fv-route {
   height: 100%;
-  overflow: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   padding: 16px 18px 24px;
   background: #0e1626;
   color: #e6edf3;
@@ -10561,6 +10913,7 @@ select.fv-voyage__input {
   padding-bottom: 12px;
   border-bottom: 1px solid #2a3447;
   margin-bottom: 12px;
+  flex: 0 0 auto;
 }
 
 .fv-route__voyage-info {
@@ -10644,6 +10997,10 @@ select.fv-voyage__input {
   border: 1px solid #2a3447;
   border-radius: 4px;
   margin-bottom: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Left column of the route editor: generator + expected route. */
@@ -10697,6 +11054,7 @@ select.fv-voyage__input {
   border-bottom: 1px solid #2a3447;
   background: #1b2434;
   flex-wrap: wrap;
+  flex: 0 0 auto;
 }
 
 .fv-route__section-header h2 {
@@ -10805,6 +11163,13 @@ select.fv-voyage__input {
   gap: 4px;
   font-size: 11px;
   color: #8b949e;
+}
+
+.fv-route__gen-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+  width: 100%;
 }
 
 /* --- Generate route popup ----------------------------------------- */
@@ -11000,6 +11365,54 @@ select.fv-voyage__input {
   color: #6e7781;
 }
 
+.fv-route__add-route-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 2px;
+}
+
+.fv-route__add-route-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 12px 14px;
+  background: #0e1626;
+  border: 1px solid #2a3447;
+  border-radius: 6px;
+  color: #e6edf3;
+  cursor: pointer;
+}
+
+.fv-route__add-route-option:hover {
+  border-color: #58a6ff;
+  background: #121c2e;
+}
+
+.fv-route__add-route-option i {
+  font-size: 18px;
+  color: #58a6ff;
+  width: 22px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.fv-route__add-route-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fv-route__add-route-option strong {
+  font-size: 13px;
+}
+
+.fv-route__add-route-option small {
+  font-size: 11px;
+  color: #8b98ad;
+}
+
 /* --- Route editor: import/export + hints ------------------------- */
 .fv-route__io-text {
   width: 100%;
@@ -11072,24 +11485,27 @@ select.fv-voyage__input {
   display: flex;
   gap: 12px;
   align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .fv-route__map-layout .fv-route__map-col {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 .fv-route__map-layout .fv-route__map-wrap {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
 }
 
 .fv-route__side-panel {
   flex: 0 0 300px;
   display: flex;
   flex-direction: column;
-  max-height: 820px;
   background: #0d1626;
   border: 1px solid #2a3447;
   border-radius: 6px;
@@ -11181,12 +11597,17 @@ select.fv-voyage__input {
   position: absolute;
   top: 10px;
   left: 50%;
-  transform: translateX(-50%);
+  /* Nudged right of dead-centre so it clears the cursor-position readout
+     pinned to the map's top-left corner. */
+  transform: translateX(calc(-50% + 70px));
   z-index: 500;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 6px;
   padding: 6px;
+  max-width: calc(100% - 20px);
+  overflow-x: auto;
   background: rgba(13, 22, 38, 0.92);
   border: 1px solid #2a3447;
   border-radius: 6px;
@@ -11195,51 +11616,12 @@ select.fv-voyage__input {
 
 .fv-route__map-actions .fv-route__btn {
   white-space: nowrap;
-}
-
-.fv-route__weather-legend {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  color: #dce7f6;
-  background: rgba(40, 18, 38, 0.88);
-  border: 1px solid #6f3f66;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.fv-route__weather-legend-unit {
-  min-width: 10px;
-  text-transform: lowercase;
-  opacity: 0.95;
-}
-
-.fv-route__weather-legend-bar {
-  position: relative;
-  width: 210px;
-  height: 16px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  background: linear-gradient(90deg, #47d4da 0%, #3f89ff 20%, #4b59ce 38%, #7c3bb1 56%, #b73f97 73%, #d44b6c 88%, #e3613c 100%);
-}
-
-.fv-route__weather-legend-tick {
-  position: absolute;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  color: #fff;
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
-  pointer-events: none;
+  flex: none;
 }
 
 .fv-route__side-scroll {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 8px;
 }
@@ -11446,6 +11828,13 @@ select.fv-voyage__input {
   color: #8b98ad;
 }
 
+.fv-route__drift-duration {
+  text-transform: none;
+  letter-spacing: normal;
+  color: #d29922;
+  font-weight: 600;
+}
+
 .fv-route__wp-detail-field input {
   width: 100%;
   background: #0d1626;
@@ -11484,12 +11873,47 @@ select.fv-voyage__input {
   opacity: 0.5;
 }
 
-.fv-route__wp-detail-toggle {
+.fv-route__toggle-switch {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   color: #cdd9e5;
+  cursor: pointer;
+}
+.fv-route__toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+.fv-route__toggle-switch-track {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex: none;
+  background: #2a3447;
+  border-radius: 20px;
+  transition: background 0.15s;
+}
+.fv-route__toggle-switch-track::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: #9fb4d4;
+  border-radius: 50%;
+  transition: transform 0.15s, background 0.15s;
+}
+.fv-route__toggle-switch input:checked + .fv-route__toggle-switch-track {
+  background: #d29922;
+}
+.fv-route__toggle-switch input:checked + .fv-route__toggle-switch-track::before {
+  transform: translateX(16px);
+  background: #fff;
 }
 
 @media (max-width: 900px) {
@@ -11504,7 +11928,7 @@ select.fv-voyage__input {
 
 .fv-route-map__canvas {
   width: 100%;
-  height: 820px;
+  height: 100%;
 }
 
 .fv-route__map-hint {
@@ -11548,13 +11972,16 @@ select.fv-voyage__input {
 .fv-route__map-status--done {
   border-color: #2ea043;
   color: #b8f0c4;
-  top: auto;
-  bottom: 10px;
+  /* Anchor to the map's top, left of the top-right icon stack (map layers /
+     weather / area constraints / etc.), so the chooser is always clearly
+     visible instead of tucked in a bottom corner. */
+  top: 10px;
+  right: 60px;
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
   width: 268px;
-  max-width: calc(100% - 20px);
+  max-width: calc(100% - 70px);
   max-height: calc(100% - 20px);
   overflow-y: auto;
   pointer-events: auto;
@@ -13860,6 +14287,11 @@ select.fv-voyage__input {
   color: #1b2330;
   border: 1px solid #c2ccda;
 }
+.fv-light .fv-interim__empty-notice {
+  background: #eaf6e6;
+  border: 1px solid #bfe0b5;
+  color: #2d4a27;
+}
 .fv-light .fv-interim__cp,
 .fv-light .fv-interim__display-options,
 .fv-light .fv-interim__chart,
@@ -14080,11 +14512,6 @@ select.fv-voyage__input {
   border-color: #1f6feb;
   color: #fff;
 }
-.fv-light .fv-route__weather-legend {
-  color: #2c2d42;
-  background: rgba(244, 224, 234, 0.95);
-  border-color: #d5a9bf;
-}
 .fv-light .fv-route__side-panel {
   background: #f7f9fc;
   border: 1px solid #d6dde7;
@@ -14150,7 +14577,7 @@ select.fv-voyage__input {
   color: #1b2330;
   border: 1px solid #c2ccda;
 }
-.fv-light .fv-route__wp-detail-toggle {
+.fv-light .fv-route__toggle-switch {
   color: #3f4a5a;
 }
 .fv-light .fv-route__saved-act {
@@ -15292,19 +15719,19 @@ select.fv-voyage__input {
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: calc(100% - 24px);
-  margin: 0 12px 12px;
-  padding: 8px 14px 10px;
+  margin: 0 12px 8px;
+  padding: 5px 12px 6px;
   background: rgba(15, 23, 38, 0.92);
   border: 1px solid #2a3447;
-  border-radius: 10px;
+  border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 .fv-wf-timeline__play {
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: #1f6feb;
   border: none;
@@ -15319,14 +15746,14 @@ select.fv-voyage__input {
 }
 .fv-wf-timeline__speed {
   flex: 0 0 auto;
-  min-width: 30px;
-  height: 26px;
-  padding: 0 7px;
-  border-radius: 6px;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
   background: #182235;
   border: 1px solid #2a3447;
   color: #c4cedd;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   cursor: pointer;
 }
@@ -15336,9 +15763,9 @@ select.fv-voyage__input {
 }
 .fv-wf-timeline__shift {
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
   background: #182235;
   border: 1px solid #2a3447;
   color: #c4cedd;
@@ -15346,7 +15773,7 @@ select.fv-voyage__input {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: 10px;
 }
 .fv-wf-timeline__shift:hover {
   color: #fff;
@@ -15354,25 +15781,25 @@ select.fv-voyage__input {
 }
 .fv-wf-timeline__rangesel {
   flex: 0 0 auto;
-  height: 26px;
+  height: 22px;
   padding: 0 4px;
-  border-radius: 6px;
+  border-radius: 5px;
   background: #182235;
   border: 1px solid #2a3447;
   color: #c4cedd;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   cursor: pointer;
 }
 .fv-wf-timeline__datepick {
   flex: 0 0 auto;
-  height: 26px;
+  height: 22px;
   padding: 0 6px;
-  border-radius: 6px;
+  border-radius: 5px;
   background: #182235;
   border: 1px solid #2a3447;
   color: #c4cedd;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   cursor: pointer;
   color-scheme: dark;
@@ -15385,7 +15812,7 @@ select.fv-voyage__input {
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  padding-top: 22px;
+  padding-top: 15px;
 }
 .fv-wf-timeline__bubble {
   position: absolute;
@@ -15393,10 +15820,10 @@ select.fv-voyage__input {
   transform: translateX(-50%);
   background: #f2a53c;
   color: #1b1200;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 1px 7px;
+  border-radius: 9px;
   white-space: nowrap;
 }
 .fv-wf-timeline__range {
@@ -15407,13 +15834,13 @@ select.fv-voyage__input {
 }
 .fv-wf-timeline__days {
   position: relative;
-  height: 16px;
-  margin-top: 2px;
+  height: 13px;
+  margin-top: 1px;
 }
 .fv-wf-timeline__day {
   position: absolute;
   transform: translateX(-50%);
-  font-size: 10px;
+  font-size: 9px;
   color: #8a97a8;
   white-space: nowrap;
 }
@@ -15779,7 +16206,7 @@ select.fv-voyage__input {
 .fv-wf-live-status {
   position: absolute;
   top: 10px;
-  right: 50px;
+  right: 12px;
   z-index: 1000;
   pointer-events: none;
 }
@@ -15907,26 +16334,87 @@ select.fv-voyage__input {
   /* Overlay checkboxes use slightly different styling */
 }
 
-.fv-ml-control__opacity {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 5px 8px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #2a3447;
-  color: #c4cedd;
-  font-size: 12px;
+/* --- Map top-of-map bar: nautical chart opacity + weather colour legend --- */
+.fv-wl-control {
+  position: relative;
+  margin: 10px 0 0 10px;
 }
-
-.fv-ml-control__opacity input {
-  grid-column: 1 / -1;
-  width: 100%;
+.fv-wl-control__bar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+}
+.fv-wl-control__opacity,
+.fv-wl-control__legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.fv-wl-control__opacity {
+  color: #c4cedd;
+  background: rgba(17, 25, 42, 0.92);
+  border: 1px solid #2a3447;
+}
+.fv-wl-control__opacity > i {
+  color: #8a97a8;
+}
+.fv-wl-control__opacity input[type='range'] {
+  width: 90px;
   accent-color: #2f81f7;
 }
-
-.fv-light .fv-ml-control__opacity {
-  border-top-color: #cbd5e1;
+.fv-wl-control__opacity-value {
+  min-width: 30px;
+  text-align: right;
+  color: #58a6ff;
+}
+.fv-wl-control__legend {
+  color: #dce7f6;
+  background: rgba(40, 18, 38, 0.88);
+  border: 1px solid #6f3f66;
+}
+.fv-wl-control__legend-unit {
+  min-width: 10px;
+  text-transform: lowercase;
+  opacity: 0.95;
+}
+.fv-wl-control__legend-gradient {
+  position: relative;
+  width: 190px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+.fv-wl-control__legend-tick {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  pointer-events: none;
+}
+.fv-light .fv-wl-control__opacity {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: #d6deea;
   color: #334155;
+}
+.fv-light .fv-wl-control__opacity > i {
+  color: #64748b;
+}
+.fv-light .fv-wl-control__legend {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: #d6c2d1;
+  color: #2a1f28;
 }
 
 /* When several of these icon controls share the top-right corner (e.g. the

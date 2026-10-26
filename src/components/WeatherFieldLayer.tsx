@@ -8,6 +8,7 @@ import { bandColor, getFieldFactor, sampleWeatherField } from '../data/weatherFi
 import { ensureLiveData, hasLiveSource, sampleLiveField } from '../data/openMeteo';
 import { landPolygonsInBounds } from '../data/landMaskGeo';
 import { isLand } from '../data/landMask';
+import { chaikinSmoothRing } from '../data/ringSmoothing';
 
 /** [lon, lat] polygon coordinates, as used by `polygon-clipping` and our
  *  own land ring data. */
@@ -49,6 +50,7 @@ export function WeatherFieldLayer({
   showField = true,
   showArrows = true,
   hour = 0,
+  sampleOverride,
 }: {
   factorId: string;
   /** Paint the filled colour field (set false to draw only arrows). */
@@ -58,6 +60,11 @@ export function WeatherFieldLayer({
   /** Hours ahead of now to forecast (0 = current conditions); may be
    *  fractional while scrubbing/playing a simulation. */
   hour?: number;
+  /** When provided, used instead of the live/synthetic fallback chain —
+   *  e.g. a frozen weather-grid snapshot, so a locked "route comparison"
+   *  link can replay the exact conditions it was created under instead of
+   *  today's live weather. Returns `null` for "no data at this point". */
+  sampleOverride?: (lat: number, lon: number) => { magnitude: number; directionDeg: number } | null;
 }) {
   const map = useMap();
   // `hour` can change many times a second during simulation playback. Kept in
@@ -65,11 +72,20 @@ export function WeatherFieldLayer({
   // panes/layers aren't torn down and recreated on every tick.
   const hourRef = useRef(hour);
   const scheduleRef = useRef<(() => void) | null>(null);
+  // Same treatment for `sampleOverride` — callers (e.g. a locked snapshot
+  // page) shouldn't need to memoize it perfectly just to avoid tearing down
+  // the whole layer on every render.
+  const sampleOverrideRef = useRef(sampleOverride);
 
   useEffect(() => {
     hourRef.current = hour;
     scheduleRef.current?.();
   }, [hour]);
+
+  useEffect(() => {
+    sampleOverrideRef.current = sampleOverride;
+    scheduleRef.current?.();
+  }, [sampleOverride]);
 
   useEffect(() => {
     const factor = getFieldFactor(factorId);
@@ -108,8 +124,15 @@ export function WeatherFieldLayer({
     let landCache: LonLatMultiPolygon = [];
 
     // Pull live values from Open-Meteo when available, otherwise fall back
-    // to the deterministic synthetic field (e.g. while a grid is loading).
+    // to the deterministic synthetic field (e.g. while a grid is loading) —
+    // unless a frozen snapshot override is supplied, in which case that's
+    // used exclusively (no live network calls at all).
     const sample = (lat: number, lon: number) => {
+      if (sampleOverrideRef.current) {
+        return (
+          sampleOverrideRef.current(lat, lon) ?? { magnitude: 0, directionDeg: 0 }
+        );
+      }
       const b = map.getBounds();
       const bounds = {
         south: b.getSouth(),
@@ -128,8 +151,10 @@ export function WeatherFieldLayer({
       if (w === 0 || h === 0) return;
       const hour = hourRef.current;
 
-      // Ensure live data for the current view; redraw once it arrives.
-      if (hasLiveSource(factorId)) {
+      // Ensure live data for the current view; redraw once it arrives. Not
+      // needed when a frozen override supplies the data — skip the network
+      // entirely in that case.
+      if (!sampleOverrideRef.current && hasLiveSource(factorId)) {
         const b = map.getBounds();
         ensureLiveData(
           factorId,
@@ -152,8 +177,13 @@ export function WeatherFieldLayer({
         const south = bounds.getSouth();
         const west = bounds.getWest();
         const east = bounds.getEast();
-        const cols = Math.max(50, Math.min(170, Math.round(w / 7)));
-        const rows = Math.max(34, Math.min(110, Math.round(h / 7)));
+        // Resolution bumped vs. a naive "one sample per ~7px" grid: finer
+        // marching-squares cells mean each isoline needs less corner-cutting
+        // to look smooth, *and* means the boundary moves in small, gradual
+        // steps as `hour` advances rather than a coarse cell occasionally
+        // flipping and visibly jumping the contour.
+        const cols = Math.max(70, Math.min(220, Math.round(w / 5)));
+        const rows = Math.max(48, Math.min(150, Math.round(h / 5)));
 
         const gridToLonLat = (gx: number, gy: number): [number, number] => {
           const fx = gx / (cols - 1);
@@ -185,8 +215,20 @@ export function WeatherFieldLayer({
         const polygons = bands
           .map((band, i) => {
             if (band.coordinates.length === 0) return null;
+            // Chaikin-smooth each isoline ring *before* clipping to land —
+            // this rounds the raw marching-squares "staircase" into a
+            // smooth, organic curve in open water (what makes the field
+            // read like a real wave/wind chart instead of a pixel grid,
+            // and keeps the boundary easing gradually between forecast
+            // hours instead of visibly stair-stepping), while the
+            // subsequent land clip still cuts an exact, un-softened edge
+            // against the real coastline — so smoothing can never push
+            // colour onto land.
             const lonLat: LonLatMultiPolygon = band.coordinates.map((polygon) =>
-              polygon.map((ring) => ring.map(([gx, gy]): LonLatPoint => gridToLonLat(gx, gy))),
+              polygon.map(
+                (ring) =>
+                  chaikinSmoothRing(ring.map(([gx, gy]): LonLatPoint => gridToLonLat(gx, gy))) as LonLatPoint[],
+              ),
             );
             // The land data's rings are plain number[][], structurally the
             // same shape as LonLatMultiPolygon at runtime, just not typed as

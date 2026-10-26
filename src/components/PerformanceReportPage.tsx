@@ -4,7 +4,9 @@ import { getPerformanceReport, type AbstractRow, type DetailedRow, type Performa
 import type { Voyage } from '../data/voyages';
 import { performanceApi } from '../api/performanceApi';
 import { ReportsPageShell } from './ReportsTabs';
-import { STUB_ROWS } from './TracksheetGrid';
+import { STUB_ROWS, computeCons, type TrackRow } from './TracksheetGrid';
+import { buildView } from './voyage/buildView';
+import { computeInterimResult, cpConfigFromLeg, type InterimCpConfig } from '../data/interimCalculations';
 
 function asNumber(value: string): number {
   const number = Number.parseFloat(value);
@@ -45,15 +47,21 @@ function EditableCell({ value, editing, onChange }: { value: string; editing: bo
   return <td><EditableValue value={value} editing={editing} onChange={onChange} /></td>;
 }
 
-function buildFullVoyageReport(voyage: Parameters<typeof getPerformanceReport>[0]): PerformanceReport {
+function buildFullVoyageReport(
+  voyage: Parameters<typeof getPerformanceReport>[0],
+  rows: TrackRow[],
+  cpConfig: InterimCpConfig,
+  routePath: Array<[number, number]>,
+): PerformanceReport {
   const base = getPerformanceReport(voyage);
-  const summary = STUB_ROWS.map((row, index): VoyageSummaryRow => {
-    const previous = STUB_ROWS[index - 1];
-    const vlsfoCons = previous?.vlsfoRob != null && row.vlsfoRob != null ? Math.max(0, previous.vlsfoRob - row.vlsfoRob) : 0;
-    const lsmgoCons = previous?.lsmgoRob != null && row.lsmgoRob != null ? Math.max(0, previous.lsmgoRob - row.lsmgoRob) : 0;
+  const result = computeInterimResult(rows, cpConfig, routePath);
+
+  const summary = rows.map((row, index): VoyageSummaryRow => {
+    const vlsfoCons = index > 0 ? computeCons(rows, index, 'vlsfo') ?? 0 : 0;
+    const lsmgoCons = index > 0 ? computeCons(rows, index, 'lsmgo') ?? 0 : 0;
     return {
-      code: index === 0 ? 'D' : index === STUB_ROWS.length - 1 ? 'A' : row.rt || 'N',
-      port: index === 0 ? voyage.portFrom : index === STUB_ROWS.length - 1 ? voyage.portTo : 'At Sea',
+      code: index === 0 ? 'D' : index === rows.length - 1 ? 'A' : row.rt || 'N',
+      port: index === 0 ? voyage.portFrom : index === rows.length - 1 ? voyage.portTo : 'At Sea',
       when: `${row.date} ${row.time}`,
       timeInPort: '0.00',
       timeAtSea: row.hrs?.toFixed(2) ?? '0.00',
@@ -63,12 +71,11 @@ function buildFullVoyageReport(voyage: Parameters<typeof getPerformanceReport>[0
       lsmgoCons: lsmgoCons.toFixed(3),
     };
   });
-  const abstract = STUB_ROWS.map((row, index) => {
-    const previous = STUB_ROWS[index - 1];
-    const vlsfoDaily = previous?.vlsfoRob != null && row.vlsfoRob != null ? Math.max(0, previous.vlsfoRob - row.vlsfoRob) : 0;
-    const lsmgoDaily = previous?.lsmgoRob != null && row.lsmgoRob != null ? Math.max(0, previous.lsmgoRob - row.lsmgoRob) : 0;
+  const abstract = rows.map((row, index) => {
+    const vlsfoDaily = index > 0 ? computeCons(rows, index, 'vlsfo') ?? 0 : 0;
+    const lsmgoDaily = index > 0 ? computeCons(rows, index, 'lsmgo') ?? 0 : 0;
     return {
-      code: index === 0 ? 'D' : index === STUB_ROWS.length - 1 ? 'A' : row.rt || 'N',
+      code: index === 0 ? 'D' : index === rows.length - 1 ? 'A' : row.rt || 'N',
       date: row.date,
       time: row.time,
       lat: row.lat,
@@ -81,8 +88,8 @@ function buildFullVoyageReport(voyage: Parameters<typeof getPerformanceReport>[0
       lsmgoDaily: lsmgoDaily.toFixed(3),
     };
   });
-  const detailed = STUB_ROWS.map((row, index) => ({
-    code: index === 0 ? 'D' : index === STUB_ROWS.length - 1 ? 'A' : row.rt || 'N',
+  const detailed = rows.map((row, index) => ({
+    code: index === 0 ? 'D' : index === rows.length - 1 ? 'A' : row.rt || 'N',
     date: row.date,
     time: row.time,
     lat: row.lat,
@@ -93,7 +100,59 @@ function buildFullVoyageReport(voyage: Parameters<typeof getPerformanceReport>[0
     seas: row.wavesO,
     currentAvg: row.currF.toFixed(2),
   }));
-  return recalculateReport({ ...base, summary, abstract, detailed });
+
+  // Good weather / speed / bunker sections — ported from the legacy
+  // `InterimCalculatedData` (same engine the Interim Dashboard uses), rather
+  // than the previously-static "N/A" placeholders.
+  const goodWeatherDaysLabel =
+    result.timeAtSea.goodWeather > 0 ? `${(result.timeAtSea.goodWeather / 24).toFixed(2)} days` : 'None identified';
+  const timeGainLoss = `${Math.abs(result.projectedTimeLossGain.overall).toFixed(2)} hrs ${result.projectedTimeLossGain.overall >= 0 ? 'gain' : 'loss'}`;
+  const overUnder = (delta: number) => (Math.abs(delta) < 0.0005 ? '0.000 mts' : `${Math.abs(delta).toFixed(3)} mts ${delta <= 0 ? 'under' : 'over'}`);
+
+  return recalculateReport({
+    ...base,
+    summary,
+    abstract,
+    detailed,
+    goodWeather: {
+      ...base.goodWeather,
+      basis: `Good weather analysis basis ${cpConfig.goodWeatherMethod}, min ${cpConfig.minGoodHours}h, currents: ${cpConfig.currentsOption}.`,
+      goodWeatherDays: goodWeatherDaysLabel,
+    },
+    speed: {
+      distanceSailed: { overall: `${result.distance.overall.toFixed(2)} nm`, goodWx: `${result.distance.goodWeather.toFixed(2)} nm` },
+      timeAtSea: { overall: `${result.timeAtSea.overall.toFixed(2)} hrs`, goodWx: `${result.timeAtSea.goodWeather.toFixed(2)} hrs` },
+      averageSpeed: { overall: `${result.averageSpeed.overall.toFixed(2)} kts`, goodWx: `${result.averageSpeed.goodWeather.toFixed(2)} kts` },
+      goodWeatherAverageSpeed: `${result.averageSpeed.goodWeather.toFixed(2)} kts`,
+      goodWeatherCurrentFactors: `${result.aboutSpeed.toFixed(2)} kts (CP about speed)`,
+      goodWeatherPerformanceSpeed: `${result.averagePerformanceSpeed.goodWeather.toFixed(2)} kts`,
+      timeGainLoss,
+    },
+    vlsfo: {
+      fuel: 'VLSFO',
+      totalConsumed: {
+        overall: `${(result.averageConsumption.vlsfo.overall * (result.timeAtSea.overall / 24)).toFixed(3)} mts`,
+        goodWx: `${(result.averageConsumption.vlsfo.goodWeather * (result.timeAtSea.goodWeather / 24)).toFixed(3)} mts`,
+      },
+      avgDaily: {
+        overall: `${result.averageConsumption.vlsfo.overall.toFixed(3)} mts`,
+        goodWx: `${result.averageConsumption.vlsfo.goodWeather.toFixed(3)} mts`,
+      },
+      goodWeatherOverUnder: overUnder(result.projectedConsumption.vlsfo.overall),
+    },
+    lsmgo: {
+      fuel: 'LSMGO',
+      totalConsumed: {
+        overall: `${(result.averageConsumption.lsmgo.overall * (result.timeAtSea.overall / 24)).toFixed(3)} mts`,
+        goodWx: `${(result.averageConsumption.lsmgo.goodWeather * (result.timeAtSea.goodWeather / 24)).toFixed(3)} mts`,
+      },
+      avgDaily: {
+        overall: `${result.averageConsumption.lsmgo.overall.toFixed(3)} mts`,
+        goodWx: `${result.averageConsumption.lsmgo.goodWeather.toFixed(3)} mts`,
+      },
+      goodWeatherOverUnder: overUnder(result.projectedConsumption.lsmgo.overall),
+    },
+  });
 }
 
 /**
@@ -131,17 +190,39 @@ function PerformanceReportContent({ voyage }: { voyage: Voyage }) {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [report, setReport] = useState<PerformanceReport>(() => buildFullVoyageReport(voyage));
+  const stubRows = useMemo<TrackRow[]>(() => STUB_ROWS.map((row, i) => ({ ...row, id: `stub-${i}`, nextPort: '' })), []);
+  const [report, setReport] = useState<PerformanceReport>(() =>
+    buildFullVoyageReport(voyage, stubRows, cpConfigFromLeg(undefined, voyage.cpSpeed || 13), []),
+  );
   const r = useMemo(() => recalculateReport(report), [report]);
 
-  // Prefer a previously-saved report (from the Performance module's own
-  // backend/database) over the locally-generated one, once it loads.
+  // Generate the report from the voyage's real tracksheet + CP criteria
+  // (same engine/source as the Interim Dashboard), then prefer a
+  // previously-saved report (from the Performance module's own
+  // backend/database) over the freshly-generated one, if one exists —
+  // preserving any manual edits made after a prior "Save Changes".
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Only fall back to the stub/sample rows when the fetch itself fails
+      // (backend offline) — a successful fetch that returns zero rows means
+      // the voyage genuinely has no reports yet, and the report must reflect
+      // that real (empty/zero) state rather than a demo template.
+      let rows = stubRows;
       try {
-        const saved = await performanceApi.getReport(voyage.id);
-        if (!cancelled && saved) setReport(saved.report);
+        rows = await performanceApi.getTracksheet(voyage.id);
+      } catch {
+        /* keep the stub rows on failure — backend may be offline */
+      }
+      if (cancelled) return;
+      const activeLeg = buildView(voyage).legs[0];
+      const cpConfig = cpConfigFromLeg(activeLeg, voyage.cpSpeed || 13);
+      const generated = buildFullVoyageReport(voyage, rows, cpConfig, []);
+      if (!cancelled) setReport(generated);
+
+      try {
+        const savedReport = await performanceApi.getReport(voyage.id);
+        if (!cancelled && savedReport) setReport(savedReport.report);
       } catch {
         /* keep the generated report on failure — backend may be offline */
       }
@@ -149,7 +230,8 @@ function PerformanceReportContent({ voyage }: { voyage: Voyage }) {
     return () => {
       cancelled = true;
     };
-  }, [voyage.id]);
+  }, [voyage, stubRows]);
+
 
   const saveChanges = async () => {
     setSaving(true);
