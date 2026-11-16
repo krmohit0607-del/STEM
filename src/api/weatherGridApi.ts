@@ -11,7 +11,14 @@ export interface WeatherGridApiDto {
   mag: number[];
   dir: number[];
   time: string | null;
+  /** True once every cell came from a live/current forecast. */
   live: boolean;
+  /** True once every cell has real sampled data — live, or a historical/
+   *  modelled fallback for dates outside the live window; false only when
+   *  no data exists at all (both live and historical lookups failed), in
+   *  which case `mag`/`dir` are meaningless all-zero filler, not "calm
+   *  weather" — callers must treat that case as "no data", not render it. */
+  hasData: boolean;
 }
 
 /**

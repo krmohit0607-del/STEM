@@ -230,6 +230,9 @@ export function MapView() {
         zoom={3}
         minZoom={2}
         maxZoom={18}
+        zoomSnap={0.25}
+        zoomDelta={0.5}
+        wheelPxPerZoomLevel={120}
         worldCopyJump
         maxBounds={WORLD_BOUNDS}
         maxBoundsViscosity={1.0}

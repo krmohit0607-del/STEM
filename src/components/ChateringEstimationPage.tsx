@@ -342,14 +342,14 @@ type InKind = 'TCIN' | 'TCTIN' | 'VIN' | 'OWN';
 type OutKind = 'TCOUT' | 'TCTOUT' | 'VOUT';
 type FixType =
   | 'TCIN-TCOUT' | 'TCIN-VOUT' | 'TCIN-TCTOUT'
-  | 'TCTIN-TCTOUT' | 'TCTIN-TCOUT' | 'TCTIN-VOUT'
-  | 'VIN-VOUT' | 'VIN-TCTOUT'
+  | 'TCTIN-TCTOUT' | 'TCTIN-VOUT'
+  | 'VIN-VOUT'
   | 'OWN-TCOUT' | 'OWN-VOUT' | 'OWN-TCTOUT';
 
 const FIX_TYPES: FixType[] = [
   'TCIN-TCOUT', 'TCIN-VOUT', 'TCIN-TCTOUT',
-  'TCTIN-TCTOUT', 'TCTIN-TCOUT', 'TCTIN-VOUT',
-  'VIN-VOUT', 'VIN-TCTOUT',
+  'TCTIN-TCTOUT', 'TCTIN-VOUT',
+  'VIN-VOUT',
   'OWN-TCOUT', 'OWN-VOUT', 'OWN-TCTOUT',
 ];
 

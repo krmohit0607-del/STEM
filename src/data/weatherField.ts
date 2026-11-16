@@ -35,6 +35,10 @@ export interface FieldFactor {
   /** Solid tint for this factor's direction glyphs (barbs/arrows), kept
    *  distinct per factor so overlaid layers stay visually separable. */
   glyphColor?: string;
+  /** When true, rendered as traditional synoptic isobar contour lines
+   *  (stroked, unfilled, labelled with the pressure value) instead of a
+   *  filled colour gradient. */
+  isobar?: boolean;
 }
 
 export interface FieldSample {
@@ -154,6 +158,7 @@ export const FIELD_FACTORS: FieldFactor[] = [
       [1.0, '#c0392b'],
     ],
     legend: ['980', '1013', '1043'],
+    isobar: true,
   },
   {
     id: 'precipitation',
@@ -229,6 +234,33 @@ export function bandColor(stops: Array<[number, string]>, bandIndex: number, alp
   const stop = stops[Math.max(0, Math.min(stops.length - 1, bandIndex))];
   const { r, g, b } = hexToRgb(stop[1]);
   return `rgba(${r},${g},${b},${alpha})`;
+}
+
+/** Continuously interpolated RGB for a magnitude fraction (0..1) along the
+ *  factor's colour ramp — unlike `bandColor`, this blends smoothly between
+ *  adjacent stops instead of snapping to a discrete band, for a Windy-style
+ *  soft gradient field instead of posterised isobands. */
+export function smoothColorRgb(
+  stops: Array<[number, string]>,
+  frac: number,
+): { r: number; g: number; b: number } {
+  const f = Math.max(0, Math.min(1, frac));
+  if (f <= stops[0][0]) return hexToRgb(stops[0][1]);
+  for (let i = 1; i < stops.length; i += 1) {
+    if (f <= stops[i][0]) {
+      const [f0, c0] = stops[i - 1];
+      const [f1, c1] = stops[i];
+      const t = f1 > f0 ? (f - f0) / (f1 - f0) : 0;
+      const a = hexToRgb(c0);
+      const b = hexToRgb(c1);
+      return {
+        r: Math.round(a.r + (b.r - a.r) * t),
+        g: Math.round(a.g + (b.g - a.g) * t),
+        b: Math.round(a.b + (b.b - a.b) * t),
+      };
+    }
+  }
+  return hexToRgb(stops[stops.length - 1][1]);
 }
 
 /** Per-factor seed so each field looks distinct but stays deterministic. */
@@ -347,12 +379,25 @@ export function sampleWeatherField(
 
   const n = smooth01(lat, driftLon, seed, hour);
   const magnitude = n * factor.max;
-  const dir =
-    (Math.sin(lat * 0.11 - seed) * 110 +
-      Math.cos(driftLon * 0.13 + seed * 1.4) * 130 +
-      seed * 47 +
-      720) %
-    360;
+  // Direction comes from the LOCAL GRADIENT of the same evolving field,
+  // rotated 90° (a geostrophic-style approximation — real wind circulates
+  // around a high/low rather than flowing straight toward/away from its
+  // centre). Tying direction to the exact field driving magnitude means it
+  // varies smoothly from point to point (neighbouring cells get genuinely
+  // different bearings, not one direction painted across a whole region)
+  // and keeps turning as the system itself evolves/migrates, not just a
+  // bolted-on wobble unrelated to what's actually happening at that spot.
+  const eps = 0.5; // degrees — small enough for a local derivative estimate
+  const nEast = smooth01(lat, driftLon + eps, seed, hour);
+  const nNorth = smooth01(lat + eps, driftLon, seed, hour);
+  const gradLon = (nEast - n) / eps;
+  const gradLat = (nNorth - n) / eps;
+  const gradBearing = (Math.atan2(gradLon, gradLat) * 180) / Math.PI;
+  const hemisphereSign = lat >= 0 ? 1 : -1;
+  // Small additional high-frequency wobble so direction isn't perfectly
+  // "clean" (real wind has turbulence on top of the synoptic flow).
+  const microWobble = (latticeNoise3(lon * 0.4, lat * 0.4, hour * 0.3, seed + 711) - 0.5) * 30;
+  const dir = ((gradBearing + hemisphereSign * 90 + microWobble) % 360 + 360) % 360;
   return { magnitude, directionDeg: dir };
 }
 

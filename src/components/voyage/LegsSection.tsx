@@ -251,6 +251,18 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
       ),
     );
 
+  const removeLegSpeed = (legIdx: number, rowIdx: number) =>
+    updateLegs((legs) =>
+      legs.map((leg, li) => {
+        if (li !== legIdx) return leg;
+        const remaining = leg.speedCons.filter((_, ri) => ri !== rowIdx);
+        const nextSpeedCons = leg.speedCons[rowIdx]?.isDefault
+          ? remaining.map((row, ri) => ({ ...row, isDefault: ri === 0 }))
+          : remaining;
+        return { ...leg, speedCons: nextSpeedCons };
+      }),
+    );
+
   const setLegDefaultSpeed = (legIdx: number, rowIdx: number) =>
     updateLegs((legs) =>
       legs.map((leg, li) =>
@@ -399,6 +411,7 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                       <th>Daily Cons (mt/day)</th>
                       <th>Fuel Type (Alt)</th>
                       <th>Daily Cons (mt/day)</th>
+                      {editing && <th aria-label="Actions" />}
                     </tr>
                   </thead>
                   <tbody>
@@ -421,6 +434,18 @@ export function LegsSection({ view, setView, editing, onToggleEdit, title, colla
                         <td><Cell editing={editing} value={row.dailyCons2} onChange={(x) => setLegSpeed(cpLegIdx, ri, 'dailyCons2', x)} type="number" /></td>
                         <td><Cell editing={editing} value={row.fuelType3} onChange={(x) => setLegSpeed(cpLegIdx, ri, 'fuelType3', x)} options={FUEL_TYPE_OPTIONS} /></td>
                         <td><Cell editing={editing} value={row.dailyCons3} onChange={(x) => setLegSpeed(cpLegIdx, ri, 'dailyCons3', x)} type="number" /></td>
+                        {editing && (
+                          <td>
+                            <button
+                              type="button"
+                              className="fv-voyage__icon-btn"
+                              onClick={() => removeLegSpeed(cpLegIdx, ri)}
+                              aria-label={`Remove ${row.description || `row ${ri + 1}`} speed and consumption row`}
+                            >
+                              <i className="fas fa-trash" aria-hidden="true" />
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>

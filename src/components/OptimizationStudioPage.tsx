@@ -21,6 +21,7 @@ import {
   type RouteOption,
   type SpeedFuelPoint,
 } from '../data/optimization';
+import { needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 
 // Clamp vertical panning to just inside the poles so the grey area past the
 // tiled world is never revealed; left wide open horizontally (worldCopyJump
@@ -356,6 +357,9 @@ export function OptimizationStudioPage() {
             zoom={3}
             minZoom={2}
             maxZoom={12}
+            zoomSnap={0.25}
+            zoomDelta={0.5}
+            wheelPxPerZoomLevel={120}
             maxBounds={WORLD_PAN_BOUNDS}
             maxBoundsViscosity={1.0}
             worldCopyJump
@@ -374,10 +378,12 @@ export function OptimizationStudioPage() {
             <MapCursorPosition />
             {data.routeOptions.map((r) => {
               const isSel = r.id === selectedRouteId;
-              return (
+              const path = unwrapRouteCoordinates(r.path as Array<[number, number]>);
+              const offsets = needsWorldCopies(path) ? [-360, 0, 360] : [0];
+              return offsets.map((offset) => (
                 <Polyline
-                  key={r.id}
-                  positions={r.path}
+                  key={`${r.id}-${offset}`}
+                  positions={path.map(([lat, lon]) => [lat, lon + offset] as [number, number])}
                   pathOptions={{
                     color: r.color,
                     weight: isSel ? 4 : 2,
@@ -388,27 +394,39 @@ export function OptimizationStudioPage() {
                 >
                   <Tooltip sticky>{`${r.name} • ${r.totalCost} • ${r.fuel}`}</Tooltip>
                 </Polyline>
-              );
+              ));
             })}
-            {selectedRoute && (
-              <>
-                <CircleMarker
-                  center={selectedRoute.path[0]}
-                  radius={6}
-                  pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: 1 }}
-                >
-                  <Tooltip>{`${voyage.fromName} (${voyage.fromCode})`}</Tooltip>
-                </CircleMarker>
-                <CircleMarker
-                  center={selectedRoute.path[selectedRoute.path.length - 1]}
-                  radius={6}
-                  pathOptions={{ color: '#ef4444', fillColor: '#ef4444', fillOpacity: 1 }}
-                >
-                  <Tooltip>{`${voyage.toName} (${voyage.toCode})`}</Tooltip>
-                </CircleMarker>
-                <FitRoute path={selectedRoute.path} />
-              </>
-            )}
+            {selectedRoute && (() => {
+              const path = unwrapRouteCoordinates(selectedRoute.path as Array<[number, number]>);
+              const offsets = needsWorldCopies(path) ? [-360, 0, 360] : [0];
+              const start = path[0];
+              const end = path[path.length - 1];
+              return (
+                <>
+                  {offsets.map((offset) => (
+                    <CircleMarker
+                      key={`start-${offset}`}
+                      center={offsetPoint(start, offset)}
+                      radius={6}
+                      pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: 1 }}
+                    >
+                      <Tooltip>{`${voyage.fromName} (${voyage.fromCode})`}</Tooltip>
+                    </CircleMarker>
+                  ))}
+                  {offsets.map((offset) => (
+                    <CircleMarker
+                      key={`end-${offset}`}
+                      center={offsetPoint(end, offset)}
+                      radius={6}
+                      pathOptions={{ color: '#ef4444', fillColor: '#ef4444', fillOpacity: 1 }}
+                    >
+                      <Tooltip>{`${voyage.toName} (${voyage.toCode})`}</Tooltip>
+                    </CircleMarker>
+                  ))}
+                  <FitRoute path={selectedRoute.path} />
+                </>
+              );
+            })()}
           </MapContainer>
 
           <div className="fv-opt-legend">

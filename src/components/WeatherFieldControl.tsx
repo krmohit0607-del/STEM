@@ -6,6 +6,7 @@ import L, { type ControlPosition } from 'leaflet';
 import { FIELD_FACTORS, getFieldFactor } from '../data/weatherField';
 import { MAX_FORECAST_HOURS, MIN_FORECAST_HOURS } from '../data/openMeteo';
 import { useSimWeatherHour, setWeatherScrubHour } from '../data/routeSimulatorStore';
+import { ON_KEY, FACTORS_KEY, EVENT, readOn, readFactors, broadcast } from '../data/weatherFieldSelection';
 import { WeatherFieldLayer } from './WeatherFieldLayer';
 import { MAP_CONTROL_OPEN_EVENT, notifyMapControlOpen } from './mapControlEvents';
 
@@ -22,44 +23,13 @@ import { MAP_CONTROL_OPEN_EVENT, notifyMapControlOpen } from './mapControlEvents
  * one screen stay in sync), exactly like the area-constraints control.
  */
 
-const ON_KEY = 'fv.map.weatherField.on';
-const FACTORS_KEY = 'fv.map.weatherField.factors';
 const HOUR_KEY = 'fv.map.weatherField.hour';
-const EVENT = 'fv-weatherfield-change';
 
 /** Playback speed multipliers for the bottom timeline's play button. */
 const SPEED_OPTIONS = [1, 2, 4, 8];
 
 /** "View old weather data" window widths (days) the range selector offers. */
 const RANGE_DAY_OPTIONS = [1, 3, 7, 10];
-
-function readOn(): boolean {
-  try {
-    return localStorage.getItem(ON_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function readFactors(): string[] {
-  try {
-    const raw = localStorage.getItem(FACTORS_KEY);
-    if (raw) {
-      const ids = (JSON.parse(raw) as string[]).filter((id) => getFieldFactor(id));
-      if (ids.length) return ids;
-    }
-    // Migrate the old single-factor key if present.
-    const legacy = localStorage.getItem('fv.map.weatherField.factor');
-    if (legacy && getFieldFactor(legacy)) return [legacy];
-  } catch {
-    /* ignore */
-  }
-  return [FIELD_FACTORS[0].id];
-}
-
-function broadcast() {
-  window.dispatchEvent(new Event(EVENT));
-}
 
 function readHour(): number {
   try {
@@ -162,33 +132,6 @@ function TopRightPortal({ children }: { children: React.ReactNode }) {
   }, [map]);
 
   return container ? createPortal(children, container) : null;
-}
-
-/**
- * Reactive read of whether the weather field is on and which factor ids are
- * selected, kept in sync with every mounted `WeatherFieldControl` via the
- * same shared event + storage key those controls already use. `factorIds[0]`
- * is the "primary" factor that paints the colour field, so any external
- * legend (e.g. the map's top-of-map legend bar) should follow that one.
- */
-export function useWeatherFieldSelection(): { on: boolean; factorIds: string[] } {
-  const [on, setOn] = useState<boolean>(() => readOn());
-  const [factorIds, setFactorIds] = useState<string[]>(() => readFactors());
-
-  useEffect(() => {
-    const sync = () => {
-      setOn(readOn());
-      setFactorIds(readFactors());
-    };
-    window.addEventListener(EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-
-  return { on, factorIds };
 }
 
 export function WeatherFieldControl({
@@ -374,18 +317,29 @@ export function WeatherFieldControl({
   // fetch-in-progress state.
   const primaryLive = effectiveHour >= 0 && effectiveHour <= MAX_FORECAST_HOURS;
 
+  // Only one translucent colour-fill factor shows at a time (stacking two
+  // would be unreadable) — the first non-isobar one in the list. Isobar
+  // factors (pressure) draw unfilled lines instead, which read fine layered
+  // over another factor's colour field, so they always render regardless of
+  // list position — e.g. pressure isobars stay visible together with wind,
+  // waves, swell, etc.
+  const firstFillFactorId = factorIds.find((id) => !getFieldFactor(id)?.isobar);
+
   return (
     <>
       {on &&
-        factorIds.map((id, i) => (
-          <WeatherFieldLayer
-            key={id}
-            factorId={id}
-            showField={i === 0}
-            hour={effectiveHour}
-            sampleOverride={sampleOverrides?.[id]}
-          />
-        ))}
+        factorIds.map((id) => {
+          const isIsobar = getFieldFactor(id)?.isobar ?? false;
+          return (
+            <WeatherFieldLayer
+              key={id}
+              factorId={id}
+              showField={isIsobar || id === firstFillFactorId}
+              hour={effectiveHour}
+              sampleOverride={sampleOverrides?.[id]}
+            />
+          );
+        })}
       <ControlPortal position={position}>
         <button
           type="button"

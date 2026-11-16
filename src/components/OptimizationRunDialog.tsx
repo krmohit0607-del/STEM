@@ -1,22 +1,26 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { imoForVoyage, useVessels } from '../data/vessels';
+import { useSelectedLegNo } from '../data/selectedLeg';
 import { useActiveSimRoute } from '../data/routeSimulatorStore';
 import {
-  computeRouteMetrics,
   DEFAULT_MARKET_FACTORS,
   OPTIMIZATION_SCENARIOS,
   SCENARIO_BY_ID,
   scenarioColor,
-  generateOptimizedRoute,
   haversineNM,
   pathDistanceNm,
   type LatLon,
   type OptimizedRoute,
 } from '../data/routeMetrics';
-import { optimizationApi, type OptimizationRestrictedAreaDto } from '../api/optimizationApi';
+import {
+  optimizationApi,
+  type OptimizationRestrictedAreaDto,
+  type OptimizationRunResultApiDto,
+} from '../api/optimizationApi';
 import { addOptimizationResults, requestPanelView } from '../data/optimizationStore';
 import { readSavedRoutesForVoyage } from '../data/savedRoutesStore';
 import { appendRouteHistory, type RouteHistoryCriteria } from '../data/routeHistoryStore';
@@ -25,7 +29,11 @@ import { saveHistoryWeatherGrids } from '../data/routeSnapshotsStore';
 import { loadLimitsFor } from '../data/limitsConstraints';
 import { getEffectiveAreaConstraints, type AreaConstraint } from '../data/areaConstraints';
 import { useVesselPosition } from '../data/vesselPosition';
+import { loadOpsRecap } from '../data/opsRecap';
+import { buildOperatingProfiles } from '../data/optimizationProfiles';
+import { addNotification } from '../data/workflow';
 import { useRouteReportMarkers } from '../data/routeReportMarkers';
+import { normalizeLongitude, wrapLongitudeNear } from '../data/antimeridian';
 
 /**
  * Optimization run dialog — pick a route (from the routes available in the
@@ -83,7 +91,6 @@ interface RouteOption {
 }
 
 const CUSTOM_SIMULATION_ID = 'custom-simulation';
-const CUSTOM_SIMULATION_COLOR = '#f97316';
 
 const p2 = (n: number) => String(n).padStart(2, '0');
 function toLocalInput(d: Date): string {
@@ -102,6 +109,69 @@ function safeDate(value: string | undefined | null): Date | null {
   if (!value) return null;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Choices for each ranking weight (0 = ignore, 1 = normal). */
+const IMPORTANCE_LEVELS = [
+  { value: '0', text: '0 \u2013 Ignore' },
+  { value: '1', text: '1 \u2013 Normal' },
+  { value: '2', text: '2' },
+  { value: '3', text: '3 \u2013 Important' },
+  { value: '4', text: '4' },
+  { value: '5', text: '5 \u2013 High' },
+  { value: '6', text: '6' },
+  { value: '7', text: '7' },
+  { value: '8', text: '8' },
+  { value: '9', text: '9' },
+  { value: '10', text: '10 \u2013 Highest' },
+] as const;
+
+const WEIGHT_FIELDS = [
+  { key: 'time', label: 'Importance: arrival time', hint: 'How much a shorter voyage counts when ranking the results. 1 = normal, 0 = ignore.' },
+  { key: 'fuel', label: 'Importance: fuel used', hint: 'How much lower fuel use counts when ranking the results. 1 = normal, 0 = ignore.' },
+  { key: 'cost', label: 'Importance: total cost', hint: 'How much a lower total cost counts when ranking the results. 1 = normal, 0 = ignore.' },
+  { key: 'emissions', label: 'Importance: CO₂ emissions', hint: 'How much lower CO₂ emissions count when ranking the results. 1 = normal, 0 = ignore.' },
+  { key: 'weather', label: 'Importance: avoiding bad weather', hint: 'How much less exposure to rough weather counts when ranking the results. 1 = normal, 0 = ignore.' },
+] as const;
+
+interface StartAnchor {
+  source: 'none' | 'report' | 'ais';
+  sourceLabel: string;
+  startVertexIndex: number;
+  startDateTimeIso: string | undefined;
+  anchorPos: LatLon | null;
+}
+
+/** Dead reckoning is only trusted for a fix up to this old. */
+const MAX_DEAD_RECKONING_HOURS = 72;
+
+/**
+ * Advance `distanceNm` along `path` starting at `from`, whose next route vertex
+ * is `nextIdx`. Returns the new position and the index of the next vertex ahead,
+ * or `null` when the distance runs past the end of the route.
+ */
+function advanceAlongPath(
+  path: LatLon[],
+  from: LatLon,
+  nextIdx: number,
+  distanceNm: number,
+): { pos: LatLon; nextIdx: number } | null {
+  let pos = from;
+  let idx = nextIdx;
+  let remaining = distanceNm;
+  while (idx < path.length) {
+    const target = path[idx];
+    const leg = haversineNM(pos[0], pos[1], target[0], target[1]);
+    if (remaining <= leg) {
+      const fraction = leg > 0 ? remaining / leg : 0;
+      const dLon = ((target[1] - pos[1] + 540) % 360) - 180;
+      return { pos: [pos[0] + (target[0] - pos[0]) * fraction, pos[1] + dLon * fraction], nextIdx: idx };
+    }
+    remaining -= leg;
+    pos = target;
+    idx += 1;
+  }
+  return null;
 }
 
 /** Closest distance (NM) from `pos` to any vertex of `path`. */
@@ -137,10 +207,17 @@ function gatherRestrictedAreasForCorridor(
   const maxLat = Math.max(...path.map((p) => p[0])) + pad;
   const minLng = Math.min(...path.map((p) => p[1])) - pad;
   const maxLng = Math.max(...path.map((p) => p[1])) + pad;
+  // `path` is on the same continuous numberline as the map rendering (e.g.
+  // -223 instead of 137 once a route crosses the dateline), but every stored
+  // area constraint ring is canonical (-180..180) — wrap each ring point
+  // near the path's own longitude before comparing, or a dateline-crossing
+  // corridor would silently match zero zones on the far side.
+  const lonAnchor = path[0][1];
 
   const ringOverlapsBbox = (ring: [number, number][]): boolean => {
     for (const [lat, lng] of ring) {
-      if (lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng) return true;
+      const wrappedLng = wrapLongitudeNear(lng, lonAnchor);
+      if (lat >= minLat && lat <= maxLat && wrappedLng >= minLng && wrappedLng <= maxLng) return true;
     }
     return false;
   };
@@ -156,7 +233,7 @@ function gatherRestrictedAreasForCorridor(
     .map((c) => ({
       id: c.id,
       zoneType: c.zoneType,
-      rings: c.rings,
+      rings: c.rings.map((ring) => ring.map(([lat, lng]): [number, number] => [lng, lat])),
       rpmMin: c.rpmMin ? Number(c.rpmMin) : undefined,
       rpmMax: c.rpmMax ? Number(c.rpmMax) : undefined,
       speedMaxKn: metersPerSecToKnots(c.speedMax),
@@ -204,6 +281,8 @@ export function OptimizationRunDialog({
 }) {
   const l = useL();
   const voyage = useSelectedVoyage();
+  const vesselImo = imoForVoyage(voyage, useVessels());
+  const selectedLegNo = useSelectedLegNo();
   const vesselPos = useVesselPosition();
   const reportMarkers = useRouteReportMarkers();
   const t = (key: string, fallback: string) => {
@@ -212,6 +291,7 @@ export function OptimizationRunDialog({
   };
 
   const activeRoute = useActiveSimRoute();
+  const { loadCondition, profiles: operatingProfiles } = buildOperatingProfiles(voyage, selectedLegNo);
   const [routeKey, setRouteKey] = useState('');
   const [scenarioIds, setScenarioIds] = useState<string[]>([OPTIMIZATION_SCENARIOS[5].id]);
   const [hire, setHire] = useState(String(DEFAULT_MARKET_FACTORS.hirePerDay));
@@ -222,8 +302,23 @@ export function OptimizationRunDialog({
   const [targetEta, setTargetEta] = useState(() =>
     toLocalInput(new Date(Date.now() + 7 * 86400_000)),
   );
+  const [arrivalRule, setArrivalRule] = useState<'ON' | 'BETWEEN' | 'BEFORE' | 'AFTER'>('ON');
+  const [arrivalWindowEnd, setArrivalWindowEnd] = useState(() =>
+    toLocalInput(new Date(Date.now() + 8 * 86400_000)),
+  );
   const [savedVersion, setSavedVersion] = useState(0);
-  const [runIndex, setRunIndex] = useState(0);
+  const [runError, setRunError] = useState('');
+  const [running, setRunning] = useState(false);
+  const [progressPct, setProgressPct] = useState(0);
+  const jobIdRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   /** Which last-known position to resume the optimization from — the
    *  Master's validated Tracksheet report, or the last received AIS
    *  position — picked explicitly so the user can see and choose between
@@ -241,6 +336,13 @@ export function OptimizationRunDialog({
   const [customDisplacement, setCustomDisplacement] = useState('');
   const [customGm, setCustomGm] = useState('');
   const [customEcaPct, setCustomEcaPct] = useState('8');
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [rollPeriod, setRollPeriod] = useState('');
+  const [reserveVlsfo, setReserveVlsfo] = useState('');
+  const [reserveLsmgo, setReserveLsmgo] = useState('');
+  const [weights, setWeights] = useState({ time: '1', fuel: '1', cost: '1', emissions: '1', weather: '1' });
+  const [solverLimit, setSolverLimit] = useState('90');
+  const [includeEnsemble, setIncludeEnsemble] = useState(true);
 
   useEffect(() => {
     if (open) setSavedVersion((v) => v + 1);
@@ -328,9 +430,11 @@ export function OptimizationRunDialog({
   const selected = options.find((o) => o.key === routeKey) ?? null;
   const isSpecificEta = scenarioIds.includes('specific-eta');
   const hasCustomSimulation = scenarioIds.includes(CUSTOM_SIMULATION_ID);
+  const voyageInPort = /in.?port|at.?berth|loading|discharging|anchorage/i.test(voyage?.status ?? '');
+  const voyageAtSea = /at.?sea|underway|sailing/i.test(voyage?.status ?? '');
   const allSelected = scenarioIds.length === OPTIMIZATION_SCENARIOS.length;
 
-  function latestReportAnchor(): { pos: LatLon; sourceLabel: string; dateTimeIso?: string } | null {
+  function latestReportAnchor(): { pos: LatLon; sourceLabel: string; dateTimeIso?: string; speedKts?: number | null; isDefault?: boolean } | null {
     const nonInterpolated = reportMarkers.filter((m) => !m.isInterpolated);
     if (nonInterpolated.length === 0) return null;
     let best = nonInterpolated[nonInterpolated.length - 1];
@@ -344,12 +448,16 @@ export function OptimizationRunDialog({
     }
     return {
       pos: [best.pos[0], best.pos[1]],
-      sourceLabel: best.dateTimeText ? `Last report (${best.dateTimeText})` : 'Last report position',
+      sourceLabel: best.isDefault
+        ? 'Planned departure (default Tracksheet position)'
+        : best.dateTimeText ? `Last report (${best.dateTimeText})` : 'Last report position',
       dateTimeIso: best.dateTimeIso,
+      speedKts: best.speedKts,
+      isDefault: best.isDefault,
     };
   }
 
-  function aisAnchor(): { pos: LatLon; sourceLabel: string; dateTimeIso?: string } | null {
+  function aisAnchor(): { pos: LatLon; sourceLabel: string; dateTimeIso?: string; speedKts?: number | null } | null {
     if (!vesselPos) return null;
     return {
       pos: [vesselPos.lat, vesselPos.lon],
@@ -363,6 +471,8 @@ export function OptimizationRunDialog({
     source: 'report' | 'ais';
     sourceLabel: string;
     dateTimeIso?: string;
+    speedKts?: number | null;
+    isDefault?: boolean;
   } | null {
     const report = latestReportAnchor();
     const ais = aisAnchor();
@@ -387,28 +497,60 @@ export function OptimizationRunDialog({
     return bestIdx;
   }
 
-  const startAnchor = useMemo(() => {
-    if (!selected || selected.path.length < 2) {
-      return {
-        source: 'none' as const,
-        sourceLabel: 'From departure',
-        startVertexIndex: 0,
-        startDateTimeIso: undefined as string | undefined,
-        anchorPos: null as LatLon | null,
-      };
-    }
+  /**
+   * Where the re-optimization starts. At sea the last report is usually older
+   * than "now", so when the report carries a speed the position is advanced
+   * along the route (dead reckoning) and the ETD becomes the current time; the
+   * AIS position has no speed, so it is used as reported.
+   */
+  const buildStartAnchor = (nowMs: number): StartAnchor => {
+    const none = (sourceLabel: string): StartAnchor => ({
+      source: 'none',
+      sourceLabel,
+      startVertexIndex: 0,
+      startDateTimeIso: undefined,
+      anchorPos: null,
+    });
+    if (voyageInPort) return none('From first waypoint');
+    if (!selected || selected.path.length < 2) return none('From departure');
     const anchor = resolveAnchor();
-    if (!anchor) {
-      return {
-        source: 'none' as const,
-        sourceLabel: 'From departure',
-        startVertexIndex: 0,
-        startDateTimeIso: undefined as string | undefined,
-        anchorPos: null as LatLon | null,
-      };
-    }
+    if (!anchor) return none('From departure');
+
     const idx = nearestPathVertexIndex(selected.path, anchor.pos);
     const startVertexIndex = Math.min(Math.max(0, idx), selected.path.length - 2);
+    // The vessel has not reported yet: it is still at the first waypoint, so it cannot leave before now.
+    if (anchor.isDefault) {
+      const plannedMs = anchor.dateTimeIso ? Date.parse(anchor.dateTimeIso) : Number.NaN;
+      return {
+        source: 'report',
+        sourceLabel: anchor.sourceLabel,
+        startVertexIndex,
+        startDateTimeIso: new Date(Number.isFinite(plannedMs) ? Math.max(plannedMs, nowMs) : nowMs).toISOString(),
+        anchorPos: anchor.pos,
+      };
+    }
+    const fixMs = anchor.dateTimeIso ? Date.parse(anchor.dateTimeIso) : Number.NaN;
+    const elapsedH = Number.isFinite(fixMs) ? (nowMs - fixMs) / 3_600_000 : Number.NaN;
+    const speed = anchor.speedKts ?? 0;
+    if (
+      anchor.source === 'report' &&
+      speed >= 0.5 &&
+      speed <= 30 &&
+      Number.isFinite(elapsedH) &&
+      elapsedH >= 0.25 &&
+      elapsedH <= MAX_DEAD_RECKONING_HOURS
+    ) {
+      const advanced = advanceAlongPath(selected.path, anchor.pos, startVertexIndex + 1, speed * elapsedH);
+      if (advanced) {
+        return {
+          source: anchor.source,
+          sourceLabel: `${anchor.sourceLabel} \u00b7 dead-reckoned +${elapsedH.toFixed(1)} h at ${speed.toFixed(1)} kn`,
+          startVertexIndex: Math.min(Math.max(0, advanced.nextIdx - 1), selected.path.length - 2),
+          startDateTimeIso: new Date(nowMs).toISOString(),
+          anchorPos: advanced.pos,
+        };
+      }
+    }
     return {
       source: anchor.source,
       sourceLabel: anchor.sourceLabel,
@@ -416,8 +558,13 @@ export function OptimizationRunDialog({
       startDateTimeIso: anchor.dateTimeIso,
       anchorPos: anchor.pos,
     };
+  };
+
+  const startAnchor = useMemo(
+    () => buildStartAnchor(Date.now()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, reportMarkers, vesselPos, anchorChoice]);
+    [selected, reportMarkers, vesselPos, anchorChoice, voyageInPort],
+  );
 
   /** Both candidate anchors (independent of which one is currently chosen),
    *  so the UI can show both side by side with their own date/time + position. */
@@ -478,7 +625,9 @@ export function OptimizationRunDialog({
   const allSelectedNow = scenarioIds.length === scenarioOptions.length;
 
   const run = async () => {
-    if (!selected || selected.path.length < 2 || scenarioIds.length === 0) return;
+    if (running || !selected || selected.path.length < 2 || scenarioIds.length === 0) return;
+    // Recompute at click time so an at-sea start is advanced to "now", not to when the dialog opened.
+    const startAnchor = buildStartAnchor(Date.now());
     const parsedEtd = startAnchor.startDateTimeIso ? new Date(startAnchor.startDateTimeIso) : new Date(etd);
     // Guard against a cleared/invalid ETD input — never let an Invalid Date
     // reach `.toISOString()` further down.
@@ -496,192 +645,201 @@ export function OptimizationRunDialog({
     const customRpmMaxN = Number(customRpmMax);
     const customMcrMinN = Number(customMcrMin);
     const customMcrMaxN = Number(customMcrMax);
-    const customDraftN = Number(customDraft);
-    const customDisplacementN = Number(customDisplacement);
-    const customGmN = Number(customGm);
     const customEcaFraction = Math.max(0, Math.min(1, (Number(customEcaPct) || 8) / 100));
 
     const startIndex = startAnchor.startVertexIndex;
-    const fixedPrefix = selected.path.slice(0, startIndex + 1);
-    const remainingPath = selected.path.slice(startIndex);
+    const fixedPrefix = startAnchor.anchorPos
+      ? [...selected.path.slice(0, startIndex), startAnchor.anchorPos]
+      : selected.path.slice(0, startIndex + 1);
+    const remainingPath = startAnchor.anchorPos
+      ? [startAnchor.anchorPos, ...selected.path.slice(startIndex + 1)]
+      : selected.path.slice(startIndex);
     if (remainingPath.length < 2) return;
 
-    // Real scenarios (everything but Custom Simulation) run through the
-    // native backend engine (weather/zone-aware Dijkstra-over-DAG — see
-    // `RouteOptimizationEngine` on the backend) in a single call; Custom
-    // Simulation keeps the client-side synthetic generator below since its
-    // RPM/MCR/draft/GM sliders aren't modelled server-side yet. If the API
-    // call fails (e.g. vessel not found) every scenario silently falls back
-    // to the synthetic generator so the dialog stays usable.
-    const realScenarioIds = scenarioIds.filter((sid) => sid !== CUSTOM_SIMULATION_ID);
+    setRunError('');
+    if (!voyage) return;
+    if (voyageAtSea && startAnchor.source === 'none') {
+      setRunError('No vessel report or AIS position is available. The at-sea route was not changed.');
+      return;
+    }
+    const targetEtaForApi = isSpecificEta ? safeDate(targetEta) : null;
+    const arrivalWindowEndForApi = isSpecificEta && arrivalRule === 'BETWEEN' ? safeDate(arrivalWindowEnd) : null;
+    const customRtaForApi = hasCustomSimulation && customRta ? safeDate(customRta) : null;
+    if (hasCustomSimulation && customRta && (!customRtaForApi || customRtaForApi <= etdDate)) {
+      setRunError('The Custom Simulation RTA must be a valid date and time after the departure time.');
+      return;
+    }
+    const optionalNumber = (value: string): number | null => {
+      const parsed = Number(value);
+      return value.trim() !== '' && Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+    const weightOf = (value: string): number => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1;
+    };
+    // The voyage's own weather margin (Operations ETA plan) gives the latest-ETA allowance.
+    const etaPlan = loadOpsRecap(voyage?.id)?.etaPlan as { weatherMargin?: string } | undefined;
+    const marginParsed = Number(etaPlan?.weatherMargin);
+    const voyageWeatherMargin = Number.isFinite(marginParsed) && marginParsed > 0 && marginParsed < 100 ? marginParsed : null;
+    if (isSpecificEta && !targetEtaForApi) {
+      setRunError('Enter a valid arrival date and time.');
+      return;
+    }
+    if (arrivalRule === 'BETWEEN' && (!arrivalWindowEndForApi || arrivalWindowEndForApi <= targetEtaForApi!)) {
+      setRunError('The BETWEEN window end must be later than its start.');
+      return;
+    }
+    const operatingProfilesForApi = operatingProfiles.map((profile) =>
+      hasCustomSimulation && profile.mode === 'CUSTOM'
+        ? { ...profile, speedKn: customSpeedN, dailyCons1Mt: customConsN }
+        : profile,
+    );
     const backendResults: Record<string, OptimizedRoute> = {};
-    if (realScenarioIds.length > 0 && voyage?.imo) {
-      try {
-        const targetEtaForApi = isSpecificEta ? safeDate(targetEta) : null;
-        const maxDeviationNm = 60;
-        const restrictedAreas = gatherRestrictedAreasForCorridor(remainingPath, voyage.id, maxDeviationNm);
-        const apiResult = await optimizationApi.run({
-          voyageId: voyage.id,
-          vesselImo: voyage.imo,
-          scenarios: realScenarioIds,
-          etdUtc: etdDate.toISOString(),
-          originLat: remainingPath[0][0],
-          originLng: remainingPath[0][1],
-          destLat: remainingPath[remainingPath.length - 1][0],
-          destLng: remainingPath[remainingPath.length - 1][1],
-          loadCondition: 'Laden',
-          hireRatePerDayUsd: market.hirePerDay,
-          foPriceUsdPerMt: market.foCost,
-          goPriceUsdPerMt: market.goCost,
-          euaPriceUsdPerTonneCo2: market.euaCost,
-          targetEtaUtc: targetEtaForApi ? targetEtaForApi.toISOString() : null,
-          maxDeviationNm,
-          restrictedAreas,
-        });
-        for (const s of apiResult.scenarios) {
-          if (!s.isFeasible || s.waypoints.length < 2) continue;
-          backendResults[s.scenario] = {
-            id: `opt-${s.scenario}-${apiResult.optimizationRunId}`,
-            scenarioId: s.scenario,
-            name: SCENARIO_BY_ID[s.scenario]?.label ?? s.scenario,
-            color: scenarioColor(s.scenario),
-            path: s.waypoints.map((w): LatLon => [w.lat, w.lng]),
-            metrics: {
-              distanceNm: s.distanceNm,
-              ecaDistanceNm: s.ecaDistanceNm,
-              speedKn: s.averageSpeedKn,
-              durationH: s.timeToGoHours,
-              ecaDurationH: s.ecaTimeToGoHours,
-              fuelTons: s.meFuelRequiredToGoMt,
-              ecaFuelTons: s.ecaFuelRequiredToGoMt,
-              fuelCost: s.fuelCostToGoUsd,
-              hireCost: s.timeCostToGoUsd,
-              co2Tons: s.meCo2EmissionsToGoMt,
-              euaAllowanceTons: s.meCo2EmissionsToGoMt,
-              euaCost: s.emissionsCostToGoUsd,
-              totalCost: s.totalCostToGoUsd,
-              etd: new Date(s.etdUtc),
-              eta: new Date(s.etaUtc),
-              legEtas: [],
-            },
-          };
+    const maxDeviationNm = 60;
+    const restrictedAreas = gatherRestrictedAreasForCorridor(remainingPath, voyage.id, maxDeviationNm);
+    let apiResult: OptimizationRunResultApiDto | null = null;
+    cancelRequestedRef.current = false;
+    setRunning(true);
+    setProgressPct(0);
+    try {
+      const started = await optimizationApi.startJob({
+        voyageId: voyage.id,
+        vesselImo,
+        vesselName: voyage.vessel,
+        deadweightMt: Number(String(voyage.dwt ?? '').replace(/[^0-9.]/g, '')) || undefined,
+        scenarios: scenarioIds,
+        etdUtc: etdDate.toISOString(),
+        originLat: remainingPath[0][0],
+        originLng: normalizeLongitude(remainingPath[0][1]),
+        destLat: remainingPath[remainingPath.length - 1][0],
+        destLng: normalizeLongitude(remainingPath[remainingPath.length - 1][1]),
+        // The map-rendering path keeps longitude on a continuous numberline
+        // across the dateline (e.g. -223 instead of 137) so the polyline
+        // never jumps; the backend expects canonical WGS84 GeoJSON
+        // coordinates (-180..180) and rejects anything outside that range.
+        routeCoordinates: remainingPath.map(([lat, lng]): [number, number] => [normalizeLongitude(lng), lat]),
+        loadCondition,
+        operatingProfiles: operatingProfilesForApi,
+        hireRatePerDayUsd: market.hirePerDay,
+        foPriceUsdPerMt: market.foCost,
+        goPriceUsdPerMt: market.goCost,
+        euaPriceUsdPerTonneCo2: market.euaCost,
+        arrivalRule: isSpecificEta ? arrivalRule : 'ON',
+        targetEtaUtc: targetEtaForApi ? targetEtaForApi.toISOString() : null,
+        arrivalWindowEndUtc: arrivalWindowEndForApi ? arrivalWindowEndForApi.toISOString() : null,
+        customRpmMin: Number.isFinite(customRpmMinN) ? customRpmMinN : null,
+        customRpmMax: Number.isFinite(customRpmMaxN) ? customRpmMaxN : null,
+        customMcrMin: Number.isFinite(customMcrMinN) ? customMcrMinN : null,
+        customMcrMax: Number.isFinite(customMcrMaxN) ? customMcrMaxN : null,
+        customDraftM: hasCustomSimulation ? optionalNumber(customDraft) : null,
+        customDisplacementMt: hasCustomSimulation ? optionalNumber(customDisplacement) : null,
+        customGmM: hasCustomSimulation ? optionalNumber(customGm) : null,
+        customRtaUtc: customRtaForApi ? customRtaForApi.toISOString() : null,
+        rollPeriodSec: optionalNumber(rollPeriod),
+        weatherMarginPct: voyageWeatherMargin,
+        minReserveVlsfoMt: optionalNumber(reserveVlsfo),
+        minReserveLsmgoMt: optionalNumber(reserveLsmgo),
+        solverTimeLimitSeconds: optionalNumber(solverLimit),
+        includeEnsemble,
+        rankingWeights: {
+          time: weightOf(weights.time),
+          fuel: weightOf(weights.fuel),
+          cost: weightOf(weights.cost),
+          emissions: weightOf(weights.emissions),
+          weather: weightOf(weights.weather),
+        },
+        maxDeviationNm,
+        restrictedAreas,
+      });
+      jobIdRef.current = started.jobId;
+      let status = started;
+      let pollFailures = 0;
+      while (status.status === 'Queued' || status.status === 'Running') {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (cancelRequestedRef.current || !mountedRef.current) return;
+        try {
+          status = await optimizationApi.getJob(started.jobId);
+          pollFailures = 0;
+        } catch (pollError) {
+          pollFailures += 1;
+          if (pollFailures >= 3) throw pollError;
+          continue;
         }
-      } catch {
-        // API unavailable/vessel not found — fall through to the synthetic generator for every scenario.
+        setProgressPct(status.percent);
       }
+      if (status.status === 'Cancelled') return;
+      if (status.status !== 'Completed' || !status.result) {
+        setRunError(status.error || 'The optimization did not complete.');
+        return;
+      }
+      apiResult = status.result;
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : 'The optimization API could not complete this run.');
+      return;
+    } finally {
+      jobIdRef.current = null;
+      if (mountedRef.current) setRunning(false);
+    }
+    if (!apiResult) return;
+
+    const infeasibleMessages: string[] = [];
+    for (const scenario of apiResult.scenarios) {
+      if (!scenario.isFeasible || scenario.waypoints.length < 2) {
+        infeasibleMessages.push(`${SCENARIO_BY_ID[scenario.scenario]?.label ?? scenario.scenario}: ${scenario.infeasibleReason || 'No feasible route was returned.'}`);
+        continue;
+      }
+      backendResults[scenario.scenario] = {
+        id: `opt-${scenario.scenario}-${apiResult.optimizationRunId}`,
+        scenarioId: scenario.scenario,
+        name: scenario.scenario === CUSTOM_SIMULATION_ID ? 'Custom Simulation' : SCENARIO_BY_ID[scenario.scenario]?.label ?? scenario.scenario,
+        color: scenarioColor(scenario.scenario),
+        path: scenario.waypoints.map((waypoint): LatLon => [waypoint.lat, waypoint.lng]),
+        metrics: {
+          distanceNm: scenario.distanceNm,
+          ecaDistanceNm: scenario.ecaDistanceNm,
+          speedKn: scenario.averageSpeedKn,
+          durationH: scenario.timeToGoHours,
+          ecaDurationH: scenario.ecaTimeToGoHours,
+          fuelTons: scenario.meFuelRequiredToGoMt,
+          ecaFuelTons: scenario.ecaFuelRequiredToGoMt,
+          fuelCost: scenario.fuelCostToGoUsd,
+          hireCost: scenario.timeCostToGoUsd,
+          co2Tons: scenario.meCo2EmissionsToGoMt,
+          euaAllowanceTons: scenario.meCo2EmissionsToGoMt,
+          euaCost: scenario.emissionsCostToGoUsd,
+          totalCost: scenario.totalCostToGoUsd,
+          etd: new Date(scenario.etdUtc),
+          eta: new Date(scenario.etaUtc),
+          legEtas: [],
+        },
+        analysis: scenario.analysis,
+        warnings: scenario.warnings,
+        runId: apiResult.optimizationRunId,
+      };
     }
 
-    const buildForScenario = (sid: string, idx: number) => {
-      const isCustom = sid === CUSTOM_SIMULATION_ID;
-
-      // Real backend result available for this scenario — use it directly
-      // (still splicing in the fixed prefix for a daily-re-optimization-style
-      // partial run) instead of the synthetic generator below.
-      const backendRoute = !isCustom ? backendResults[sid] : undefined;
-      if (backendRoute) {
-        const mergedPath =
-          fixedPrefix.length > 1 ? [...fixedPrefix, ...backendRoute.path.slice(1)] : backendRoute.path;
-        const mergedMetrics =
-          fixedPrefix.length > 1
-            ? computeRouteMetrics({
-                path: mergedPath,
-                speedKn: backendRoute.metrics.speedKn,
-                etd: etdDate,
-                market,
-                consPerDay:
-                  backendRoute.metrics.durationH > 0
-                    ? backendRoute.metrics.fuelTons / Math.max(1e-6, backendRoute.metrics.durationH / 24)
-                    : 22,
-                ecaFraction:
-                  backendRoute.metrics.distanceNm > 0
-                    ? backendRoute.metrics.ecaDistanceNm / backendRoute.metrics.distanceNm
-                    : undefined,
-              })
-            : backendRoute.metrics;
-        return { ...backendRoute, path: mergedPath, metrics: mergedMetrics };
-      }
-
-      let customSpeedAdjusted = customSpeedN;
-      if (Number.isFinite(customMcrMinN) && Number.isFinite(customMcrMaxN) && customMcrMaxN > 0) {
-        const mcrMid = (customMcrMinN + customMcrMaxN) / 2;
-        customSpeedAdjusted *= Math.max(0.7, Math.min(1.15, mcrMid / 85));
-      }
-      if (Number.isFinite(customRpmMinN) && Number.isFinite(customRpmMaxN) && customRpmMaxN > customRpmMinN) {
-        const rpmSpan = customRpmMaxN - customRpmMinN;
-        customSpeedAdjusted *= Math.max(0.82, Math.min(1.05, rpmSpan / 35));
-      }
-      if (Number.isFinite(customDraftN) && customDraftN > 0) {
-        customSpeedAdjusted *= Math.max(0.8, 1 - customDraftN / 120);
-      }
-      if (Number.isFinite(customDisplacementN) && customDisplacementN > 0) {
-        customSpeedAdjusted *= Math.max(0.82, 1 - customDisplacementN / 800000);
-      }
-      if (Number.isFinite(customGmN) && customGmN > 0 && customGmN < 0.8) {
-        customSpeedAdjusted *= 0.92;
-      }
-      customSpeedAdjusted = Math.max(6, Math.min(24, customSpeedAdjusted));
-
-      const baseScenarioId = isCustom
-        ? (customRta ? 'specific-eta' : 'balanced')
-        : sid;
-
-      // Waypoint-level RPM/MCR overrides (Waypoint details panel) take
-      // priority over the Limits & Constraints-derived custom speed for the
-      // re-optimized portion of the route.
-      const cpSpeedKn =
-        waypointOverrideMatch?.speedKn ?? (isCustom ? customSpeedAdjusted : 12);
-
-      const generated = generateOptimizedRoute({
-        basePath: remainingPath,
-        baseName: selected.label,
-        scenarioId: baseScenarioId,
-        market,
-        etd: etdDate,
-        cpSpeedKn,
-        cpConsPerDay: isCustom ? customConsN : 22,
-        // Guard against a cleared/incomplete date input — an Invalid Date
-        // here would silently poison the resulting route's ETA (NaN math),
-        // which later throws when formatted, so fall back to `null`.
-        targetEta: isCustom && customRta
-          ? safeDate(customRta)
-          : sid === 'specific-eta'
-            ? safeDate(targetEta)
-            : null,
-        index: runIndex + idx,
-      });
-
-      const mergedPath =
-        fixedPrefix.length > 1 ? [...fixedPrefix, ...generated.path.slice(1)] : generated.path;
-
-      const derivedConsPerDay =
-        generated.metrics.durationH > 0
-          ? generated.metrics.fuelTons / Math.max(1e-6, generated.metrics.durationH / 24)
-          : isCustom
-            ? customConsN
-            : 22;
-
-      const mergedMetrics = computeRouteMetrics({
-        path: mergedPath,
-        speedKn: generated.metrics.speedKn,
-        etd: etdDate,
-        market,
-        consPerDay: derivedConsPerDay,
-        ecaFraction: isCustom ? customEcaFraction : undefined,
-      });
-
-      return {
-        ...generated,
-        scenarioId: sid,
-        name: isCustom ? 'Custom Simulation' : generated.name,
-        color: isCustom ? CUSTOM_SIMULATION_COLOR : generated.color,
-        path: mergedPath,
-        metrics: mergedMetrics,
-      };
-    };
-
-    // Generate one optimized route per selected scenario in a single run.
-    const newRoutes = scenarioIds.map((sid, i) => buildForScenario(sid, i));
-    setRunIndex((i) => i + scenarioIds.length);
+    const newRoutes = scenarioIds.flatMap((scenarioId) => {
+      const backendRoute = backendResults[scenarioId];
+      if (!backendRoute) return [];
+      const mergedPath = fixedPrefix.length > 1
+        ? [...fixedPrefix, ...backendRoute.path.slice(1)]
+        : backendRoute.path;
+      return [{ ...backendRoute, path: mergedPath }];
+    });
+    const notices = [...infeasibleMessages];
+    for (const scenario of apiResult.scenarios) {
+      if (!scenario.isFeasible) continue;
+      const label = SCENARIO_BY_ID[scenario.scenario]?.label ?? scenario.scenario;
+      (scenario.warnings ?? [])
+        .filter((warning) => /exceeds limit|above a vessel weather limit|waiting at the anchorage|too little observed/.test(warning))
+        .forEach((warning) => notices.push(`${label}: ${warning}`));
+    }
+    notices.forEach((notice) => addNotification(notice, 'Optimization'));
+    if (infeasibleMessages.length > 0) setRunError(infeasibleMessages.join(' '));
+    if (newRoutes.length === 0) {
+      if (infeasibleMessages.length === 0) setRunError('The optimization API returned no route results.');
+      return;
+    }
     const targetEtaDate = isSpecificEta ? safeDate(targetEta) : null;
     addOptimizationResults(newRoutes, {
       baseRouteName: selected.label,
@@ -720,6 +878,8 @@ export function OptimizationRunDialog({
       market,
       etd: etdDate.toISOString(),
       targetEta: targetEtaDate ? targetEtaDate.toISOString() : null,
+      arrivalRule: isSpecificEta ? arrivalRule : undefined,
+      arrivalWindowEnd: arrivalWindowEndForApi ? arrivalWindowEndForApi.toISOString() : null,
       customSimulation: hasCustomSimulation
         ? {
             speedKn: customSpeedN,
@@ -786,8 +946,18 @@ export function OptimizationRunDialog({
 
   if (!open) return null;
 
+  /** Closing while a job is running cancels it on the server too. */
+  const handleClose = () => {
+    if (running) {
+      cancelRequestedRef.current = true;
+      const jobId = jobIdRef.current;
+      if (jobId) void optimizationApi.cancelJob(jobId).catch(() => undefined);
+    }
+    onClose();
+  };
+
   return createPortal(
-    <div className="fv-opt-pop__overlay" role="presentation" onClick={onClose}>
+    <div className="fv-opt-pop__overlay" role="presentation" onClick={handleClose}>
       <div
         className="fv-opt-pop"
         role="dialog"
@@ -803,7 +973,7 @@ export function OptimizationRunDialog({
           <button
             type="button"
             className="fv-opt-pop__close"
-            onClick={onClose}
+            onClick={handleClose}
             aria-label={t('close', 'Close')}
           >
             <i className="fas fa-xmark" aria-hidden="true" />
@@ -811,6 +981,7 @@ export function OptimizationRunDialog({
         </header>
 
         <div className="fv-opt-pop__body">
+          {runError && <p className="fv-opt-pop__note fv-opt-pop__note--error" role="alert">{runError}</p>}
           <label className="fv-opt-pop__field">
             <span>{t('selectRoute', 'Route (from Route Simulator)')}</span>
             {options.length === 0 ? (
@@ -991,15 +1162,88 @@ export function OptimizationRunDialog({
           {isSpecificEta && (
             <div className="fv-opt-pop__grid">
               <label className="fv-opt-pop__field">
-                <span>{t('targetEta', 'Target ETA')}</span>
+                <span>Arrival timing</span>
+                <select value={arrivalRule} onChange={(e) => setArrivalRule(e.target.value as typeof arrivalRule)}>
+                  <option value="ON">ON</option>
+                  <option value="BETWEEN">BETWEEN</option>
+                  <option value="BEFORE">BEFORE</option>
+                  <option value="AFTER">AFTER</option>
+                </select>
+              </label>
+              <label className="fv-opt-pop__field">
+                <span>{arrivalRule === 'BETWEEN' ? 'Window starts' : arrivalRule === 'BEFORE' ? 'Arrive by' : arrivalRule === 'AFTER' ? 'Not before' : t('targetEta', 'Target ETA')}</span>
                 <input
                   type="datetime-local"
                   value={targetEta}
                   onChange={(e) => setTargetEta(e.target.value)}
                 />
               </label>
+              {arrivalRule === 'BETWEEN' && (
+                <label className="fv-opt-pop__field">
+                  <span>Window ends</span>
+                  <input
+                    type="datetime-local"
+                    value={arrivalWindowEnd}
+                    onChange={(e) => setArrivalWindowEnd(e.target.value)}
+                  />
+                </label>
+              )}
             </div>
           )}
+
+          <div className="fv-opt-pop__factors">
+            <button
+              type="button"
+              className="fv-opt-pop__factors-title"
+              onClick={() => setShowAdvanced((v) => !v)}
+              aria-expanded={showAdvanced}
+            >
+              <i className={`fas ${showAdvanced ? 'fa-chevron-down' : 'fa-chevron-right'}`} aria-hidden="true" /> More options (optional)
+            </button>
+            {showAdvanced && (
+              <div className="fv-opt-pop__grid">
+                <label className="fv-opt-pop__field" title="Time the ship takes to roll once, from the stability booklet. Used to warn about dangerous rolling in waves. Leave empty to skip this check.">
+                  <span>Ship roll time (seconds)</span>
+                  <input type="number" value={rollPeriod} onChange={(e) => setRollPeriod(e.target.value)} />
+                </label>
+                <label className="fv-opt-pop__field" title="The route must always keep at least this much VLSFO on board. Routes that would go below it are rejected. Leave empty for no minimum.">
+                  <span>Keep at least this much VLSFO (MT)</span>
+                  <input type="number" value={reserveVlsfo} onChange={(e) => setReserveVlsfo(e.target.value)} />
+                </label>
+                <label className="fv-opt-pop__field" title="The route must always keep at least this much LSMGO on board. Routes that would go below it are rejected. Leave empty for no minimum.">
+                  <span>Keep at least this much LSMGO (MT)</span>
+                  <input type="number" value={reserveLsmgo} onChange={(e) => setReserveLsmgo(e.target.value)} />
+                </label>
+                <label className="fv-opt-pop__field" title="The longest the optimizer may work on each scenario. If time runs out, you get the best quick result instead of the most detailed one.">
+                  <span>Maximum calculation time per scenario (seconds)</span>
+                  <input type="number" min="5" value={solverLimit} onChange={(e) => setSolverLimit(e.target.value)} />
+                </label>
+                <label className="fv-opt-pop__field" title="Re-runs each chosen route with different possible wind forecasts to show how much the arrival time and fuel could vary. Wind only; takes extra time.">
+                  <span>Check wind forecast uncertainty</span>
+                  <select value={includeEnsemble ? 'on' : 'off'} onChange={(e) => setIncludeEnsemble(e.target.value === 'on')}>
+                    <option value="on">Yes (wind only)</option>
+                    <option value="off">No</option>
+                  </select>
+                </label>
+                {WEIGHT_FIELDS.map(({ key, label, hint }) => (
+                  <label key={key} className="fv-opt-pop__field" title={hint}>
+                    <span>{label}</span>
+                    <select
+                      value={weights[key]}
+                      onChange={(e) => setWeights((prev) => ({ ...prev, [key]: e.target.value }))}
+                    >
+                      {IMPORTANCE_LEVELS.map(({ value, text }) => (
+                        <option key={value} value={value}>{text}</option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+                <p className="fv-opt-pop__note" style={{ gridColumn: '1 / -1' }}>
+                  The &ldquo;Importance&rdquo; levels (0 to 10) decide which result is listed first when comparing scenarios. 1 = normal, higher = more important, 0 = ignore. They do not change the routes themselves.
+                </p>
+              </div>
+            )}
+          </div>
 
           <div className="fv-opt-pop__factors">
             <span className="fv-opt-pop__factors-title">{t('marketFactors', 'Market factors')}</span>
@@ -1025,19 +1269,21 @@ export function OptimizationRunDialog({
         </div>
 
         <footer className="fv-opt-pop__foot">
-          <button type="button" className="fv-opt-pop__btn" onClick={onClose}>
+          <button type="button" className="fv-opt-pop__btn" onClick={handleClose}>
             {t('cancel', 'Cancel')}
           </button>
           <button
             type="button"
             className="fv-opt-pop__btn fv-opt-pop__btn--primary"
             onClick={run}
-            disabled={!selected || scenarioIds.length === 0}
+            disabled={running || !selected || scenarioIds.length === 0}
           >
-            <i className="fas fa-play" aria-hidden="true" />{' '}
-            {scenarioIds.length > 1
-              ? `${t('run', 'Run optimization')} (${scenarioIds.length})`
-              : t('run', 'Run optimization')}
+            <i className={running ? 'fas fa-spinner fa-spin' : 'fas fa-play'} aria-hidden="true" />{' '}
+            {running
+              ? `${t('optimizing', 'Optimizing')}\u2026 ${progressPct}%`
+              : scenarioIds.length > 1
+                ? `${t('run', 'Run optimization')} (${scenarioIds.length})`
+                : t('run', 'Run optimization')}
           </button>
         </footer>
       </div>

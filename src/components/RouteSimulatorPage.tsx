@@ -20,6 +20,7 @@ import { MapLayersControl, readOverlayLayers, type OverlayLayerId } from './MapL
 import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
+import { needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 
 /**
  * Route Simulator page — `/route-simulator`.
@@ -732,6 +733,9 @@ function RouteMap({
         bounds={MAP_BOUNDS}
         minZoom={2}
         maxZoom={10}
+        zoomSnap={0.25}
+        zoomDelta={0.5}
+        wheelPxPerZoomLevel={120}
         maxBounds={WORLD_PAN_BOUNDS}
         maxBoundsViscosity={1.0}
         worldCopyJump
@@ -747,13 +751,12 @@ function RouteMap({
 
         {routes.map((route) => {
           const isActive = route.id === activeRouteId;
-          const positions: LatLngExpression[] = route.path.map(
-            ([lat, lon]) => [lat, lon],
-          );
-          return (
+          const positions = unwrapRouteCoordinates(route.path);
+          const offsets = needsWorldCopies(positions) ? [-360, 0, 360] : [0];
+          return offsets.map((offset) => (
             <Polyline
-              key={`line-${route.id}`}
-              positions={positions}
+              key={`line-${route.id}-${offset}`}
+              positions={positions.map(([lat, lon]) => [lat, lon + offset] as LatLngExpression)}
               pathOptions={{
                 color: route.color,
                 weight: isActive ? 4 : 2.5,
@@ -762,19 +765,21 @@ function RouteMap({
               }}
               eventHandlers={{ click: () => onSelectRoute(route.id) }}
             />
-          );
+          ));
         })}
 
-        {routes.map((route) => {
+        {routes.flatMap((route) => {
           const isActive = route.id === activeRouteId;
           const routeProgress = progressById[route.id] ?? 0;
-          const pos = samplePath(route.path, routeProgress);
+          const path = unwrapRouteCoordinates(route.path);
+          const pos = samplePath(path, routeProgress);
           const icon = icons.get(route.id);
-          if (!icon) return null;
-          return (
+          if (!icon) return [];
+          const offsets = needsWorldCopies([pos]) ? [-360, 0, 360] : [0];
+          return offsets.map((offset) => (
             <Marker
-              key={`ship-${route.id}`}
-              position={pos}
+              key={`ship-${route.id}-${offset}`}
+              position={offsetPoint(pos, offset)}
               icon={isActive ? icon.active : icon.inactive}
               eventHandlers={{ click: () => onSelectRoute(route.id) }}
               zIndexOffset={isActive ? 1000 : 0}
@@ -789,7 +794,7 @@ function RouteMap({
                 {formatTooltip(route, param, routeProgress)}
               </Tooltip>
             </Marker>
-          );
+          ));
         })}
 
         <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />

@@ -14,24 +14,41 @@
  */
 
 import type { FieldSample } from '../weatherField';
-import type { LatLngBounds, WeatherGrid, WeatherProvider } from './types';
+import type { LatLngBounds, WeatherGrid } from './types';
 import { MAX_FORECAST_HOURS, MIN_FORECAST_HOURS } from './types';
-import { providerFor } from './registry';
 import { backendGridProvider } from './backendGridProvider';
 import { pruneExpiredGrids, readGrid, writeGrid } from './gridDb';
 
 const cache = new Map<string, WeatherGrid>();
 const pending = new Map<string, Promise<WeatherGrid | null>>();
+// Timestamp of the last failed/empty fetch per key — without this, every
+// redraw (e.g. once per animation frame during simulation playback) retries
+// a failing key immediately (since a settled promise is no longer "pending"
+// and nothing got cached), which can turn a single upstream rate-limit
+// response into a sustained retry storm that keeps the provider rate-limited
+// indefinitely instead of letting it recover.
+const failedAt = new Map<string, number>();
+const RETRY_COOLDOWN_MS = 60_000;
 
 // One-time, fire-and-forget cleanup of stale cross-session entries.
 void pruneExpiredGrids();
 
-/** Live/forecast data (hour >= 0) still goes through the normal provider
- *  registry; past dates (hour < 0) have no forecast to serve, so they're
- *  routed to the persistent backend tile cache instead. */
-function resolveProvider(factorId: string, hour: number): WeatherProvider | undefined {
-  if (hour < 0) return backendGridProvider;
-  return providerFor(factorId);
+/**
+ * Every hour — live/forecast and historical alike — is served by the
+ * backend's persistent, geographically fixed tile cache (see
+ * `backendGridProvider.ts` / `WeatherDataService.cs`), not a per-viewport
+ * direct fetch to the upstream API. A per-viewport fetch would resample a
+ * fresh, coarse grid every time the map pans/zooms even slightly, which —
+ * especially with only a handful of sample points spread over a wide
+ * viewport — makes the interpolated field jump between visibly different
+ * results for the same real weather on every pan (most noticeable right
+ * where a route crosses the antimeridian and world-copy panning is common).
+ * Fixed geographic tiles mean the same point always samples the same
+ * underlying data regardless of viewport, so the field stays continuous as
+ * the map moves.
+ */
+function resolveProvider() {
+  return backendGridProvider;
 }
 
 function keyFor(providerId: string, factorId: string, b: LatLngBounds, hour: number): string {
@@ -43,10 +60,12 @@ function keyFor(providerId: string, factorId: string, b: LatLngBounds, hour: num
  *  checking the cross-session IndexedDB cache so reopening the app doesn't
  *  re-fetch viewport/hour combos it already has on disk. */
 function ensureHourGrid(factorId: string, b: LatLngBounds, hour: number, onReady: () => void): void {
-  const provider = resolveProvider(factorId, hour);
+  const provider = resolveProvider();
   if (!provider) return;
   const key = keyFor(provider.id, factorId, b, hour);
   if (cache.has(key) || pending.has(key)) return;
+  const failedTs = failedAt.get(key);
+  if (failedTs !== undefined && Date.now() - failedTs < RETRY_COOLDOWN_MS) return;
   const p = readGrid(key)
     .then((stored) => {
       if (stored) {
@@ -57,11 +76,16 @@ function ensureHourGrid(factorId: string, b: LatLngBounds, hour: number, onReady
         if (g) {
           cache.set(key, g);
           void writeGrid(key, g, hour < 0);
+        } else {
+          failedAt.set(key, Date.now());
         }
         return g;
       });
     })
-    .catch(() => null)
+    .catch(() => {
+      failedAt.set(key, Date.now());
+      return null;
+    })
     .finally(() => {
       pending.delete(key);
       onReady();
@@ -77,7 +101,7 @@ function ensureHourGrid(factorId: string, b: LatLngBounds, hour: number, onReady
  * them.
  */
 export function ensureLiveData(factorId: string, b: LatLngBounds, hour: number, onReady: () => void): void {
-  if (!resolveProvider(factorId, hour)) return;
+  if (!resolveProvider()) return;
   const h0 = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS, Math.floor(hour)));
   const h1 = Math.min(MAX_FORECAST_HOURS, h0 + 1);
   ensureHourGrid(factorId, b, h0, onReady);
@@ -123,7 +147,7 @@ export function sampleLiveField(
   b: LatLngBounds,
   hour: number,
 ): FieldSample | null {
-  const provider = resolveProvider(factorId, hour);
+  const provider = resolveProvider();
   if (!provider) return null;
   const h0 = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS, Math.floor(hour)));
   const g0 = cache.get(keyFor(provider.id, factorId, b, h0));
@@ -146,7 +170,7 @@ export function sampleLiveField(
  * or `null` if the grid isn't loaded yet or reported no time.
  */
 export function getLiveDataTime(factorId: string, b: LatLngBounds, hour: number): string | null {
-  const provider = resolveProvider(factorId, hour);
+  const provider = resolveProvider();
   if (!provider) return null;
   const h0 = Math.max(MIN_FORECAST_HOURS, Math.min(MAX_FORECAST_HOURS, Math.floor(hour)));
   return cache.get(keyFor(provider.id, factorId, b, h0))?.time ?? null;

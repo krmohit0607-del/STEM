@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import { Marker, Polygon, Polyline, Popup, Tooltip, useMap } from 'react-leaflet';
 import L, { type ControlPosition } from 'leaflet';
 
 import { fetchActiveCyclones, type CycloneDto } from '../api/cyclonesApi';
+import { needsWorldCopies, offsetPoint, offsetPoints, wrapPointNear } from '../data/antimeridian';
 import { MAP_CONTROL_OPEN_EVENT, notifyMapControlOpen } from './mapControlEvents';
 
 /**
@@ -106,34 +107,46 @@ function ControlPortal({ position, children }: { position: ControlPosition; chil
 function CycloneFeature({ cyclone }: { cyclone: CycloneDto }) {
   const labelTime = formatLabelTime(cyclone.lastUpdateUtc);
   const labelWind = cyclone.maxSustainedWindKt != null ? `${cyclone.maxSustainedWindKt.toFixed(1)} kt` : null;
-  const trackLatLngs = cyclone.track.map((p): [number, number] => [p.lat, p.lon]);
-  const coneLatLngs = cyclone.conePolygon.map((p): [number, number] => [p.lat, p.lon]);
+  // Keep the track, cone and current-position bullseye in the same world-copy,
+  // anchored on the storm's current longitude (markers otherwise keep their raw
+  // ±180 longitude and can drift away from a track that crosses the dateline).
+  const anchorLon = cyclone.longitude;
+  const trackLatLngs = cyclone.track.map((p): [number, number] => wrapPointNear([p.lat, p.lon], anchorLon));
+  const coneLatLngs = cyclone.conePolygon.map((p): [number, number] => wrapPointNear([p.lat, p.lon], anchorLon));
+  const bullseyePos = wrapPointNear([cyclone.latitude, cyclone.longitude], anchorLon);
+  // `worldCopyJump` lets the user pan into an adjacent copy of the tiled
+  // world; a storm near the dateline needs to be drawn there too, or it
+  // simply vanishes once the user pans past 180deg (Leaflet never
+  // auto-repeats vector layers, only `<TileLayer>`s).
+  const offsets = needsWorldCopies([bullseyePos, ...trackLatLngs, ...coneLatLngs]) ? [-360, 0, 360] : [0];
 
   return (
     <>
-      {coneLatLngs.length > 2 && (
-        <Polygon
-          positions={coneLatLngs}
-          pathOptions={{ color: '#f2c14e', weight: 1, fillColor: '#f2c14e', fillOpacity: 0.22, interactive: false }}
-        />
-      )}
-      {trackLatLngs.length > 1 && (
-        <>
-          <Polyline positions={trackLatLngs} pathOptions={{ color: '#e2342c', weight: 2, interactive: false }} />
-          {cyclone.track.slice(1).map((p, i) => (
-            <Marker key={i} position={[p.lat, p.lon]} icon={TRACK_DOT_ICON} interactive={false} />
-          ))}
-        </>
-      )}
-      <Marker position={[cyclone.latitude, cyclone.longitude]} icon={bullseyeIcon(cyclone)}>
-        <Tooltip permanent direction="right" offset={[14, 0]} className="fv-cyclone-label" opacity={1}>
-          <strong>{cyclone.name.toUpperCase()}</strong>
-          {labelTime || labelWind ? ' ' : ''}
-          {labelTime}
-          {labelTime && labelWind ? ' \u00b7 ' : ''}
-          {labelWind}
-        </Tooltip>
-        <Popup minWidth={240} maxWidth={280}>
+      {offsets.map((offset) => (
+        <Fragment key={offset}>
+          {coneLatLngs.length > 2 && (
+            <Polygon
+              positions={offsetPoints(coneLatLngs, offset)}
+              pathOptions={{ color: '#f2c14e', weight: 1, fillColor: '#f2c14e', fillOpacity: 0.22, interactive: false }}
+            />
+          )}
+          {trackLatLngs.length > 1 && (
+            <>
+              <Polyline positions={offsetPoints(trackLatLngs, offset)} pathOptions={{ color: '#e2342c', weight: 2, interactive: false }} />
+              {trackLatLngs.slice(1).map((pos, i) => (
+                <Marker key={i} position={offsetPoint(pos, offset)} icon={TRACK_DOT_ICON} interactive={false} />
+              ))}
+            </>
+          )}
+          <Marker position={offsetPoint(bullseyePos, offset)} icon={bullseyeIcon(cyclone)}>
+            <Tooltip permanent direction="right" offset={[14, 0]} className="fv-cyclone-label" opacity={1}>
+              <strong>{cyclone.name.toUpperCase()}</strong>
+              {labelTime || labelWind ? ' ' : ''}
+              {labelTime}
+              {labelTime && labelWind ? ' \u00b7 ' : ''}
+              {labelWind}
+            </Tooltip>
+            <Popup minWidth={240} maxWidth={280}>
           <div className="fv-cyclone-popup">
             <header>
               <span className="fv-cyclone-popup__source">{cyclone.source}</span>
@@ -193,6 +206,8 @@ function CycloneFeature({ cyclone }: { cyclone: CycloneDto }) {
           </div>
         </Popup>
       </Marker>
+        </Fragment>
+      ))}
     </>
   );
 }

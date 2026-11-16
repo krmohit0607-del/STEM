@@ -16,6 +16,28 @@ export function normalizeCoordinates(points: LatLon[]): LatLon[] {
   return points.map(normalizeCoordinate);
 }
 
+/**
+ * Shift `longitude` by whole multiples of 360 until it is within 180 of `anchor`.
+ * Leaflet projects markers/polygons at their literal longitude with no automatic
+ * dateline wrapping (only tile layers repeat seamlessly) — a route polyline that is
+ * unwrapped to a continuous numberline (e.g. 179 → 181) will sit in a different
+ * "world copy" than a marker left at its raw, canonical ±180 longitude (e.g. -179),
+ * even though both describe the same point. Passing every marker through this with
+ * the same anchor as the polyline keeps them in the same copy, so they land on the line.
+ */
+export function wrapLongitudeNear(longitude: number, anchor: number): number {
+  if (!Number.isFinite(longitude) || !Number.isFinite(anchor)) return longitude;
+  let value = longitude;
+  while (value - anchor > 180) value -= 360;
+  while (value - anchor < -180) value += 360;
+  return value;
+}
+
+/** Same as {@link wrapLongitudeNear}, applied to the longitude of a [lat, lon] point. */
+export function wrapPointNear([lat, lon]: LatLon, anchor: number): LatLon {
+  return [lat, wrapLongitudeNear(lon, anchor)];
+}
+
 /** Unwrap an ordered path so consecutive longitudes take the shortest route. */
 export function unwrapLongitudes(points: LatLon[]): LatLon[] {
   if (points.length === 0) return [];
@@ -32,6 +54,59 @@ export function unwrapLongitudes(points: LatLon[]): LatLon[] {
 }
 
 export const unwrapRouteCoordinates = unwrapLongitudes;
+
+/**
+ * Bounding box (with padding) covering every point, on the same continuous numberline as
+ * {@link unwrapRouteCoordinates} (each point chained from the one before it) — so a route
+ * crossing the dateline gets a narrow box around it, in the same "world copy" as its own
+ * polyline and markers, instead of a raw min/max spanning the whole world the wrong way.
+ */
+export function antimeridianAwareBoundsBox(
+  points: LatLon[],
+  padFraction = 0.08,
+  minPad = 0.5,
+): { south: number; west: number; north: number; east: number } | null {
+  if (points.length === 0) return null;
+  const unwrapped = unwrapLongitudes(points);
+  const latitudes = unwrapped.map(([lat]) => lat);
+  const longitudes = unwrapped.map(([, lon]) => lon);
+  const south0 = Math.min(...latitudes);
+  const north0 = Math.max(...latitudes);
+  const west0 = Math.min(...longitudes);
+  const east0 = Math.max(...longitudes);
+  const padLat = Math.max(minPad, (north0 - south0) * padFraction);
+  const padLon = Math.max(minPad, (east0 - west0) * padFraction);
+  return { south: south0 - padLat, north: north0 + padLat, west: west0 - padLon, east: east0 + padLon };
+}
+
+/**
+ * True when any point sits close enough to +-180 deg that a user panning one
+ * world copy left or right (which `worldCopyJump` lets them do freely on every
+ * map in this app) could land on a viewport where a single, un-duplicated
+ * rendering of this geometry would not appear at all. Leaflet only repeats
+ * `<TileLayer>`s across world copies — `<Polyline>`/`<Polygon>`/`<Marker>`
+ * render exactly once, at their literal longitude.
+ */
+export function needsWorldCopies(points: LatLon[], thresholdDeg = 40): boolean {
+  return points.some(([, lon]) => Math.abs(normalizeLongitude(lon)) > 180 - thresholdDeg);
+}
+
+/**
+ * Longitude shifts to render a geometry at so it stays visible regardless of
+ * which adjacent world copy the user has panned into. Returns `[0]` (no extra
+ * rendering) when the geometry is nowhere near the dateline.
+ */
+export function worldCopyOffsets(points: LatLon[], thresholdDeg = 40): number[] {
+  return needsWorldCopies(points, thresholdDeg) ? [-360, 0, 360] : [0];
+}
+
+export function offsetPoint([lat, lon]: LatLon, offset: number): LatLon {
+  return offset === 0 ? [lat, lon] : [lat, lon + offset];
+}
+
+export function offsetPoints(points: LatLon[], offset: number): LatLon[] {
+  return offset === 0 ? points : points.map(([lat, lon]) => [lat, lon + offset] as LatLon);
+}
 
 export function crossesAntimeridian(points: LatLon[], closed = false): boolean {
   if (points.length < 2) return false;

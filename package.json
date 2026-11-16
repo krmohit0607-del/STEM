@@ -18,6 +18,7 @@
     "backend:watch": "dotnet watch --project backend/src/MultiTenantSaaS.API run",
     "backend:test": "dotnet test backend/MultiTenantSaaS.slnx",
     "test:antimeridian": "tsx scripts/testAntimeridian.mts",
+    "test:route-import": "tsx scripts/testRouteImport.mts",
     "seed:export": "tsx scripts/exportSeed.mts"
   },
   "dependencies": {

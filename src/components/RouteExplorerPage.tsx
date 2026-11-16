@@ -15,26 +15,31 @@ import {
   writeRouteEditorRouteId,
 } from '../data/savedRoutesStore';
 import { PORT_COORDS } from '../data/fleet';
+import { appendRouteHistory, type RouteHistoryEntry } from '../data/routeHistoryStore';
 import { normalizeLongitude } from '../data/antimeridian';
 import { useWorldPorts, resolveWorldPort, type WorldPort } from '../data/ports';
-import { type OptimizedRoute } from '../data/routeOptimizer';
+import { type OptimizedRoute, describeMandatoryHazards } from '../data/routeOptimizer';
 import { ROUTE_VARIANTS, type RouteVariantMeta } from '../data/routeVariants';
 import {
   setActiveSimRoute,
-  setEditCompareRoute,
   setRouteEditActive,
   useMapCompareRoutes,
   useMapShipMarkers,
   useMapPlannedColor,
   useMapRouteWaypoints,
   useRouteEditCommand,
+  requestMapFit,
+  requestMapCenterOnVessel,
+  setRoutesToolbarSlot,
 } from '../data/routeSimulatorStore';
-import { RouteEditorMap, type EditorPoint, legPositions } from './RouteEditorMap';
+import { RouteEditorMap, type EditorPoint, legPositions, reportsForLeg, buildLegPath } from './RouteEditorMap';
 import { MapWeatherLegendBar } from './MapWeatherLegendControl';
 import { bumpSavedRoutes } from '../data/optimizationStore';
 import { OptimizationRunDialog } from './OptimizationRunDialog';
 import { PortInput } from './PortInput';
 import { useVesselPosition } from '../data/vesselPosition';
+import { parseRouteText } from '../data/routeImport';
+import { useUndoableState } from '../hooks/useUndoableState';
 import {
   setRouteReportFuelSelection,
   setRouteReportSpeedSelection,
@@ -58,6 +63,21 @@ import {
  * are exposed.
  */
 
+/**
+ * Monotonically-increasing counter appended to a `Date.now()`-based id so two
+ * created within the same millisecond — a rapid double-click, two routes
+ * saved back-to-back, programmatic/automated test clicks, etc. — never
+ * collide. This was a real, observed bug: a duplicate id silently produces
+ * duplicate rows wherever that id is later used as a React list key or a
+ * lookup key — e.g. two "same route" lines overlapping in the weather chart,
+ * or a voyage/route appearing twice in a list.
+ */
+let uniqueIdCounter = 0;
+function uniqueId(prefix: string): string {
+  uniqueIdCounter += 1;
+  return `${prefix}-${Date.now()}-${uniqueIdCounter}`;
+}
+
 interface Waypoint {
   id: string;
   name: string;
@@ -67,6 +87,22 @@ interface Waypoint {
   course: number;
   /** Planned SOG departing this waypoint (kt). */
   speed: number;
+  /**
+   * True once this waypoint's `speed` has been explicitly set — either by
+   * hand (waypoint-details form / bulk "Set speed" popup) or by a vessel
+   * report's speed/fuel change propagated forward from the map. Waypoints
+   * where this is falsy keep dynamically tracking the CP & Leg Details'
+   * "Speed & Cons" Default row, so editing that default there updates every
+   * waypoint that was never deliberately overridden.
+   */
+  speedManual?: boolean;
+  /** Fuel type in use from this waypoint onward, once set via a vessel
+   *  report's fuel selection (propagated forward the same way as speed). */
+  fuelType?: string;
+  /** Daily consumption (mt/day) associated with the selected speed/cons
+   *  profile row, for display only (route-wide cost/fuel totals still use a
+   *  single whole-route average — see `computeRouteMetrics`). */
+  dailyCons?: number;
   /** Distance from previous waypoint (NM). 0 for the first one. */
   distanceFromPrev: number;
   /** ETA at this waypoint (ISO local string for datetime-local). For the
@@ -120,6 +156,14 @@ interface SpeedProfileOption {
   label: string;
   speedKts: number;
   isDefault?: boolean;
+  /** Daily consumption (mt/day) for this profile row, when known from the
+   *  CP & Leg Details' "Speed & Cons" table — display-only, for waypoints
+   *  this option gets applied to (see `applyReportCriteriaForward`). */
+  dailyCons?: number;
+  /** Fuel type for this profile row (its own `Fuel Type` column) — applied
+   *  automatically alongside the speed/cons when this option is chosen in
+   *  the report-marker popup, so fuel type never needs a separate pick. */
+  fuelType?: string;
 }
 
 const REPORT_FUEL_OPTIONS = ['VLSFO', 'LSMGO', 'HSFO', 'MDO', 'MGO', 'LNG', 'Methanol'];
@@ -414,15 +458,16 @@ function chooseLegType(
 function buildStraightLineWaypoints(
   from: { lat: number; lon: number; name: string },
   to: { lat: number; lon: number; name: string },
+  defaultSpeed = 12,
 ): Waypoint[] {
   return [
     {
-      id: `wp-${Date.now()}-0`,
+      id: uniqueId('wp'),
       name: `${from.name} (Departure)`,
       lat: decToDM(from.lat, true),
       lon: decToDM(from.lon, false),
       course: 0,
-      speed: 12,
+      speed: defaultSpeed,
       distanceFromPrev: 0,
       eta: '',
       drift: false,
@@ -430,12 +475,12 @@ function buildStraightLineWaypoints(
       legType: chooseLegType(from.lat, from.lon, to.lat, to.lon),
     },
     {
-      id: `wp-${Date.now()}-1`,
+      id: uniqueId('wp'),
       name: `${to.name} (Arrival)`,
       lat: decToDM(to.lat, true),
       lon: decToDM(to.lon, false),
       course: 0,
-      speed: 12,
+      speed: defaultSpeed,
       distanceFromPrev: 0,
       eta: '',
       drift: false,
@@ -445,83 +490,18 @@ function buildStraightLineWaypoints(
 }
 
 /**
- * Parse an uploaded route file's points. Supports JSON as `[[lat, lon], …]`,
- * `[{lat, lon}, …]`, or `{ waypoints: [{lat, lon}, …] }`; and CSV/text with a
- * header row containing latitude/longitude columns. (RTZ/XLSX aren't
- * supported here — use the Route Simulator panel's own Import for those.)
- */
-function parseUploadedRoutePoints(
-  text: string,
-  extension: string,
-): Array<[number, number]> | null {
-  const toPoint = (v: unknown): [number, number] | null => {
-    if (Array.isArray(v) && v.length >= 2) {
-      const lat = Number(v[0]);
-      const lon = Number(v[1]);
-      return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
-    }
-    if (v && typeof v === 'object') {
-      const o = v as Record<string, unknown>;
-      const lat = Number(o.lat ?? o.latitude);
-      const lon = Number(o.lon ?? o.lng ?? o.longitude);
-      return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
-    }
-    return null;
-  };
-  if (extension === 'json') {
-    try {
-      const parsed: unknown = JSON.parse(text);
-      const list = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray((parsed as { waypoints?: unknown[] })?.waypoints)
-          ? (parsed as { waypoints: unknown[] }).waypoints
-          : null;
-      if (!list) return null;
-      const points = list.map(toPoint).filter((p): p is [number, number] => p != null);
-      return points.length >= 2 ? points : null;
-    } catch {
-      return null;
-    }
-  }
-  // CSV (or any other text) — find a header row with lat/lon columns.
-  const lines = text.split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length < 2) return null;
-  const parseCsvLine = (line: string) => line.split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
-  const rows = lines.map(parseCsvLine);
-  const normalize = (v: string) => v.toLowerCase().replace(/[^a-z]/g, '');
-  const latAliases = ['lat', 'latitude', 'y'];
-  const lonAliases = ['lon', 'lng', 'longitude', 'x'];
-  const findCol = (header: string[], aliases: string[]) =>
-    header.findIndex((v) => aliases.includes(v) || aliases.some((a) => v.startsWith(a)));
-  const headerIdx = rows
-    .slice(0, 10)
-    .findIndex((row) => {
-      const header = row.map(normalize);
-      return findCol(header, latAliases) >= 0 && findCol(header, lonAliases) >= 0;
-    });
-  if (headerIdx < 0) return null;
-  const header = rows[headerIdx].map(normalize);
-  const latIdx = findCol(header, latAliases);
-  const lonIdx = findCol(header, lonAliases);
-  const points = rows
-    .slice(headerIdx + 1)
-    .map((row) => [Number(row[latIdx]), Number(row[lonIdx])] as [number, number])
-    .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
-  return points.length >= 2 ? points : null;
-}
-
-/** Build a full waypoint list from plain lat/lon points (e.g. an uploaded
+ * Build a full waypoint list from plain lat/lon points (e.g. an uploaded
  *  route file) — the first/last are ports, legs choose rhumb/great-circle. */
-function waypointsFromPoints(points: Array<[number, number]>): Waypoint[] {
+function waypointsFromPoints(points: Array<[number, number]>, defaultSpeed = 12): Waypoint[] {
   const last = points.length - 1;
   const stamp = Date.now();
   return points.map(([lat, lon], i) => ({
     id: `wp-${stamp}-${i}`,
-    name: i === 0 ? 'Departure' : i === last ? 'Arrival' : `WP ${i}`,
+    name: i === 0 ? 'Departure' : i === last ? 'Arrival' : `WP ${i + 1}`,
     lat: decToDM(lat, true),
     lon: decToDM(lon, false),
     course: 0,
-    speed: 12,
+    speed: defaultSpeed,
     distanceFromPrev: 0,
     eta: '',
     drift: false,
@@ -587,16 +567,30 @@ function resolveLocation(
  */
 function sanitizeWaypointIds(list: Waypoint[]): Waypoint[] {
   const seen = new Set<string>();
-  return list.map((wp, i) => {
+  return list.map((wp) => {
     if (wp.id && !seen.has(wp.id)) {
       seen.add(wp.id);
       return wp;
     }
-    let id = `wp-${Date.now()}-${i}`;
-    while (seen.has(id)) id = `${id}-${i}`;
+    const id = uniqueId('wp');
     seen.add(id);
     return { ...wp, id };
   });
+}
+
+/**
+ * Auto-generated intermediate waypoint names look like "WP 5", with the
+ * number meant to match the waypoint's 1-based position counting departure
+ * as 1 (so row 16 is "WP 16", not "WP 15"). Routes saved under an older,
+ * off-by-one version of the generator — or shifted by a later insert/delete
+ * — can have this number drift out of sync with the row it's actually in;
+ * recompute it from the live position instead of trusting the stored string
+ * whenever the name still has this exact auto-generated shape. Any waypoint
+ * the user has renamed to something else no longer matches the pattern and
+ * is left untouched.
+ */
+function renumberAutoWaypointNames(list: Waypoint[]): Waypoint[] {
+  return list.map((wp, i) => (/^WP \d+$/.test(wp.name) ? { ...wp, name: `WP ${i + 1}` } : wp));
 }
 
 /**
@@ -607,15 +601,68 @@ function sanitizeWaypointIds(list: Waypoint[]): Waypoint[] {
  * it with) — never the generic demo waypoints, unless there's no real
  * voyage context at all (standalone/demo usage of this page).
  */
+/**
+ * Resolve the saved route id this voyage's editor is actually showing right
+ * now, following the exact same `editorId` → `activeId` fallback as
+ * `loadRouteForVoyage` below — so a caller can tell *which* saved route's
+ * content the current `waypoints` state came from, not just which ids were
+ * separately stored (those two can disagree, e.g. a fresh session where
+ * `editorId` was never set for this voyage but `activeId` still resolves
+ * the route via the fallback).
+ */
+function resolveLoadedRouteId(voyageId: string | undefined): string | null {
+  if (!voyageId) return null;
+  try {
+    const editorId = readRouteEditorRouteId(voyageId);
+    const activeId = readActiveRouteId(voyageId)?.replace(/^saved-/, '');
+    const all = readSavedRoutesForVoyage(voyageId) as SavedRoute[];
+    // `editorId` must win whenever it resolves to a real saved entry — it's
+    // the copy this edit session is actually attached to. Only fall back to
+    // `activeId` when there's no (or no longer any) editor entry. A plain
+    // `route.id === editorId || route.id === activeId` find() would instead
+    // return whichever of the two happens to appear first in the stored
+    // array — since the original is always saved before its "Edit of X"
+    // copy, that silently resolved to the *original* every time, making the
+    // live editor publish under (and mislabeled as) the original route.
+    const found =
+      (editorId && all.find((route) => route.id === editorId)) ||
+      (activeId && all.find((route) => route.id === activeId)) ||
+      null;
+    return found?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function loadRouteForVoyage(voyageId: string | undefined): Waypoint[] {
   if (!voyageId) return STUB_WAYPOINTS;
   try {
     const editorId = readRouteEditorRouteId(voyageId);
     const activeId = readActiveRouteId(voyageId)?.replace(/^saved-/, '');
-    const saved = (readSavedRoutesForVoyage(voyageId) as SavedRoute[]).find(
-      (route) => route.id === editorId || route.id === activeId,
-    );
-    if (saved?.waypoints?.length) return sanitizeWaypointIds(saved.waypoints);
+    const all = readSavedRoutesForVoyage(voyageId) as SavedRoute[];
+    // Same `editorId`-first preference as `resolveLoadedRouteId` above (see
+    // its comment) — otherwise the editor can load the *original* route's
+    // content back in whenever it happens to be stored before the "Edit of
+    // X" copy, undoing whatever the edit session was actually attached to.
+    const saved =
+      (editorId && all.find((route) => route.id === editorId)) ||
+      (activeId && all.find((route) => route.id === activeId)) ||
+      undefined;
+    // `recomputeGeometry` re-threads every waypoint's distance/course/ETA
+    // from waypoint 0 onward — needed here, not just on edits, because a
+    // saved route's stored ETAs can go stale relative to each other: the
+    // "keep waypoint 0 mirrored to the voyage's shared ETD" sync effect
+    // only fires a full recompute when waypoint 0's own `eta` doesn't
+    // already match the shared ETD. If waypoint 0 happens to already be
+    // correct (e.g. it was set directly, or the route is simply being
+    // reloaded as-is) but a *later* waypoint was last computed under a
+    // since-changed ETD, that guard never catches it, and the stale ETA
+    // (and any drift-wait math derived from it) would otherwise persist
+    // indefinitely. Recomputing unconditionally on load is cheap and makes
+    // the whole chain self-healing every time a route becomes live.
+    if (saved?.waypoints?.length) {
+      return recomputeGeometry(renumberAutoWaypointNames(sanitizeWaypointIds(saved.waypoints)));
+    }
   } catch {
     // Fall through to an empty route when saved-route storage is unavailable.
   }
@@ -642,6 +689,10 @@ function toLocalDateTimeValue(epochMs: number): string {
  * ÷ the departing waypoint's speed, plus a wait until `driftUntil` for any
  * waypoint with `drift` set. Waypoint 0's `eta` is the (editable) ETD anchor
  * and is left as-is; every other waypoint's `eta` is fully derived here.
+ * Also renumbers any auto-generated "WP N" name to match the waypoint's
+ * current position (see `renumberAutoWaypointNames`), so inserting/deleting
+ * a waypoint elsewhere in the route — which shifts everyone after it —
+ * keeps every untouched waypoint's own number in sync with its new row.
  */
 function recomputeGeometry(list: Waypoint[]): Waypoint[] {
   const out: Waypoint[] = [];
@@ -670,7 +721,13 @@ function recomputeGeometry(list: Waypoint[]): Waypoint[] {
     const plat = dmToDec(prev.lat);
     const plon = dmToDec(prev.lon);
     if (Number.isNaN(lat) || Number.isNaN(lon) || Number.isNaN(plat) || Number.isNaN(plon)) {
-      out.push(wp);
+      // A malformed Lat/Lon (e.g. a stray manual edit that doesn't parse as
+      // a DM string) must still leave this waypoint with a *finite*
+      // distance — otherwise `NaN` here poisons every later waypoint's
+      // cumulative "distance from departure" too, once summed below, and
+      // worse, never clears itself even if this one waypoint is later
+      // fixed/deleted, since the NaN was already baked into this object.
+      out.push({ ...wp, distanceFromPrev: Number.isFinite(wp.distanceFromPrev) ? wp.distanceFromPrev : 0 });
       continue;
     }
 
@@ -692,7 +749,7 @@ function recomputeGeometry(list: Waypoint[]): Waypoint[] {
     }
     departEpoch = departAt;
   }
-  return out;
+  return renumberAutoWaypointNames(out);
 }
 
 /**
@@ -729,7 +786,17 @@ export function RouteExplorerPage() {
   const selectedVoyage = useSelectedVoyage();
   const voyageId = selectedVoyage?.id;
 
-  const [waypoints, setWaypoints] = useState<Waypoint[]>(() => loadRouteForVoyage(voyageId));
+  const {
+    value: waypoints,
+    setValue: setWaypoints,
+    setValueSilently: setWaypointsSilently,
+    commitValue: commitWaypoints,
+    resetValue: resetWaypoints,
+    undo: undoWaypoints,
+    redo: redoWaypoints,
+    canUndo: canUndoWaypoints,
+    canRedo: canRedoWaypoints,
+  } = useUndoableState<Waypoint[]>(() => loadRouteForVoyage(voyageId));
   // Pull any saved routes from the backend database down into local storage
   // once per visit (e.g. routes saved from another device/browser). This
   // refreshes the Route Simulator's saved-routes list; it intentionally does
@@ -754,17 +821,68 @@ export function RouteExplorerPage() {
     setWaypointDraft(selectedWaypoint ? { ...selectedWaypoint } : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedWaypoint?.id]);
-  // If the committed waypoint's position changes under the same selection
-  // (e.g. dragging its marker on the map), keep the draft's lat/lon in step
-  // so Save never reverts a drag — without touching any other pending edits.
+
+  // The Waypoint details editor expands inline, right after whichever
+  // waypoint is actually selected — preserving the list's natural order,
+  // not relocated to a fixed spot — so selecting a waypoint far down the
+  // route (e.g. by clicking its marker on the map) auto-scrolls the list up
+  // to bring that row into view, instead of leaving it off-screen somewhere
+  // up or down the list.
+  const waypointDetailRef = useRef<HTMLTableRowElement | null>(null);
+  // The detail row only renders once `waypointDraft` has synced to the new
+  // selection (one render later — see the draft-sync effect just above), so
+  // `waypointDetailRef` isn't attached yet on the very first commit after a
+  // selection change. Re-running once `waypointDraft` itself updates (not
+  // just `selected`) catches it on that follow-up render instead of silently
+  // no-op'ing against a still-null ref. Guarded by `lastScrolledWaypointIdRef`
+  // so later keystroke edits to the draft (which also change its identity)
+  // don't keep re-triggering the scroll.
+  const lastScrolledWaypointIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedWaypoint || !waypointDraft) {
+      lastScrolledWaypointIdRef.current = null;
+      return;
+    }
+    if (lastScrolledWaypointIdRef.current === selectedWaypoint.id) return;
+    lastScrolledWaypointIdRef.current = selectedWaypoint.id;
+    waypointDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [selectedWaypoint, waypointDraft]);
+
+  // If the committed waypoint's position (or anything `recomputeGeometry`
+  // derives from it, like course/distance) changes under the same selection
+  // — e.g. dragging its marker on the map, or picking a leg type, which also
+  // applies immediately rather than waiting for Save — keep those draft
+  // fields in step so Save/Discard don't look spuriously "dirty" afterwards,
+  // without touching any other actually-pending edits.
   useEffect(() => {
     if (!selectedWaypoint) return;
     setWaypointDraft((prev) => {
       if (!prev || prev.id !== selectedWaypoint.id) return prev;
-      if (prev.lat === selectedWaypoint.lat && prev.lon === selectedWaypoint.lon) return prev;
-      return { ...prev, lat: selectedWaypoint.lat, lon: selectedWaypoint.lon };
+      if (
+        prev.lat === selectedWaypoint.lat &&
+        prev.lon === selectedWaypoint.lon &&
+        prev.course === selectedWaypoint.course &&
+        prev.distanceFromPrev === selectedWaypoint.distanceFromPrev &&
+        prev.legType === selectedWaypoint.legType
+      )
+        return prev;
+      return {
+        ...prev,
+        lat: selectedWaypoint.lat,
+        lon: selectedWaypoint.lon,
+        course: selectedWaypoint.course,
+        distanceFromPrev: selectedWaypoint.distanceFromPrev,
+        legType: selectedWaypoint.legType,
+      };
     });
-  }, [selectedWaypoint?.id, selectedWaypoint?.lat, selectedWaypoint?.lon]);
+  }, [
+    selectedWaypoint?.id,
+    selectedWaypoint?.lat,
+    selectedWaypoint?.lon,
+    selectedWaypoint?.course,
+    selectedWaypoint?.distanceFromPrev,
+    selectedWaypoint?.legType,
+  ]);
 
   const setDraftField = <K extends keyof Waypoint>(key: K, value: Waypoint[K]) =>
     setWaypointDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
@@ -785,20 +903,120 @@ export function RouteExplorerPage() {
     return formatDuration((untilMs - arriveMs) / 3600_000);
   })();
 
-  /** Commit every changed field of the waypoint-details draft into the
-   *  actual route (map/simulation/shared ETD) — the explicit "Save" step. */
-  const saveWaypointDraft = () => {
-    if (!waypointDraft || !selectedWaypoint) return;
-    WAYPOINT_DRAFT_KEYS.forEach((key) => {
-      if (waypointDraft[key] !== selectedWaypoint[key]) {
-        updateWaypoint(waypointDraft.id, key, waypointDraft[key] as never);
-      }
+  /** Set once `saveWaypointDraft` has a reason to re-baseline `originalRoute`
+   *  to the route as it stands right now — picked up by the effect below
+   *  once `waypoints` has actually finished updating (state updates from
+   *  `updateWaypoint` inside `saveWaypointDraft` aren't visible synchronously
+   *  within the same function call). */
+  const pendingOriginalResyncRef = useRef(false);
+  useEffect(() => {
+    if (!pendingOriginalResyncRef.current) return;
+    pendingOriginalResyncRef.current = false;
+    setOriginalRoute(waypoints.map((wp) => ({ ...wp })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waypoints]);
+
+  /**
+   * Durably persist the route as it stands right now — the actual "Save"
+   * action, independent of "Activate": this voyage keeps whatever route it
+   * was already showing active/live in the simulator either way; Save only
+   * decides whether the *data* behind the one currently open in the editor
+   * is written back to storage, so it survives a reload/voyage switch/
+   * logout. Updates the saved-route entry this edit came from in place
+   * (resolved the same way `loadRouteForVoyage` resolves it) if there is
+   * one; otherwise creates a new saved entry and remembers it for next time,
+   * so a route built from scratch also becomes savable from here. Takes the
+   * waypoints to save explicitly (rather than reading the `waypoints` state
+   * directly) since a draft-field commit just queued via `setWaypoints`
+   * isn't reflected in that state until the next render.
+   */
+  const persistRouteToSavedEntry = (waypointsToSave: Waypoint[]) => {
+    if (!voyageId || waypointsToSave.length === 0) return;
+    const canonicalWaypoints = waypointsToSave.map((wp) => ({ ...wp, lon: canonicalLongitudeLabel(wp.lon) }));
+    const editorId = readRouteEditorRouteId(voyageId);
+    const activeId = readActiveRouteId(voyageId)?.replace(/^saved-/, '') ?? null;
+    const targetId = editorId ?? activeId;
+    const all = readAllSavedRoutes();
+    const idx = targetId ? all.findIndex((r) => r.id === targetId) : -1;
+    if (idx >= 0) {
+      const next = [...all];
+      next[idx] = { ...next[idx], waypoints: canonicalWaypoints, savedAt: new Date().toISOString() };
+      writeSavedRoutes(next);
+      bumpSavedRoutes();
+      return;
+    }
+    const saved = appendSavedRoute({
+      id: uniqueId('route'),
+      name: routeName.trim() || `Route ${savedRoutes.length + 1}`,
+      savedAt: new Date().toISOString(),
+      waypoints: canonicalWaypoints,
     });
+    writeRouteEditorRouteId(voyageId, saved.id);
+    bumpSavedRoutes();
   };
 
-  /** Discard unsaved edits, reverting the draft back to the committed waypoint. */
+  /** Commit every changed field of the waypoint-details draft into the
+   *  actual route (map/simulation/shared ETD), then durably persist the
+   *  whole route (see `persistRouteToSavedEntry`) — the explicit "Save"
+   *  step for everything made during this edit session (waypoint fields,
+   *  dragging, insert/delete, bulk speed/RPM/MCR, leg type, ...), not just
+   *  the open waypoint-details form. Also re-baselines `originalRoute` to
+   *  the route as it now stands, so Save/Discard correctly go back to
+   *  disabled once every pending change has been accounted for. Deliberately
+   *  separate from "Activate" — saving and activating are two different
+   *  decisions; this one never exits edit mode or changes what's active. */
+  const saveWaypointDraft = () => {
+    let finalWaypoints = waypoints;
+    if (waypointDraft && selectedWaypoint) {
+      const changedKeys = WAYPOINT_DRAFT_KEYS.filter((key) => waypointDraft[key] !== selectedWaypoint[key]);
+      changedKeys.forEach((key) => {
+        updateWaypoint(waypointDraft.id, key, waypointDraft[key] as never);
+      });
+      // A manually-typed speed stops this waypoint from tracking the CP &
+      // Leg Details' Default speed/cons row (see `Waypoint.speedManual`).
+      if (changedKeys.includes('speed')) {
+        updateWaypoint(waypointDraft.id, 'speedManual', true);
+      }
+      if (changedKeys.length > 0) {
+        // Mirror the same patch synchronously — `updateWaypoint`'s own
+        // `setWaypoints` calls above are queued, not yet reflected in the
+        // `waypoints` read here, so persisting from that would still save
+        // the pre-edit values.
+        finalWaypoints = recomputeGeometry(
+          waypoints.map((wp) => {
+            if (wp.id !== waypointDraft.id) return wp;
+            const patched = { ...wp };
+            changedKeys.forEach((key) => {
+              if ((key === 'lat' || key === 'lon') && isWaypointLocked(wp.id)) return;
+              (patched as Record<string, unknown>)[key] = waypointDraft[key];
+            });
+            if (changedKeys.includes('speed')) patched.speedManual = true;
+            return patched;
+          }),
+        );
+      }
+    }
+    persistRouteToSavedEntry(finalWaypoints);
+    if (originalRoute) pendingOriginalResyncRef.current = true;
+  };
+
+  /**
+   * Discard unsaved edits. If the selected waypoint's own form is what's
+   * dirty, only that form is reverted (narrow, as before); otherwise — the
+   * change was made some other way (dragging, insert/delete, bulk speed,
+   * leg type, ...) — revert the *whole* route back to how it was when this
+   * edit session started, the same as the dedicated "Discard edit" action.
+   */
   const discardWaypointDraft = () => {
-    setWaypointDraft(selectedWaypoint ? { ...selectedWaypoint } : null);
+    if (isWaypointDraftDirty) {
+      setWaypointDraft(selectedWaypoint ? { ...selectedWaypoint } : null);
+      return;
+    }
+    if (hasRouteChangedSinceEdit && originalRoute) {
+      suppressManualRouteMarkRef.current = true; // reverting, not a new edit
+      resetWaypoints(originalRoute);
+      setSelected([]);
+    }
   };
 
   /**
@@ -824,11 +1042,35 @@ export function RouteExplorerPage() {
   const [editMode, setEditMode] = useState(false);
   const [originalRoute, setOriginalRoute] = useState<Waypoint[] | null>(null);
 
+  /**
+   * Whether anything in this duplicate-edit session has changed, beyond just
+   * the waypoint-details form (see `isWaypointDraftDirty` below) —
+   * dragging a marker, inserting/deleting a waypoint, the "Set speed/RPM/
+   * MCR" bulk action, and the "Leg to next" picker all commit straight to
+   * `waypoints` instantly (by design — no accidental-keystroke risk there,
+   * unlike free-typed fields), so none of them ever touch `waypointDraft`.
+   * Without this, Save/Discard stayed disabled after any of those edits
+   * whenever no single waypoint's own form happened to be dirty — e.g.
+   * right after duplicating a route and dragging a point, with nothing
+   * selected — even though the route had genuinely changed. Compared
+   * against `originalRoute`, the snapshot taken the moment this edit
+   * session started (see `startEditDuplicate`).
+   */
+  const hasRouteChangedSinceEdit =
+    editMode && originalRoute != null && JSON.stringify(waypoints) !== JSON.stringify(originalRoute);
+
   // --- Auto sea-route generator ------------------------------------
   const [depInput, setDepInput] = useState(selectedVoyage?.portFrom ?? '');
   const [arrInput, setArrInput] = useState(selectedVoyage?.portTo ?? '');
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState('');
+  // Non-blocking advisories about the just-generated route: minimum charted
+  // depth requirement and any International Navigating Limits (INL) zone it
+  // touches — the route was already built avoiding every hard-blocked zone,
+  // this just reports what was checked (and flags conditional zones, e.g.
+  // Bering Sea, that need underwriter permission/specific equipment this
+  // engine can't verify).
+  const [genWarnings, setGenWarnings] = useState<string[]>([]);
   const worldPorts = useWorldPorts();
 
   // "Generate Optimized Sea Route" popup, opened from the map "Optimize" button.
@@ -870,26 +1112,32 @@ export function RouteExplorerPage() {
     if (!file) return;
     try {
       const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
-      const text = await file.text();
-      const points = parseUploadedRoutePoints(text, extension);
-      if (!points) {
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'Imported route';
+      const { routes, notes } = parseRouteText(await file.text(), extension, baseName);
+      if (routes.length === 0) {
         setUploadRouteError(
           t(
             'uploadRouteError',
-            'Could not read that file. Use a JSON or CSV file with latitude/longitude columns.',
+            'Could not read that file. Use a JSON, GeoJSON, CSV, TXT, RTZ, GPX or KML file with latitude/longitude positions.',
           ),
         );
         return;
       }
-      const cleaned = dedupeAndSimplifyTrackPoints(points);
-      setWaypoints(recomputeGeometry(waypointsFromPoints(cleaned)));
+      const cleaned = dedupeAndSimplifyTrackPoints(routes[0].points);
+      setWaypoints(recomputeGeometry(waypointsFromPoints(cleaned, cpDefaultSpeedKts ?? 12)));
       setSelected([]);
       setAddRouteModalOpen(false);
+      // The map keeps whatever view the user last panned/zoomed to; without this, a route far from that view would import correctly but not be visible.
+      requestMapFit(cleaned);
+      const extra = routes.length > 1
+        ? [`The file has ${routes.length} routes; only "${routes[0].name}" was used. Open it from the Route Simulator panel's Import to bring in the others.`]
+        : [];
+      setUploadRouteError([...notes, ...extra].join(' '));
     } catch {
       setUploadRouteError(
         t(
           'uploadRouteError',
-          'Could not read that file. Use a JSON or CSV file with latitude/longitude columns.',
+          'Could not read that file. Use a JSON, GeoJSON, CSV, TXT, RTZ, GPX or KML file with latitude/longitude positions.',
         ),
       );
     }
@@ -985,7 +1233,7 @@ export function RouteExplorerPage() {
     if (prevVoyageIdRef.current === voyageId) return;
     prevVoyageIdRef.current = voyageId;
     suppressManualRouteMarkRef.current = true;
-    setWaypoints(loadRouteForVoyage(voyageId));
+    resetWaypoints(loadRouteForVoyage(voyageId));
     setSelected([]);
     setCheckedIds([]);
     setEditMode(false);
@@ -1020,6 +1268,36 @@ export function RouteExplorerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [waypoints]);
 
+  // Voyage context passed to the route generator for the mandatory minimum
+  // charted-depth and International Navigating Limits (INL) checks — ETD so
+  // seasonal INL windows (e.g. Baltic ice season) use the actual sailing
+  // date rather than today, and DWT for the Gulf of Finland's size-gated rule.
+  const hazardRequestFields = (): { voyageDateIso?: string; vesselDwt?: number } => {
+    const dwt = Number(String(selectedVoyage?.dwt ?? '').replace(/[^0-9.]/g, '')) || undefined;
+    return { voyageDateIso: selectedVoyage?.etdIso, vesselDwt: dwt };
+  };
+
+  // Builds the non-blocking advisory messages for a just-applied route path
+  // (minimum charted-depth requirement + any INL zone touched).
+  const buildHazardWarnings = (path: Array<[number, number]>): string[] => {
+    const dwt = Number(String(selectedVoyage?.dwt ?? '').replace(/[^0-9.]/g, '')) || undefined;
+    const hz = describeMandatoryHazards(path, {
+      voyageDate: selectedVoyage?.etdIso ? new Date(selectedVoyage.etdIso) : undefined,
+      vesselDwt: dwt,
+    });
+    const warnings: string[] = [
+      `Minimum charted depth requirement: >${hz.minDepthM} m, enforced via charted Depth Mask / Reef / Shoal / Bank zones (not exhaustive bathymetry — unlisted open-ocean areas are assumed deep).`,
+    ];
+    for (const z of hz.inlZones) {
+      warnings.push(
+        z.conditional
+          ? `INL advisory — route passes through ${z.area}: ${z.label}. ${z.note ?? 'Subject to underwriter permission/conditions.'}`
+          : `WARNING — route could not avoid a normally-restricted INL zone: ${z.area}: ${z.label}.`,
+      );
+    }
+    return warnings;
+  };
+
   const generateRoute = async () => {
     setGenError('');
     const from = resolveLocation(depInput, worldPorts);
@@ -1037,11 +1315,16 @@ export function RouteExplorerPage() {
     // Any earlier optimization run is now stale.
     const runId = optimizeRunRef.current + 1;
     optimizeRunRef.current = runId;
+    // This run's result is auto-applied (shortest, land-avoiding candidate)
+    // the moment it's ready — no "choose a route" prompt, per the user's
+    // explicit request for a single shortest route instead of several options.
+    pendingManualGenRunIdRef.current = runId;
     setRouteResults(null);
     setSelectedRouteId(null);
+    setGenWarnings([]);
     try {
       suppressManualRouteMarkRef.current = true; // preview line, not a committed edit yet
-      setWaypoints(recomputeGeometry(buildStraightLineWaypoints(from, to)));
+      setWaypointsSilently(recomputeGeometry(buildStraightLineWaypoints(from, to, cpDefaultSpeedKts ?? 12)));
       setSelected([]);
       setPlotMode(false);
 
@@ -1053,6 +1336,7 @@ export function RouteExplorerPage() {
         runId,
         dep: { lat: from.lat, lon: from.lon },
         arr: { lat: to.lat, lon: to.lon },
+        ...hazardRequestFields(),
       });
     } catch (err) {
       setGenError(
@@ -1069,10 +1353,13 @@ export function RouteExplorerPage() {
   // --- Auto default route for a voyage with none yet --------------------
   // Tracks which optimizer run (if any) is the silent auto-generation for a
   // brand-new voyage, as opposed to the user's own manual "Generate route"
-  // click — only that run's result gets auto-picked + saved without any
-  // "choose a route" prompt.
+  // click — both now auto-apply their result (the shortest, land- and
+  // hazard-avoiding candidate) without any "choose a route" prompt; only the
+  // auto-default run additionally saves+tags a new route for the voyage.
   const autoGenRunIdRef = useRef<number | null>(null);
   const autoGenVoyageIdRef = useRef<string | null>(null);
+  // Set for a manual "Generate route" click; cleared once its result is applied.
+  const pendingManualGenRunIdRef = useRef<number | null>(null);
   // Never retries automatically for a voyage once attempted (success or not)
   // — e.g. manually clearing the route afterwards must not re-trigger it.
   const autoGenAttemptedForRef = useRef<string | null>(null);
@@ -1089,13 +1376,15 @@ export function RouteExplorerPage() {
     autoGenVoyageIdRef.current = vId;
     setRouteResults(null);
     setSelectedRouteId(null);
+    setGenWarnings([]);
     suppressManualRouteMarkRef.current = true; // auto-generating isn't the user editing
-    setWaypoints(recomputeGeometry(buildStraightLineWaypoints(from, to)));
+    setWaypointsSilently(recomputeGeometry(buildStraightLineWaypoints(from, to, cpDefaultSpeedKts ?? 12)));
     setOptimizing(true);
     workerRef.current?.postMessage({
       runId,
       dep: { lat: from.lat, lon: from.lon },
       arr: { lat: to.lat, lon: to.lon },
+      ...hazardRequestFields(),
     });
   };
 
@@ -1128,11 +1417,12 @@ export function RouteExplorerPage() {
     if (!routeResults || routeResults.length === 0) return;
     const best = routeResults.reduce((a, b) => (b.info.distanceNm < a.info.distanceNm ? b : a));
     if (best.info.path.length < 2) return;
+    setGenWarnings(buildHazardWarnings(best.info.path));
     const built = recomputeGeometry(buildWaypointsFromCandidate(best));
     const canonical = built.map((wp) => ({ ...wp, lon: canonicalLongitudeLabel(wp.lon) }));
     const saved = appendSavedRoute(
       {
-        id: `route-${Date.now()}`,
+        id: uniqueId('route'),
         // Clearly flagged as a rough default — not a reviewed plan — so it's
         // obvious in the Route Simulator's list that this wasn't manually set.
         name: `${depInput || 'Departure'} \u2013 ${arrInput || 'Arrival'} (Auto \u2014 rough, unreviewed)`,
@@ -1147,12 +1437,34 @@ export function RouteExplorerPage() {
     if (voyageId === vId) {
       // Still on the same voyage — show the result immediately.
       suppressManualRouteMarkRef.current = true; // auto-generated, not a user edit
-      setWaypoints(built);
+      setWaypointsSilently(built);
       setSelected([]);
       setRouteResults(null);
       setSelectedRouteId(null);
       setSavedRoutes(readSavedRoutes(vId));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [optimizing]);
+
+  // When a MANUAL "Generate route" click's background run finishes, apply
+  // the shortest land- and hazard-avoiding candidate straight to the
+  // waypoint editor — same auto-pick as the default-route case above, but
+  // without saving it as a named route (the user reviews/saves it like any
+  // other manual edit). No "choose a route" prompt either way.
+  useEffect(() => {
+    if (optimizing) return;
+    const runId = pendingManualGenRunIdRef.current;
+    pendingManualGenRunIdRef.current = null;
+    if (runId == null || runId !== optimizeRunRef.current) return;
+    if (!routeResults || routeResults.length === 0) return;
+    const best = routeResults.reduce((a, b) => (b.info.distanceNm < a.info.distanceNm ? b : a));
+    if (best.info.path.length < 2) return;
+    setGenWarnings(buildHazardWarnings(best.info.path));
+    setWaypoints(recomputeGeometry(buildWaypointsFromCandidate(best)));
+    setSelected([]);
+    setPlotMode(false);
+    setRouteResults(null);
+    setSelectedRouteId(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [optimizing]);
 
@@ -1224,25 +1536,13 @@ export function RouteExplorerPage() {
     [originalSim],
   );
 
-  // Publish the pre-edit original as a comparison route so the simulator table
-  // shows it as a separate row alongside the "Edit of …" route.
-  useEffect(() => {
-    if (!originalSim) {
-      setEditCompareRoute(null);
-      return;
-    }
-    setEditCompareRoute({
-      id: 'original-compare',
-      label: t('plannedRoute', 'Planned route'),
-      color: '#8b949e',
-      path: originalSim.path,
-      distanceNm: originalSim.distanceNm,
-      timeHours: originalSim.timeHours,
-      etdIso: selectedVoyage?.etdIso,
-    });
-  }, [originalSim, selectedVoyage?.etdIso]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => () => setEditCompareRoute(null), []);
+  // The pre-edit original is still its own real, untouched saved route
+  // (its own entry in the Route Simulator's list under its own name, since
+  // "Edit" no longer silently leaves it with nothing behind it — see
+  // `startEditDuplicate`), so it no longer needs a separate synthetic
+  // "comparison" row published into the simulator here — only the faded
+  // map overlay below (`originalOverlay`) remains, for a quick visual
+  // comparison while actively dragging/editing.
 
   const overlayRoutes = useMemo(
     () => [...mapRoutes, ...compareRoutes, ...originalOverlay],
@@ -1296,9 +1596,11 @@ export function RouteExplorerPage() {
       ?.filter((row) => Number.isFinite(Number(row.speed)) && Number(row.speed) > 0)
       .map((row, idx) => ({
         id: `legspd-${idx}-${row.description || 'profile'}`,
-        label: `${row.description || `Profile ${idx + 1}`} (${Number(row.speed).toFixed(1)} kt / ${row.dailyCons1 || '—'} mt/day)`,
+        label: `${row.description || `Profile ${idx + 1}`} (${Number(row.speed).toFixed(1)} kt / ${row.dailyCons1 || '—'} mt/day${row.fuelType1 ? `, ${row.fuelType1}` : ''})`,
         speedKts: Number(row.speed),
         isDefault: !!row.isDefault,
+        dailyCons: Number.isFinite(Number(row.dailyCons1)) && Number(row.dailyCons1) > 0 ? Number(row.dailyCons1) : undefined,
+        fuelType: row.fuelType1 || undefined,
       }));
     if (legRows && legRows.length > 0) {
       const hasDefault = legRows.some((row) => row.isDefault);
@@ -1334,20 +1636,106 @@ export function RouteExplorerPage() {
     });
   }, [activeLegSpeedProfile, waypoints]);
 
-  const defaultReportFuelType = useMemo(() => {
-    const defaultRow = activeLegSpeedProfile?.speedCons?.find((row) => !!row.isDefault)
-      ?? activeLegSpeedProfile?.speedCons?.[0];
-    return defaultRow?.fuelType1 || REPORT_FUEL_OPTIONS[0];
-  }, [activeLegSpeedProfile]);
+  /** The CP & Leg Details' "Speed & Cons" Default-checked row — the single
+   *  source of truth new waypoints and non-manually-overridden waypoints'
+   *  speed/fuel dynamically track (see `Waypoint.speedManual`). */
+  const cpDefaultSpeedConsRow = useMemo(
+    () => activeLegSpeedProfile?.speedCons?.find((row) => !!row.isDefault)
+      ?? activeLegSpeedProfile?.speedCons?.[0]
+      ?? null,
+    [activeLegSpeedProfile],
+  );
+  const cpDefaultSpeedKts = useMemo(() => {
+    const v = Number(cpDefaultSpeedConsRow?.speed);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }, [cpDefaultSpeedConsRow]);
+  const cpDefaultDailyCons = useMemo(() => {
+    const v = Number(cpDefaultSpeedConsRow?.dailyCons1);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }, [cpDefaultSpeedConsRow]);
+
+  const defaultReportFuelType = useMemo(
+    () => cpDefaultSpeedConsRow?.fuelType1 || REPORT_FUEL_OPTIONS[0],
+    [cpDefaultSpeedConsRow],
+  );
+
+  // Keep every waypoint that's never been manually/report-overridden
+  // (`speedManual` falsy) in sync with the CP's current Default speed/cons
+  // row, so editing that default there updates them automatically. Any
+  // waypoint after a deliberate override (manual edit or a report's forward-
+  // propagated speed/fuel change) is marked `speedManual` and skipped here,
+  // so only the portion of the route still "before" such a change tracks it.
+  useEffect(() => {
+    if (cpDefaultSpeedKts == null) return;
+    setWaypoints((prev) => {
+      let changed = false;
+      const next = prev.map((wp) => {
+        if (wp.speedManual) return wp;
+        if (wp.speed === cpDefaultSpeedKts && wp.dailyCons === (cpDefaultDailyCons ?? undefined))
+          return wp;
+        changed = true;
+        return { ...wp, speed: cpDefaultSpeedKts, dailyCons: cpDefaultDailyCons ?? undefined };
+      });
+      if (!changed) return prev;
+      return recomputeGeometry(next);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cpDefaultSpeedKts, cpDefaultDailyCons]);
 
   const onSelectReportSpeed = (reportId: string, opt: SpeedProfileOption) => {
     setRouteReportSpeedSelection(reportId, opt.label, opt.speedKts);
   };
 
-  const reportFuelOptions = useMemo(() => REPORT_FUEL_OPTIONS, []);
-
   const onSelectReportFuel = (reportId: string, fuelType: string) => {
     setRouteReportFuelSelection(reportId, fuelType);
+  };
+
+  /**
+   * Apply a vessel report's chosen speed/cons/fuel-type forward from that
+   * report's position to every later waypoint that hasn't already been
+   * manually overridden — never touching waypoints before it, nor ones a
+   * user (or an earlier report) already set a deliberate speed for. Fuel
+   * type comes from the chosen speed/cons profile row itself (`opt.fuelType`,
+   * falling back to the CP's own default fuel type) — never a separate pick,
+   * since each CP speed/cons row already fixes its own fuel type. Marks
+   * every waypoint it does touch `speedManual` so it stops dynamically
+   * tracking the CP default from here on, and so a *later* report's own
+   * propagation correctly treats it as already-overridden too.
+   */
+  const applyReportCriteriaForward = (reportPos: [number, number], opt: SpeedProfileOption) => {
+    const fuelType = opt.fuelType ?? defaultReportFuelType;
+    setWaypoints((prev) => {
+      if (prev.length === 0) return prev;
+      let bestIdx = -1;
+      let bestDist = Number.POSITIVE_INFINITY;
+      prev.forEach((wp, i) => {
+        const lat = dmToDec(wp.lat);
+        const lon = dmToDec(wp.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+        const d = haversineNM(lat, lon, reportPos[0], reportPos[1]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      });
+      if (bestIdx < 0) return prev;
+      const next = prev.map((wp, i) => {
+        if (i < bestIdx || wp.speedManual) return wp;
+        return {
+          ...wp,
+          speed: opt.speedKts,
+          fuelType,
+          dailyCons: Number.isFinite(Number(opt.dailyCons)) ? Number(opt.dailyCons) : wp.dailyCons,
+          speedManual: true,
+        };
+      });
+      return recomputeGeometry(next);
+    });
+  };
+
+  const onApplyReportCriteria = (reportPos: [number, number], opt: SpeedProfileOption) => {
+    if (!editMode) return;
+    applyReportCriteriaForward(reportPos, opt);
   };
 
   const isWaypointLocked = (id: string) => lockedWaypointIds.has(id);
@@ -1387,11 +1775,11 @@ export function RouteExplorerPage() {
           ? `${depInput || 'Departure'} (Departure)`
           : i === last
             ? `${arrInput || 'Arrival'} (Arrival)`
-            : `${chosen.label} WP ${i}`,
+            : `${chosen.label} WP ${i + 1}`,
       lat: decToDM(pt[0], true),
       lon: decToDM(pt[1], false),
       course: 0,
-      speed: 12,
+      speed: cpDefaultSpeedKts ?? 12,
       distanceFromPrev: 0,
       eta: '',
       drift: false,
@@ -1423,10 +1811,60 @@ export function RouteExplorerPage() {
     let cumulative = 0;
     return waypoints
       .map((wp) => {
-        cumulative += wp.distanceFromPrev;
+        // Defense-in-depth against any already-saved waypoint whose
+        // `distanceFromPrev` is somehow not a finite number (e.g. older data
+        // saved before `recomputeGeometry`'s own NaN guard above existed) —
+        // without this, a single bad value here would poison every later
+        // waypoint's cumulative "distance from departure" too, since
+        // `NaN + anything` is always `NaN`.
+        const legDist = Number.isFinite(wp.distanceFromPrev) ? wp.distanceFromPrev : 0;
+        cumulative += legDist;
+        // While this waypoint's details are open for editing, show the
+        // live draft name (not yet saved) on the map tooltip too — purely
+        // a read-only preview, so typing a note like "Increase speed"
+        // appears immediately without needing to click Save first. This
+        // doesn't touch the committed route itself (still gated on Save,
+        // same as every other draft field).
+        const liveName = waypointDraft && selectedWaypoint?.id === wp.id ? waypointDraft.name : wp.name;
+        // For the hover tooltip's "Drifting until … (duration)" line — the
+        // duration is computed from this waypoint's own `eta` (kept fresh
+        // by `recomputeGeometry`, re-threaded from the voyage's current ETD
+        // on every edit and on initial load) to "Drift until", never a
+        // stale cached value.
+        let driftUntilLabel: string | null = null;
+        let driftDurationLabel: string | null = null;
+        if (wp.drift && wp.driftUntil) {
+          const untilMs = parseLocalDateTime(wp.driftUntil);
+          if (untilMs != null) {
+            driftUntilLabel = new Date(untilMs).toLocaleString(undefined, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+            const arriveMs = parseLocalDateTime(wp.eta);
+            if (arriveMs != null && untilMs > arriveMs) {
+              driftDurationLabel = formatDuration((untilMs - arriveMs) / 3600_000);
+            }
+          }
+        }
+        // Pre-formatted ETA/ETD for the tooltip, matching the drift-until
+        // label's style — `undefined` (not shown) for a malformed date.
+        const etaMs = parseLocalDateTime(wp.eta);
+        const etaLabel =
+          etaMs != null
+            ? new Date(etaMs).toLocaleString(undefined, {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : undefined;
         return {
           id: wp.id,
-          name: wp.name,
+          name: liveName,
           lat: dmToDec(wp.lat),
           lon: dmToDec(wp.lon),
           latLng: [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number],
@@ -1435,13 +1873,25 @@ export function RouteExplorerPage() {
           legType: wp.legType ?? 'rhumb',
           latLabel: wp.lat,
           lonLabel: wp.lon,
-          distFromPrev: Math.round(wp.distanceFromPrev),
+          distFromPrev: Math.round(legDist),
           distFromStart: Math.round(cumulative),
           locked: isWaypointLocked(wp.id),
+          driftUntilLabel,
+          driftDurationLabel,
+          course: wp.course,
+          speed: wp.speed,
+          rpmMin: wp.rpmMin,
+          rpmMax: wp.rpmMax,
+          mcrMin: wp.mcrMin,
+          mcrMax: wp.mcrMax,
+          fuelType: wp.fuelType,
+          dailyCons: wp.dailyCons,
+          etaLabel,
+          etaMs: etaMs ?? undefined,
         };
       })
       .filter((p) => !Number.isNaN(p.lat) && !Number.isNaN(p.lon));
-  }, [waypoints, lockedWaypointIds]);
+  }, [waypoints, lockedWaypointIds, selectedWaypoint?.id, waypointDraft?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Publish the route currently drawn on the map so the Route Simulator (in
   // the bottom drawer) can play it back as the "Active" route. The path is
@@ -1472,11 +1922,19 @@ export function RouteExplorerPage() {
         .filter(([, hours]) => hours > 0),
     );
     for (let i = 0; i < mapPoints.length - 1; i += 1) {
-      const seg = legPositions(
+      // Thread the leg through any real reports that fall chronologically
+      // between these two waypoints (see `reportsForLeg`/`buildLegPath` in
+      // RouteEditorMap.tsx) — keeps this timing/position path consistent
+      // with the exact line drawn on the map for the same leg.
+      const through = reportsForLeg(reportMarkers, mapPoints[i].etaMs, mapPoints[i + 1].etaMs).map(
+        (r) => ({ lat: r.pos[0], lon: r.pos[1] }),
+      );
+      const seg = buildLegPath(
         mapPoints[i],
         mapPoints[i + 1],
         mapPoints[i].legType ?? 'rhumb',
-      ).map((p) => p as [number, number]);
+        through,
+      );
       const rawSpeed = speedById.get(mapPoints[i].id) ?? 0;
       const legSpeed = rawSpeed > 0 ? rawSpeed : SERVICE_SPEED_KN;
       if (i === 0 && seg.length > 0) {
@@ -1506,8 +1964,32 @@ export function RouteExplorerPage() {
       }
     }
     if (path.length >= 2) {
+      // The editor can simply be *viewing* this voyage's already-active
+      // saved route (not editing it) — in which case publishing it here too
+      // would add a second, pointlessly-duplicate row right next to that
+      // same route's own row from the saved-routes list. Only suppress it
+      // in that exact case: still show it while the editor has a genuinely
+      // different route open (a deliberate preview before activating it) or
+      // while actively editing (so the live, unsaved edit reflects in real
+      // time) — in both of those cases, though, the id used below matches
+      // whichever saved entry the editor is actually backing (`editorId`
+      // while editing — the "Edit of X" copy created up front, see
+      // `startEditDuplicate` — or otherwise whatever's plainly loaded), so
+      // the Route Simulator's own list treats this as an update to that
+      // same row instead of a second one; only a route with no saved entry
+      // behind it at all (freshly plotted, never saved) gets a distinct id.
+      const loadedRouteId = resolveLoadedRouteId(voyageId);
+      const activeSavedId = readActiveRouteId(voyageId)?.replace(/^saved-/, '') ?? null;
+      const isViewingActiveSavedRouteUnedited =
+        !editMode && !!loadedRouteId && loadedRouteId === activeSavedId;
+      if (isViewingActiveSavedRouteUnedited) {
+        setActiveSimRoute(null);
+        return;
+      }
       const distanceNm = waypoints.reduce((sum, wp) => sum + wp.distanceFromPrev, 0);
-      const plannedLabel = t('plannedRoute', 'Planned route');
+      const liveLabel =
+        (loadedRouteId && savedRoutes.find((r) => r.id === loadedRouteId)?.name) ||
+        t('plannedRoute', 'Planned route');
       const waypointOverrides = waypoints
         .filter(
           (wp) =>
@@ -1528,8 +2010,8 @@ export function RouteExplorerPage() {
         }))
         .filter((o) => !Number.isNaN(o.pos[0]) && !Number.isNaN(o.pos[1]));
       setActiveSimRoute({
-        id: 'active-planned',
-        label: editMode ? `Edit of ${plannedLabel}` : plannedLabel,
+        id: loadedRouteId ? `saved-${loadedRouteId}` : 'active-planned',
+        label: liveLabel,
         color: '#1f6feb',
         path,
         distanceNm: Math.round(distanceNm),
@@ -1540,19 +2022,19 @@ export function RouteExplorerPage() {
     } else {
       setActiveSimRoute(null);
     }
-  }, [mapPoints, waypoints, editMode, selectedVoyage?.etdIso]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mapPoints, waypoints, editMode, selectedVoyage?.etdIso, voyageId, savedRoutes, reportMarkers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => setActiveSimRoute(null), []);
 
   const addPointFromMap = (lat: number, lon: number) => {
     setWaypoints((prev) => {
       const next: Waypoint = {
-        id: `wp-${Date.now()}`,
+        id: uniqueId('wp'),
         name: `Waypoint ${prev.length + 1}`,
         lat: decToDM(lat, true),
         lon: decToDM(lon, false),
         course: 0,
-        speed: prev[prev.length - 1]?.speed ?? 12,
+        speed: prev[prev.length - 1]?.speed ?? cpDefaultSpeedKts ?? 12,
         distanceFromPrev: 0,
         eta: prev[prev.length - 1]?.eta ?? '',
         drift: false,
@@ -1579,16 +2061,105 @@ export function RouteExplorerPage() {
     setSelected((prev) => prev.filter((x) => x !== id));
   };
 
-  /** Clicking a waypoint marker on the map selects it and expands the
-   *  Waypoint details side panel if it's currently collapsed. */
-  const selectWaypointFromMap = (id: string) => {
+  /** Anchor for Shift-click range-selection — the last waypoint plain-clicked
+   *  (not Shift-clicked), from either the map or the list, so a subsequent
+   *  Shift-click (on either) knows where the range should start from. */
+  const rangeAnchorIdRef = useRef<string | null>(null);
+
+  /** Whether a Shift-click range-select should CHECK or UNCHECK the range —
+   *  set whenever the anchor itself is established. A checkbox's own plain
+   *  click sets this to whichever way IT just toggled (so unchecking an
+   *  already-checked waypoint, then Shift-clicking another, range-*un*checks
+   *  the whole range in between, mirroring how range-*checking* already
+   *  works); a plain row/map click (which doesn't check/uncheck anything by
+   *  itself) leaves this as 'check', the original/default range behaviour. */
+  const rangeAnchorModeRef = useRef<'check' | 'uncheck'>('check');
+
+  /**
+   * Shared Shift-click range-select logic for both the map markers and the
+   * waypoint list rows — checks (or, per `rangeAnchorModeRef`, unchecks)
+   * every waypoint between the last plain click (the range anchor, set by
+   * whichever of the two was clicked last) and this one, inclusive, in
+   * whichever order they appear in the route. A range-check only adds to
+   * whatever was already checked (never replaces/clears it), so an earlier
+   * selection — whether made by checkbox, a previous Shift-click, or
+   * anything else — is never silently cleared by a later Shift-click;
+   * symmetrically, a range-uncheck only removes the range, leaving anything
+   * else checked untouched. Returns true if it handled the click as a
+   * range-select (the caller should do nothing else); false if the caller
+   * should fall through to its own plain-click behaviour (and must then
+   * update `rangeAnchorIdRef`/`rangeAnchorModeRef` itself) — e.g. there's no
+   * anchor yet, or it's since been deleted.
+   */
+  const applyRangeSelect = (id: string, shiftKey: boolean): boolean => {
+    if (!shiftKey || !rangeAnchorIdRef.current) return false;
+    const ids = waypoints.map((wp) => wp.id);
+    const anchorIdx = ids.indexOf(rangeAnchorIdRef.current);
+    const clickedIdx = ids.indexOf(id);
+    if (anchorIdx === -1 || clickedIdx === -1) return false;
+    const [start, end] = anchorIdx <= clickedIdx ? [anchorIdx, clickedIdx] : [clickedIdx, anchorIdx];
+    const rangeIds = ids.slice(start, end + 1);
+    const uncheck = rangeAnchorModeRef.current === 'uncheck';
+    setCheckedIds((prev) => {
+      const merged = new Set(prev);
+      for (const rid of rangeIds) {
+        if (uncheck) merged.delete(rid);
+        else merged.add(rid);
+      }
+      // Keep the result in route order (not append order) so it stays
+      // consistent with everything else that reads `checkedIds` expecting
+      // route order (e.g. "insert after the last checked waypoint").
+      return ids.filter((wid) => merged.has(wid));
+    });
+    setSideCollapsed(false);
+    return true;
+  };
+
+  /**
+   * Clicking a waypoint marker on the map selects it and expands the
+   * Waypoint details side panel if it's currently collapsed. Shift-clicking
+   * instead range-selects — see `applyRangeSelect`.
+   */
+  const selectWaypointFromMap = (id: string, shiftKey?: boolean) => {
+    if (applyRangeSelect(id, !!shiftKey)) return;
+    rangeAnchorIdRef.current = id;
+    rangeAnchorModeRef.current = 'check';
     setSelected([id]);
     setSideCollapsed(false);
   };
 
+  /**
+   * Live position updates fired continuously while a waypoint marker is
+   * being dragged (once per animation frame, so the route line follows the
+   * cursor smoothly) — applied silently (no undo step) so a single drag
+   * gesture doesn't flood the undo history with one entry per frame.
+   * `dragBaselineRef` snapshots the route exactly as it was just before the
+   * first of these preview frames, so the final position (committed once on
+   * drag release, below) can record ONE undo step spanning the whole drag —
+   * start position straight to end position — instead of needing repeated
+   * Undo clicks to walk back through every intermediate frame in between.
+   */
+  const dragBaselineRef = useRef<Waypoint[] | null>(null);
+  const moveWaypointPreview = (id: string, lat: number, lon: number) => {
+    if (isWaypointLocked(id)) return;
+    if (dragBaselineRef.current === null) dragBaselineRef.current = waypoints;
+    setWaypointsSilently((prev) =>
+      recomputeGeometry(
+        prev.map((wp) =>
+          wp.id === id
+            ? { ...wp, lat: decToDM(lat, true), lon: decToDM(lon, false) }
+            : wp,
+        ),
+      ),
+    );
+  };
+
+  /** Committed once on drag release (or for any other single-shot move). */
   const moveWaypoint = (id: string, lat: number, lon: number) => {
     if (isWaypointLocked(id)) return;
-    setWaypoints((prev) =>
+    const baseline = dragBaselineRef.current ?? waypoints;
+    dragBaselineRef.current = null;
+    commitWaypoints(baseline, (prev) =>
       recomputeGeometry(
         prev.map((wp) =>
           wp.id === id
@@ -1610,7 +2181,7 @@ export function RouteExplorerPage() {
       const pos = afterId ? prev.findIndex((wp) => wp.id === afterId) : prev.length - 1;
       const insertAt = pos < 0 ? prev.length : pos + 1;
       const newWp: Waypoint = {
-        id: `wp-${Date.now()}`,
+        id: uniqueId('wp'),
         name: `Waypoint ${prev.length + 1}`,
         lat: decToDM(lat, true),
         lon: decToDM(lon, false),
@@ -1645,7 +2216,7 @@ export function RouteExplorerPage() {
       const lat = nextRef ? (lat1 + dmToDec(nextRef.lat)) / 2 : lat1 + 0.5;
       const lon = nextRef ? (lon1 + dmToDec(nextRef.lon)) / 2 : lon1 + 0.5;
       const newWp: Waypoint = {
-        id: `wp-${Date.now()}`,
+        id: uniqueId('wp'),
         name: `Waypoint ${prev.length + 1}`,
         lat: decToDM(lat, true),
         lon: decToDM(lon, false),
@@ -1712,7 +2283,9 @@ export function RouteExplorerPage() {
     setWaypoints((prev) =>
       recomputeGeometry(
         prev.map((wp) =>
-          checkedIds.includes(wp.id) ? { ...wp, speed, rpmMin, rpmMax, mcrMin, mcrMax } : wp,
+          checkedIds.includes(wp.id)
+            ? { ...wp, speed, rpmMin, rpmMax, mcrMin, mcrMax, speedManual: true }
+            : wp,
         ),
       ),
     );
@@ -1730,6 +2303,64 @@ export function RouteExplorerPage() {
     return tagged;
   };
 
+  /**
+   * Archive every saved route for this voyage *other than* `keepId` into
+   * the permanent "All Routes" history, then remove them from the active
+   * saved-routes list — called right before promoting `keepId` to be the
+   * new active route (see `activateEdit`), so activating an edit doesn't
+   * leave the superseded original (or any other inactive route) cluttering
+   * the main list: per the explicit design, only the route that's actually
+   * active stays there, everything else lives in "All Routes" instead.
+   * Mirrors the shape used by the Route Simulator's own time-based stale-
+   * route archiving (see `RouteSimulatorPanel.tsx`), just triggered
+   * immediately instead of after a delay.
+   */
+  const archiveOtherSavedRoutes = (forVoyageId: string, keepId: string) => {
+    const all = readAllSavedRoutes();
+    const toArchive = all.filter((r) => r.id !== keepId && (r.voyageId == null || r.voyageId === forVoyageId));
+    if (toArchive.length === 0) return;
+    const nowIso = new Date().toISOString();
+    const entries: RouteHistoryEntry[] = toArchive.map((r) => {
+      const distanceNm = Math.round(
+        r.waypoints.reduce((sum, wp) => sum + (Number.isFinite(wp.distanceFromPrev) ? wp.distanceFromPrev : 0), 0),
+      );
+      const etdIso = r.waypoints[0]?.eta || nowIso;
+      const etaIso = r.waypoints[r.waypoints.length - 1]?.eta || etdIso;
+      const durationMs = parseLocalDateTime(etaIso) != null && parseLocalDateTime(etdIso) != null
+        ? Math.max(0, (parseLocalDateTime(etaIso)! - parseLocalDateTime(etdIso)!) / 3600_000)
+        : 0;
+      return {
+        id: uniqueId('archived'),
+        voyageId: forVoyageId,
+        baseRouteName: r.name,
+        name: r.name,
+        generatedAt: r.savedAt || nowIso,
+        path: r.waypoints.map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number]),
+        summary: {
+          distanceNm,
+          durationH: durationMs,
+          speedKn: durationMs > 0 ? distanceNm / durationMs : SERVICE_SPEED_KN,
+          ecaDistanceNm: 0,
+          ecaDurationH: 0,
+          fuelTons: 0,
+          ecaFuelTons: 0,
+          fuelCost: 0,
+          hireCost: 0,
+          euaCost: 0,
+          totalCost: 0,
+          co2Tons: 0,
+          etdIso,
+          etaIso,
+        },
+        source: 'manual',
+      };
+    });
+    appendRouteHistory(entries);
+    const archivedIds = new Set(toArchive.map((r) => r.id));
+    writeSavedRoutes(all.filter((r) => !archivedIds.has(r.id)));
+    setSavedRoutes(readSavedRoutes(forVoyageId));
+  };
+
   const saveRoute = () => {
     const name = routeName.trim() || `Route ${savedRoutes.length + 1}`;
     const canonicalWaypoints = waypoints.map((waypoint) => ({
@@ -1737,7 +2368,7 @@ export function RouteExplorerPage() {
       lon: canonicalLongitudeLabel(waypoint.lon),
     }));
     appendSavedRoute({
-      id: `route-${Date.now()}`,
+      id: uniqueId('route'),
       name,
       savedAt: new Date().toISOString(),
       waypoints: canonicalWaypoints,
@@ -1747,57 +2378,100 @@ export function RouteExplorerPage() {
 
   const clearRoute = () => {
     suppressManualRouteMarkRef.current = true; // resetting, not establishing an edit
-    setWaypoints([]);
+    resetWaypoints([]);
     setSelected([]);
   };
 
   /**
-   * Enter edit mode. When a route already exists it is duplicated: the original
-   * is snapshotted and drawn faded on the map for comparison, and the copy is
-   * edited. From an empty route this simply unlocks the map to plot a new one.
+   * Enter edit mode by duplicating the route into a genuinely separate,
+   * durable saved entry — "Edit of {the real route name}" — which becomes
+   * what the editor is attached to (`editorId`) from this point on; the
+   * original is left completely untouched, still its own saved entry under
+   * its own real name, so it stays visible in the Route Simulator's list
+   * for comparison without needing any separate synthetic "comparison" row.
+   * Only one new row appears: the copy being edited. "Save" persists into
+   * this copy specifically (never the original); "Activate" promotes it to
+   * the voyage's new active route and archives every other inactive route
+   * into "All Routes"; "Discard" deletes this throwaway copy entirely.
+   * From an empty route, this simply unlocks the map to plot a new one (no
+   * copy to make yet).
    */
   const startEditDuplicate = () => {
-    if (waypoints.length > 0) {
+    if (waypoints.length > 0 && voyageId) {
       setOriginalRoute(waypoints.map((wp) => ({ ...wp })));
-      setRouteName((n) => (n.trim() ? `${n.trim()} (copy)` : 'Route (copy)'));
+      const loadedRouteId = resolveLoadedRouteId(voyageId);
+      const realName =
+        (loadedRouteId && savedRoutes.find((r) => r.id === loadedRouteId)?.name) ||
+        routeName.trim() ||
+        'Route';
+      const copyName = `Edit of ${realName}`;
+      const canonicalWaypoints = waypoints.map((wp) => ({ ...wp, lon: canonicalLongitudeLabel(wp.lon) }));
+      const copy = appendSavedRoute({
+        id: uniqueId('route'),
+        name: copyName,
+        savedAt: new Date().toISOString(),
+        waypoints: canonicalWaypoints,
+      });
+      writeRouteEditorRouteId(voyageId, copy.id);
+      setRouteName(copyName);
+      bumpSavedRoutes();
     }
+    // Fresh undo/redo history for this edit session — any leftover history
+    // from an earlier (already-saved or discarded) session shouldn't be
+    // reachable from here.
+    resetWaypoints(waypoints);
     setEditMode(true);
     setSideCollapsed(false);
   };
 
   /**
-   * Keep the edited route (stays live/editable on the map) and preserve the
-   * pre-edit original as a saved route so both remain available in the routes
-   * list below for comparison — the operator can activate or delete either.
-   * Activating an edit is itself a deliberate "this is now the route" action,
-   * so it turns this voyage's "Auto Route" off immediately too.
+   * Keep the edited route (stays live/editable on the map, and durably
+   * persists whatever hasn't been explicitly Saved yet — Activate should
+   * never silently lose unsaved work) and promote it to this voyage's new
+   * active route. Every *other* non-active saved route (including the now-
+   * superseded original) is archived into "All Routes" instead of staying
+   * in the active list — a deliberate "this is now the route" action, so it
+   * also turns this voyage's "Auto Route" off immediately.
    */
   const activateEdit = () => {
-    if (originalRoute && originalRoute.length >= 2) {
-      const baseName =
-        routeName.trim().replace(/\s*\(copy\)\s*$/i, '') || 'Planned route';
-      appendSavedRoute({
-        id: `route-${Date.now()}`,
-        name: `${baseName} (original)`,
-        savedAt: new Date().toISOString(),
-        waypoints: originalRoute.map((waypoint) => ({
-          ...waypoint,
-          lon: canonicalLongitudeLabel(waypoint.lon),
-        })),
-      });
-      bumpSavedRoutes();
+    if (voyageId && waypoints.length >= 2) {
+      // Always persist first — covers both updating the existing "Edit of
+      // X" copy, *and* the edge case of editing a route built entirely
+      // from scratch during this session with no interim Save click yet,
+      // where `editorId` isn't set at all until this very call creates it
+      // (see `persistRouteToSavedEntry`'s own create-if-missing fallback).
+      persistRouteToSavedEntry(waypoints);
+      const editorId = readRouteEditorRouteId(voyageId);
+      if (editorId) {
+        archiveOtherSavedRoutes(voyageId, editorId);
+        writeActiveRouteId(voyageId, editorId);
+      }
+      mergeVoyageShared(voyageId, { leg1AutoRoute: false });
     }
-    if (voyageId) mergeVoyageShared(voyageId, { leg1AutoRoute: false });
     setEditMode(false);
     setOriginalRoute(null);
     setPlotMode(false);
   };
 
-  /** Discard the edits, restore the original route and re-lock the map. */
+  /** Discard the edits: delete the throwaway "Edit of X" copy entirely,
+   *  restore the original route on the map, and re-lock the editor. */
   const discardEdit = () => {
+    if (voyageId) {
+      const editorId = readRouteEditorRouteId(voyageId);
+      const activeId = readActiveRouteId(voyageId)?.replace(/^saved-/, '') ?? null;
+      if (editorId && editorId !== activeId) {
+        writeSavedRoutes(readAllSavedRoutes().filter((r) => r.id !== editorId));
+        setSavedRoutes(readSavedRoutes(voyageId));
+      }
+      // Clearing this lets `loadRouteForVoyage` fall back to `activeId` (the
+      // untouched original) on its own, rather than pointing at a copy that
+      // no longer exists.
+      writeRouteEditorRouteId(voyageId, null);
+      bumpSavedRoutes();
+    }
     if (originalRoute) {
       suppressManualRouteMarkRef.current = true; // reverting, not a new edit
-      setWaypoints(originalRoute);
+      resetWaypoints(originalRoute);
       setSelected([]);
     }
     setEditMode(false);
@@ -1853,7 +2527,9 @@ export function RouteExplorerPage() {
     const voyageId = selectedVoyage?.id;
     const sync = () => {
       const shared = loadVoyageShared(voyageId)?.etdIso;
-      setWaypoints((prev) => {
+      // Silent: mirroring the shared ETD is a background sync, not a
+      // deliberate edit — it shouldn't show up as its own undo step.
+      setWaypointsSilently((prev) => {
         if (prev.length === 0) return prev;
         const effective = shared || prev[0].eta || selectedVoyage?.etdIso || '';
         if (!effective || prev[0].eta === effective) return prev;
@@ -1880,13 +2556,51 @@ export function RouteExplorerPage() {
           <div className="fv-route__bulk">
             <button
               type="button"
+              className="fv-route__icon-btn"
+              onClick={undoWaypoints}
+              disabled={!editMode || !canUndoWaypoints}
+              title={t('undoRouteChange', 'Undo last route change')}
+              aria-label={t('undoRouteChange', 'Undo last route change')}
+            >
+              <i className="fas fa-rotate-left" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="fv-route__icon-btn"
+              onClick={redoWaypoints}
+              disabled={!editMode || !canRedoWaypoints}
+              title={t('redoRouteChange', 'Redo route change')}
+              aria-label={t('redoRouteChange', 'Redo route change')}
+            >
+              <i className="fas fa-rotate-right" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="fv-route__icon-btn"
+              onClick={() => requestMapCenterOnVessel()}
+              disabled={!vesselPos}
+              title={t('centerOnVessel', "Center map on the vessel's position")}
+              aria-label={t('centerOnVessel', "Center map on the vessel's position")}
+            >
+              <i className="fas fa-ship" aria-hidden="true" />
+            </button>
+            {/* Portal target for the Route Simulator panel's own route-
+                management buttons (bookmark/import/export/merge/split/
+                duplicate-edit/...) — see `useRoutesToolbarSlot` — so they sit
+                in this same row instead of their own row further down. */}
+            <div
+              className="fv-route__routes-toolbar-slot"
+              ref={(el) => setRoutesToolbarSlot(el)}
+            />
+            <button
+              type="button"
               className="fv-route__btn fv-route__btn--primary"
               onClick={saveWaypointDraft}
-              disabled={!isWaypointDraftDirty}
+              disabled={!isWaypointDraftDirty && !hasRouteChangedSinceEdit}
               title={
-                isWaypointDraftDirty
-                  ? t('saveWaypointHint', 'Save the changes made in Waypoint details.')
-                  : t('noUnsavedChanges', 'No unsaved waypoint changes.')
+                isWaypointDraftDirty || hasRouteChangedSinceEdit
+                  ? t('saveRouteHint', 'Save every change made in this edit (waypoints, speed/RPM/MCR, inserts/deletes, ...) back to the route.')
+                  : t('noUnsavedChanges', 'No unsaved route changes.')
               }
             >
               <i className="fas fa-check" aria-hidden="true" /> {t('save', 'Save')}
@@ -1895,23 +2609,43 @@ export function RouteExplorerPage() {
               type="button"
               className="fv-route__btn"
               onClick={discardWaypointDraft}
-              disabled={!isWaypointDraftDirty}
-              title={t('discardWaypointHint', 'Discard unsaved Waypoint details changes.')}
+              disabled={!isWaypointDraftDirty && !hasRouteChangedSinceEdit}
+              title={t('discardRouteHint', 'Discard every unsaved change made in this edit.')}
             >
               <i className="fas fa-rotate-left" aria-hidden="true" /> {t('discard', 'Discard')}
             </button>
             <button
               type="button"
+              className="fv-route__btn"
+              onClick={insertCheckedWaypoint}
+              disabled={!editMode || waypoints.length === 0}
+              title={t('insertWaypointHint', 'Insert a new waypoint after the last checked one (or at the end).')}
+            >
+              <i className="fas fa-plus" aria-hidden="true" /> {t('insert', 'Insert')}
+            </button>
+            <button
+              type="button"
+              className="fv-route__btn"
+              onClick={setSpeedForChecked}
+              disabled={!editMode || checkedIds.length === 0}
+              title={t('setSpeedEngineHint', 'Set speed/RPM/MCR for the checked waypoints.')}
+            >
+              <i className="fas fa-gauge-high" aria-hidden="true" /> {t('setSpeedEngine', 'Set speed/RPM/MCR')}
+            </button>
+            <button
+              type="button"
               className="fv-route__btn fv-route__btn--danger"
               onClick={deleteCheckedWaypoints}
-              disabled={checkedIds.length === 0}
+              disabled={!editMode || checkedIds.length === 0}
               title={
-                checkedIds.length > 0
-                  ? t('deleteSelectedWaypointsHint', 'Delete all checked waypoints at once.')
-                  : t(
-                      'selectWaypointsToDeleteHint',
-                      'Check one or more waypoints below to delete them together.',
-                    )
+                !editMode
+                  ? t('enableEditModeHint', 'Turn on route edit mode to make changes.')
+                  : checkedIds.length > 0
+                    ? t('deleteSelectedWaypointsHint', 'Delete all checked waypoints at once.')
+                    : t(
+                        'selectWaypointsToDeleteHint',
+                        'Check one or more waypoints below to delete them together.',
+                      )
               }
             >
               <i className="fas fa-trash" aria-hidden="true" /> {t('deleteSelected', 'Delete selected')}
@@ -1930,7 +2664,7 @@ export function RouteExplorerPage() {
             <input
               ref={uploadRouteInputRef}
               type="file"
-              accept=".json,.csv,.txt"
+              accept=".json,.geojson,.csv,.txt,.rtz,.xml,.gpx,.kml"
               style={{ display: 'none' }}
               onChange={onUploadRouteFile}
             />
@@ -1974,32 +2708,6 @@ export function RouteExplorerPage() {
             </header>
             {!sideCollapsed && (
             <>
-            <div className="fv-route__side-tools">
-              <button
-                type="button"
-                className="fv-route__side-tool"
-                onClick={insertCheckedWaypoint}
-                disabled={waypoints.length === 0}
-              >
-                <i className="fas fa-plus" aria-hidden="true" /> {t('insert', 'Insert')}
-              </button>
-              <button
-                type="button"
-                className="fv-route__side-tool"
-                onClick={deleteCheckedWaypoints}
-                disabled={checkedIds.length === 0}
-              >
-                <i className="fas fa-trash" aria-hidden="true" /> {t('delete', 'Delete')}
-              </button>
-              <button
-                type="button"
-                className="fv-route__side-tool"
-                onClick={setSpeedForChecked}
-                disabled={checkedIds.length === 0}
-              >
-                <i className="fas fa-gauge-high" aria-hidden="true" /> {t('setSpeedEngine', 'Set speed/RPM/MCR')}
-              </button>
-            </div>
             <div className="fv-route__side-scroll">
               {waypoints.length === 0 ? (
                 <p className="fv-route__side-empty">{t('noPoints', 'No points yet.')}</p>
@@ -2033,7 +2741,12 @@ export function RouteExplorerPage() {
                       <Fragment key={wp.id}>
                         <tr
                           className={selected.includes(wp.id) ? 'fv-route__side-row--selected' : ''}
-                          onClick={() => setSelected(selected[0] === wp.id ? [] : [wp.id])}
+                          onClick={(e) => {
+                            if (applyRangeSelect(wp.id, e.shiftKey)) return;
+                            rangeAnchorIdRef.current = wp.id;
+                            rangeAnchorModeRef.current = 'check';
+                            setSelected(selected[0] === wp.id ? [] : [wp.id]);
+                          }}
                         >
                           <td
                             className="fv-route__side-check"
@@ -2042,7 +2755,34 @@ export function RouteExplorerPage() {
                             <input
                               type="checkbox"
                               checked={checkedIds.includes(wp.id)}
-                              onChange={() => toggleWaypointChecked(wp.id)}
+                              onChange={(e) => {
+                                // Shift+click range-checks (or, per
+                                // `rangeAnchorModeRef`, range-unchecks) from
+                                // the last plain-clicked row (anywhere —
+                                // list or map) through this one, instead of
+                                // just toggling this single checkbox.
+                                // Decided here (not in a separate onClick +
+                                // preventDefault) since React tracks a
+                                // checkbox's native click to drive
+                                // onChange — trying to intercept and cancel
+                                // that beforehand is unreliable and can race
+                                // with this handler, leaving the range's own
+                                // end point toggled back off. `nativeEvent`
+                                // is the MouseEvent that triggered the
+                                // click, so its `shiftKey` is still
+                                // available here.
+                                const shiftKey = (e.nativeEvent as MouseEvent).shiftKey;
+                                if (shiftKey && applyRangeSelect(wp.id, true)) return;
+                                rangeAnchorIdRef.current = wp.id;
+                                // This checkbox's own new state (the
+                                // opposite of its state just before this
+                                // click) becomes the range mode for a
+                                // subsequent Shift-click — so unchecking
+                                // this one, then Shift-clicking another,
+                                // range-unchecks everything in between.
+                                rangeAnchorModeRef.current = checkedIds.includes(wp.id) ? 'uncheck' : 'check';
+                                toggleWaypointChecked(wp.id);
+                              }}
                               aria-label={t('selectWaypoint', 'Select waypoint')}
                             />
                           </td>
@@ -2061,17 +2801,23 @@ export function RouteExplorerPage() {
                           <td>{wp.lat}</td>
                           <td>{wp.lon}</td>
                         </tr>
-                        {/* `selectedWaypoint &&` first: if it's undefined (stale
+                        {/* Expands inline, right after whichever waypoint is
+                            actually selected — preserving the list's natural
+                            order — rather than relocating to a fixed spot.
+                            `selectedWaypoint &&` first: if it's undefined (stale
                             selection, or a waypoint with a missing/undefined id
                             from legacy saved-route data), never fall through to
                             `undefined === wp.id`, which could spuriously match a
-                            malformed waypoint and crash reading `.name` below. */}
-                        {/* Guard with both `selectedWaypoint` (never spuriously
+                            malformed waypoint and crash reading `.name` below.
+                            Guard with both `selectedWaypoint` (never spuriously
                             match a malformed waypoint with an undefined id —
                             see the sanitizeWaypointIds fix) and `waypointDraft`
-                            (the draft is only populated once selection settles). */}
+                            (the draft is only populated once selection settles).
+                            The list auto-scrolls up to bring this row into view
+                            (see the ref'd scroll effect above) instead of
+                            requiring the user to find it manually. */}
                         {selectedWaypoint && waypointDraft && selectedWaypoint.id === wp.id && (
-                          <tr className="fv-route__wp-detail-row-cell">
+                          <tr ref={waypointDetailRef} className="fv-route__wp-detail-row-cell">
                             <td colSpan={4}>
                               <div className="fv-route__wp-detail">
                                 <div className="fv-route__wp-detail-head">
@@ -2083,6 +2829,7 @@ export function RouteExplorerPage() {
                                   <input
                                     type="text"
                                     value={waypointDraft.name}
+                                    disabled={!editMode}
                                     onChange={(e) => setDraftField('name', e.target.value)}
                                   />
                                 </label>
@@ -2092,7 +2839,7 @@ export function RouteExplorerPage() {
                                     <input
                                       type="text"
                                       value={waypointDraft.lat}
-                                      disabled={isWaypointLocked(selectedWaypoint.id)}
+                                      disabled={!editMode || isWaypointLocked(selectedWaypoint.id)}
                                       onChange={(e) => setDraftField('lat', e.target.value)}
                                     />
                                   </label>
@@ -2101,7 +2848,7 @@ export function RouteExplorerPage() {
                                     <input
                                       type="text"
                                       value={waypointDraft.lon}
-                                      disabled={isWaypointLocked(selectedWaypoint.id)}
+                                      disabled={!editMode || isWaypointLocked(selectedWaypoint.id)}
                                       onChange={(e) => setDraftField('lon', e.target.value)}
                                     />
                                   </label>
@@ -2112,6 +2859,7 @@ export function RouteExplorerPage() {
                                     <input
                                       type="number"
                                       value={waypointDraft.course}
+                                      disabled={!editMode}
                                       onChange={(e) =>
                                         setDraftField('course', Number(e.target.value) || 0)
                                       }
@@ -2123,7 +2871,7 @@ export function RouteExplorerPage() {
                                       type="number"
                                       step="0.1"
                                       value={waypointDraft.speed}
-                                      disabled={waypointDraft.drift}
+                                      disabled={!editMode || waypointDraft.drift}
                                       onChange={(e) =>
                                         setDraftField('speed', Number(e.target.value) || 0)
                                       }
@@ -2137,6 +2885,7 @@ export function RouteExplorerPage() {
                                       type="number"
                                       min="0"
                                       value={waypointDraft.rpmMin ?? ''}
+                                      disabled={!editMode}
                                       onChange={(e) =>
                                         setDraftField(
                                           'rpmMin',
@@ -2151,6 +2900,7 @@ export function RouteExplorerPage() {
                                       type="number"
                                       min="0"
                                       value={waypointDraft.rpmMax ?? ''}
+                                      disabled={!editMode}
                                       onChange={(e) =>
                                         setDraftField(
                                           'rpmMax',
@@ -2168,6 +2918,7 @@ export function RouteExplorerPage() {
                                       min="0"
                                       max="100"
                                       value={waypointDraft.mcrMin ?? ''}
+                                      disabled={!editMode}
                                       onChange={(e) =>
                                         setDraftField(
                                           'mcrMin',
@@ -2183,6 +2934,7 @@ export function RouteExplorerPage() {
                                       min="0"
                                       max="100"
                                       value={waypointDraft.mcrMax ?? ''}
+                                      disabled={!editMode}
                                       onChange={(e) =>
                                         setDraftField(
                                           'mcrMax',
@@ -2202,7 +2954,7 @@ export function RouteExplorerPage() {
                                     type="datetime-local"
                                     value={waypointDraft.eta}
                                     readOnly={waypoints[0]?.id !== selectedWaypoint.id}
-                                    disabled={waypoints[0]?.id !== selectedWaypoint.id}
+                                    disabled={!editMode || waypoints[0]?.id !== selectedWaypoint.id}
                                     title={
                                       waypoints[0]?.id === selectedWaypoint.id
                                         ? t('etdHint', 'Departure time (ETD) — shared with the Tracksheet\'s Departure/COSP report and CP & Leg Details.')
@@ -2215,6 +2967,7 @@ export function RouteExplorerPage() {
                                   <input
                                     type="checkbox"
                                     checked={waypointDraft.drift}
+                                    disabled={!editMode}
                                     onChange={(e) => setDraftField('drift', e.target.checked)}
                                   />
                                   <span className="fv-route__toggle-switch-track" aria-hidden="true" />
@@ -2236,6 +2989,7 @@ export function RouteExplorerPage() {
                                     <input
                                       type="datetime-local"
                                       value={waypointDraft.driftUntil ?? ''}
+                                      disabled={!editMode}
                                       onChange={(e) =>
                                         setDraftField('driftUntil', e.target.value || undefined)
                                       }
@@ -2247,12 +3001,20 @@ export function RouteExplorerPage() {
                                     <span>{t('legToNext', 'Leg to next')}</span>
                                     <select
                                       value={waypointDraft.legType ?? 'rhumb'}
-                                      onChange={(e) =>
-                                        setDraftField(
-                                          'legType',
-                                          e.target.value as 'rhumb' | 'greatcircle',
-                                        )
-                                      }
+                                      disabled={!editMode}
+                                      onChange={(e) => {
+                                        const legType = e.target.value as 'rhumb' | 'greatcircle';
+                                        setDraftField('legType', legType);
+                                        // Applied immediately (not gated behind
+                                        // Save like the other fields above) —
+                                        // it's a discrete, instantly-reversible
+                                        // choice rather than a free-typed value
+                                        // that could change mid-keystroke, so
+                                        // the route shape and every distance/
+                                        // cost figure below should reflect it
+                                        // the moment it's picked.
+                                        updateWaypoint(selectedWaypoint.id, 'legType', legType);
+                                      }}
                                     >
                                       <option value="rhumb">
                                         {t('rhumbLine', 'Rhumb line (straight)')}
@@ -2267,7 +3029,7 @@ export function RouteExplorerPage() {
                                   type="button"
                                   className="fv-route__btn fv-route__btn--danger"
                                   onClick={() => deletePoint(selectedWaypoint.id)}
-                                  disabled={selectedWaypoint.isPort || isWaypointLocked(selectedWaypoint.id)}
+                                  disabled={!editMode || selectedWaypoint.isPort || isWaypointLocked(selectedWaypoint.id)}
                                 >
                                   <i className="fas fa-trash" aria-hidden="true" />{' '}
                                   {t('delete', 'Delete')}
@@ -2301,23 +3063,6 @@ export function RouteExplorerPage() {
                 <i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{' '}
                 {t('optimize', 'Optimize')}
               </button>
-              {readActiveRouteId(voyageId) && (
-                <button
-                  type="button"
-                  className="fv-route__btn"
-                  title={t(
-                    'reoptimizeActiveRouteHint',
-                    'Re-run optimization for the active route from the vessel\u2019s current position (its latest validated report or AIS fix), using fresh weather \u2014 run this whenever you want, it is not automatic.',
-                  )}
-                  onClick={() => {
-                    setOptDialogInitialRouteKey('active');
-                    setOptDialogOpen(true);
-                  }}
-                >
-                  <i className="fas fa-rotate" aria-hidden="true" />{' '}
-                  {t('reoptimizeActiveRoute', 'Re-optimize Active Route')}
-                </button>
-              )}
               <button
                 type="button"
                 className="fv-route__btn"
@@ -2341,15 +3086,17 @@ export function RouteExplorerPage() {
               plotMode={plotMode}
               editable={editMode}
               selected={selected}
+              checkedIds={checkedIds}
+              vesselFallbackPos={vesselPos}
               routes={overlayRoutes}
               selectedRouteId={selectedRouteId}
               shipMarkers={allShipMarkers}
               reportMarkers={reportMarkers}
               reportSpeedOptions={reportSpeedOptions}
-              reportFuelOptions={reportFuelOptions}
               defaultReportFuelType={defaultReportFuelType}
               onSetReportSpeed={onSelectReportSpeed}
               onSetReportFuel={onSelectReportFuel}
+              onApplyReportCriteria={onApplyReportCriteria}
               plannedRouteColor={plannedColor}
               activeWaypoints={activeWaypoints}
               onSelectRoute={setSelectedRouteId}
@@ -2357,6 +3104,7 @@ export function RouteExplorerPage() {
               onAddPoint={addPointFromMap}
               onInsertPoint={insertPointFromMap}
               onMovePoint={moveWaypoint}
+              onMovePointPreview={moveWaypointPreview}
               onDeletePoint={deletePoint}
               legendBarInHostToolbar
             />
@@ -2368,7 +3116,15 @@ export function RouteExplorerPage() {
                 </span>
               </div>
             )}
-            {!optimizing && routeResults && routeResults.length > 0 && (
+            {!optimizing &&
+              routeResults &&
+              routeResults.length > 0 &&
+              // Suppress the chooser entirely for a run that's about to be
+              // (or just was) auto-applied — both the silent default-route
+              // and the manual "Generate route" flows auto-pick the shortest
+              // candidate now instead of asking the user to choose one.
+              autoGenRunIdRef.current !== optimizeRunRef.current &&
+              pendingManualGenRunIdRef.current !== optimizeRunRef.current && (
               <div className="fv-route__map-status fv-route__map-status--done" role="status">
                 <div className="fv-route__opt-head">
                   <i className="fas fa-route" aria-hidden="true" />{' '}
@@ -2596,6 +3352,15 @@ export function RouteExplorerPage() {
                 <span className="fv-route__gen-error">
                   <i className="fas fa-triangle-exclamation" aria-hidden="true" /> {genError}
                 </span>
+              )}
+              {!genError && genWarnings.length > 0 && (
+                <div className="fv-route__gen-warning">
+                  {genWarnings.map((w, i) => (
+                    <span key={i} className="fv-route__gen-warning-row">
+                      <i className="fas fa-circle-info" aria-hidden="true" /> {w}
+                    </span>
+                  ))}
+                </div>
               )}
               <span className="fv-route__gen-hint">
                 {t(

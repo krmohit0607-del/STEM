@@ -6,6 +6,8 @@
  * optimized route from a base route.
  */
 
+import type { OptimizationAnalysisApiDto } from '../api/optimizationApi';
+
 export type LatLon = [number, number];
 
 export interface MarketFactors {
@@ -167,7 +169,7 @@ export const OPTIMIZATION_SCENARIOS: OptimizationScenario[] = [
   { id: 'safest', label: 'Safest Route', icon: 'fa-shield-halved', description: 'Route around heavy weather.' },
   { id: 'balanced', label: 'Balanced Optimization', icon: 'fa-scale-balanced', description: 'Best overall balance.' },
   { id: 'maintain-cp', label: 'Maintain CP Speed', icon: 'fa-arrows-left-right-to-line', description: 'Keep CP speed, optimise waypoints only.' },
-  { id: 'specific-eta', label: 'Specific ETA Arrival', icon: 'fa-calendar-check', description: 'Adjust speed to hit a target ETA.' },
+  { id: 'specific-eta', label: 'Just-In-Time Arrival', icon: 'fa-calendar-check', description: 'Optimize arrival timing using the selected ON, BETWEEN, BEFORE, or AFTER rule.' },
 ];
 
 export const SCENARIO_BY_ID: Record<string, OptimizationScenario> = Object.fromEntries(
@@ -183,6 +185,7 @@ const SCENARIO_COLORS: Record<string, string> = {
   balanced: '#a371f7',
   'maintain-cp': '#39c5cf',
   'specific-eta': '#f778ba',
+  'custom-simulation': '#f97316',
 };
 
 export function scenarioColor(id: string): string {
@@ -270,6 +273,10 @@ export interface OptimizedRoute {
   color: string;
   path: LatLon[];
   metrics: RouteMetrics;
+  /** Server-side analysis, warnings and run id (only for routes produced by the optimization API). */
+  analysis?: OptimizationAnalysisApiDto;
+  warnings?: string[];
+  runId?: string;
 }
 
 export interface GenerateOpts {

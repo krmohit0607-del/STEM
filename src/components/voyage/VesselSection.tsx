@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import { BoolField, Card, Cell, Field } from './primitives';
+import { LoadDiagramTable } from './LoadDiagramTable';
 import {
   findVesselForVoyage,
   loadVessels,
@@ -83,6 +84,7 @@ function profileFromView(view: VoyageView): VesselProfileFields {
     wslMaxWindsLaden: view.wslMaxWindsLaden,
     wslMaxSeaStateBallast: view.wslMaxSeaStateBallast,
     wslMaxSeaStateLaden: view.wslMaxSeaStateLaden,
+    loadDiagramJson: view.loadDiagramJson,
   };
 }
 
@@ -344,6 +346,16 @@ export function VesselSection({ view, setView, editing, onToggleEdit, title, col
               </table>
             </div>
           </div>
+        </div>
+
+        {/* Engine load diagram (power and torque limits per RPM) */}
+        <div className="fv-voyage__cols fv-voyage__cols--1">
+          <LoadDiagramTable
+            value={view.loadDiagramJson}
+            editing={editing}
+            onChange={(json) => set('loadDiagramJson', json)}
+            telegraph={view}
+          />
         </div>
 
         {/* Speed & cons profile (per load condition) — Optimization service only */}

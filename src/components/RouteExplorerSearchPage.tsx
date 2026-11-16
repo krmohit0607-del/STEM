@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Circle, MapContainer, Marker, Polyline, TileLayer, Tooltip, useMapEvents } from 'react-leaflet';
 import L, { type LatLngBoundsLiteral } from 'leaflet';
 
@@ -23,6 +23,7 @@ import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { PortsControl, RulerControl } from './MapToolsControl';
 import { LoadLineZonesLayer } from './LoadLineZonesLayer';
 import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
+import { needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 
 // Clamp vertical panning so the grey area past the poles never shows; wide
 // enough horizontally that worldCopyJump's wrap is never cut off.
@@ -56,7 +57,7 @@ function decimalToDms(value: number, latitude: boolean): string {
 function routeWaypoints(path: [number, number][], fromName: string, toName: string) {
   return path.map(([lat, lon], index) => ({
     id: `wp-${Date.now()}-${index}`,
-    name: index === 0 ? fromName : index === path.length - 1 ? toName : `WP ${index}`,
+    name: index === 0 ? fromName : index === path.length - 1 ? toName : `WP ${index + 1}`,
     lat: decimalToDms(lat, true),
     lon: decimalToDms(lon, false),
     course: 0,
@@ -264,6 +265,17 @@ export function RouteExplorerSearchPage() {
   const mapFrom = exactDeparture ?? primaryResult?.from ?? null;
   const mapTo = exactArrival ?? primaryResult?.to ?? null;
   const showNearbyCircle = nearby && radius > 0 && !!nearbyCenter && !savedPassageMatched;
+  // `worldCopyJump` lets the user pan into an adjacent copy of the tiled
+  // world; anything near the dateline needs rendering there too, or it
+  // simply vanishes once the user pans past 180deg.
+  const resultPath = primaryResult
+    ? unwrapRouteCoordinates(primaryResult.path || [[primaryResult.from.lat, primaryResult.from.lon], [primaryResult.to.lat, primaryResult.to.lon]])
+    : null;
+  const resultOffsets = resultPath && needsWorldCopies(resultPath) ? [-360, 0, 360] : [0];
+  const createdPath = useMemo(() => unwrapRouteCoordinates(createdPoints), [createdPoints]);
+  const createdOffsets = needsWorldCopies(createdPath) ? [-360, 0, 360] : [0];
+  const mapFromOffsets = mapFrom && needsWorldCopies([[mapFrom.lat, mapFrom.lon]]) ? [-360, 0, 360] : [0];
+  const mapToOffsets = mapTo && needsWorldCopies([[mapTo.lat, mapTo.lon]]) ? [-360, 0, 360] : [0];
   const addToVoyage = (route: RouteOption) => {
     const path = route.path || [[route.from.lat, route.from.lon], [route.to.lat, route.to.lon]];
     const passageId = `explorer-${route.passage?.id ?? Date.now()}`;
@@ -295,7 +307,7 @@ export function RouteExplorerSearchPage() {
   };
   const download = (route: RouteOption) => {
     const path = route.path || [[route.from.lat, route.from.lon], [route.to.lat, route.to.lon]];
-    const csv = `name,lat,lon,speed,drift,isPort\n${path.map((point, index) => `"${index === 0 ? route.from.name : index === path.length - 1 ? route.to.name : `WP ${index}`}",${point[0]},${point[1]},12,false,${index === 0 || index === path.length - 1}`).join('\n')}`;
+    const csv = `name,lat,lon,speed,drift,isPort\n${path.map((point, index) => `"${index === 0 ? route.from.name : index === path.length - 1 ? route.to.name : `WP ${index + 1}`}",${point[0]},${point[1]},12,false,${index === 0 || index === path.length - 1}`).join('\n')}`;
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const link = document.createElement('a'); link.href = url; link.download = `${route.from.code || 'departure'}-${route.to.code || 'arrival'}-route.csv`; link.click(); URL.revokeObjectURL(url);
   };
@@ -343,7 +355,7 @@ export function RouteExplorerSearchPage() {
       <div className="fv-route-explorer__results">{results.map((route) => <article key={route.id} className="fv-route-explorer__result"><div><strong>{route.from.code || route.from.name} to {route.to.code || route.to.name}</strong><small>{route.source} · {route.distanceNm.toLocaleString()} NM</small><small>{route.from.name} → {route.to.name}</small></div><div><button type="button" title="Add route to voyage" onClick={() => addToVoyage(route)}><i className="fas fa-plus" /></button><button type="button" title="Download route" onClick={() => download(route)}><i className="fas fa-download" /></button></div></article>)}</div>
       </>}
     </aside>
-    <main className="fv-route-explorer__map"><MapContainer center={[18, 105]} zoom={3} minZoom={2} maxBounds={WORLD_BOUNDS} maxBoundsViscosity={1.0} style={{ height: '100%', width: '100%' }} worldCopyJump>
+    <main className="fv-route-explorer__map"><MapContainer center={[18, 105]} zoom={3} minZoom={2} zoomSnap={0.25} zoomDelta={0.5} wheelPxPerZoomLevel={120} maxBounds={WORLD_BOUNDS} maxBoundsViscosity={1.0} style={{ height: '100%', width: '100%' }} worldCopyJump>
       {mode === 'create' && <CreateRouteClickHandler onAdd={(point) => setCreatedPoints((current) => [...current, point])} />}
       {baseLayer === 'satellite' ? (
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" attribution="Tiles &copy; Esri" />
@@ -354,11 +366,11 @@ export function RouteExplorerSearchPage() {
       )}
       <MapLayersControl position="topright" value={baseLayer} onChange={setBaseLayer} overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />{overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}<WeatherFieldControl position="topright" /><MapWeatherLegendControl position="topleft" /><AreaConstraintsControl position="topright" /><WeatherPointControl position="topright" /><PortsControl position="topright" /><RulerControl position="topright" /><CycloneLayer position="topright" /><WeatherAlertsControl position="topright" />
       {showNearbyCircle && <Circle center={[nearbyCenter.lat, nearbyCenter.lon]} radius={radius * 1852} pathOptions={{ color: '#aeb7c5', weight: 1, fillColor: '#d8dee8', fillOpacity: 0.13, dashArray: '4 4' }} />}
-      {mapFrom && <Marker position={[mapFrom.lat, mapFrom.lon]} icon={systemPortIcon()}><Tooltip>{mapFrom.name}</Tooltip></Marker>}
-      {mapTo && (!mapFrom || mapFrom.lat !== mapTo.lat || mapFrom.lon !== mapTo.lon) && <Marker position={[mapTo.lat, mapTo.lon]} icon={systemPortIcon()}><Tooltip>{mapTo.name}</Tooltip></Marker>}
-      {results.slice(0, 1).map((route) => <Fragment key={`route-line-${route.id}`}><Polyline positions={route.path || [[route.from.lat, route.from.lon], [route.to.lat, route.to.lon]]} pathOptions={{ color: '#f28c28', weight: 3 }} /></Fragment>)}
-      {mode === 'create' && createdPoints.length > 1 && <Polyline positions={createdPoints} pathOptions={{ color: '#f28c28', weight: 4 }} />}
-      {mode === 'create' && createdPoints.map((point, index) => <Marker key={`manual-${index}`} position={point} icon={systemPortIcon()}><Tooltip>Point {index + 1}</Tooltip></Marker>)}
+      {mapFrom && mapFromOffsets.map((offset) => <Marker key={`from-${offset}`} position={offsetPoint([mapFrom.lat, mapFrom.lon], offset)} icon={systemPortIcon()}><Tooltip>{mapFrom.name}</Tooltip></Marker>)}
+      {mapTo && (!mapFrom || mapFrom.lat !== mapTo.lat || mapFrom.lon !== mapTo.lon) && mapToOffsets.map((offset) => <Marker key={`to-${offset}`} position={offsetPoint([mapTo.lat, mapTo.lon], offset)} icon={systemPortIcon()}><Tooltip>{mapTo.name}</Tooltip></Marker>)}
+      {resultPath && resultOffsets.map((offset) => <Polyline key={`route-line-${primaryResult!.id}-${offset}`} positions={resultPath.map(([lat, lon]) => [lat, lon + offset] as [number, number])} pathOptions={{ color: '#f28c28', weight: 3 }} />)}
+      {mode === 'create' && createdPoints.length > 1 && createdOffsets.map((offset) => <Polyline key={`created-${offset}`} positions={createdPath.map(([lat, lon]) => [lat, lon + offset] as [number, number])} pathOptions={{ color: '#f28c28', weight: 4 }} />)}
+      {mode === 'create' && createdOffsets.flatMap((offset) => createdPath.map((point, index) => <Marker key={`manual-${index}-${offset}`} position={offsetPoint(point, offset)} icon={systemPortIcon()}><Tooltip>Point {index + 1}</Tooltip></Marker>))}
     </MapContainer></main>
   </div>;
 }

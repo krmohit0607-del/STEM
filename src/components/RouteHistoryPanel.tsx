@@ -8,6 +8,7 @@ import {
   hydrateRouteHistoryFromBackend,
   activateRouteHistoryEntry,
   createViewSnapshotFromHistoryEntry,
+  deleteRouteHistoryEntries,
   type RouteHistoryEntry,
 } from '../data/routeHistoryStore';
 import { useSavedRoutesVersion } from '../data/optimizationStore';
@@ -17,6 +18,8 @@ import {
   useComparisonSelection,
   type ComparisonCandidate,
 } from '../data/comparisonSelectionStore';
+import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
+import { buildRouteExport, type ExportRoute } from './RouteSimulatorPanel';
 
 /** Format an ISO date-time as `Oct 20, 2026 07:12Z` (UTC, matches the rest
  *  of the Route Simulator's date formatting). */
@@ -45,10 +48,15 @@ function fmtDuration(hours: number): string {
 }
 
 /** Human-readable summary of what a history entry was generated with — the
- *  "why does this route exist" line for each row. */
+ *  "why does this route exist" line for each row. A manually saved/edited
+ *  route archived here after going unused (see `RouteHistoryEntry.source`)
+ *  has no scenario/criteria to summarize. */
 function criteriaSummary(entry: RouteHistoryEntry, t: (key: string, fallback: string) => string): string {
+  if (!entry.criteria) {
+    return entry.source === 'manual' ? t('manualRoute', 'Manually saved route') : '—';
+  }
   const parts: string[] = [];
-  const scenarioIds = entry.criteria.scenarioId.split(',').filter(Boolean);
+  const scenarioIds = (entry.criteria.scenarioId ?? '').split(',').filter(Boolean);
   const scenarioLabels = scenarioIds.map((id) => SCENARIO_BY_ID[id]?.label ?? id);
   if (scenarioLabels.length > 0) parts.push(scenarioLabels.join(', '));
   const cs = entry.criteria.customSimulation;
@@ -60,6 +68,7 @@ function criteriaSummary(entry: RouteHistoryEntry, t: (key: string, fallback: st
   if (entry.criteria.targetEta) parts.push(`${t('targetEta', 'Target ETA')}: ${fmtWhen(entry.criteria.targetEta)}`);
   return parts.join(' · ') || '—';
 }
+
 
 /** Build this entry's shared Comparison-selection candidate shape. */
 function toCandidate(entry: RouteHistoryEntry): ComparisonCandidate {
@@ -103,6 +112,7 @@ export function RouteHistoryPanel() {
   const voyage = useSelectedVoyage();
   const savedRoutesVersion = useSavedRoutesVersion();
   const [hydrated, setHydrated] = useState(0);
+  const [savedPassageMsg, setSavedPassageMsg] = useState('');
 
   // Pull any history recorded from another device/browser once per visit.
   useMemo(() => {
@@ -131,6 +141,73 @@ export function RouteHistoryPanel() {
     [comparisonSelection],
   );
 
+  /** Entries corresponding to the checked rows above — reused by the Export/
+   *  Save to Saved Passages/Delete actions below, so checking a box here
+   *  (already used to "add to comparison") doubles as the bulk-action
+   *  selection too, instead of needing a second, separate set of checkboxes. */
+  const checkedEntries = useMemo(
+    () => entries.filter((e) => selectedHistoryKeys.has(`hist-${e.id}`)),
+    [entries, selectedHistoryKeys],
+  );
+
+  const slug = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'route';
+
+  /** Download the checked entries as RTZ (the standard marine-electronics
+   *  route interchange format — the same one "Import routes" accepts). */
+  const exportCheckedHistory = () => {
+    if (checkedEntries.length === 0) return;
+    const routes: ExportRoute[] = checkedEntries.map((e) => ({ name: e.name, path: e.path }));
+    const text = buildRouteExport('rtz', routes);
+    const blob = new Blob([text], { type: 'application/xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `routes-${new Date().toISOString().slice(0, 10)}.rtz`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const addCheckedHistoryToSavedPassages = () => {
+    if (checkedEntries.length === 0) return;
+    const current = loadSavedPassages();
+    const geomSet = new Set(
+      current.map((passage) => passage.points.map((p) => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';')),
+    );
+    const converted: SavedPassage[] = checkedEntries
+      .filter((e) => e.path.length >= 2)
+      .map((e) => ({
+        id: `hist-${slug(e.name)}-${e.path.length}`,
+        name: e.name,
+        source: 'Route Simulator (All Routes)',
+        points: e.path,
+      }));
+    const accepted = converted.filter((passage) => {
+      const geom = passage.points.map((p) => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';');
+      if (geomSet.has(geom)) return false;
+      geomSet.add(geom);
+      return true;
+    });
+    if (accepted.length === 0) {
+      setSavedPassageMsg(t('alreadyInSavedPassages', 'Checked routes are already in Saved Passages.'));
+      return;
+    }
+    saveSavedPassages([...current, ...accepted]);
+    setSavedPassageMsg(
+      `${accepted.length} ${accepted.length === 1 ? t('route', 'route') : t('routes', 'routes')} ${t('addedToSavedPassages', 'added to Saved Passages.')}`,
+    );
+  };
+
+  const deleteCheckedHistory = () => {
+    if (checkedEntries.length === 0) return;
+    if (!window.confirm(t('confirmDeleteHistory', 'Delete the checked route(s) from All Routes? This cannot be undone.'))) return;
+    deleteRouteHistoryEntries(checkedEntries.map((e) => e.id));
+    clearComparisonSelection();
+  };
+
   if (entries.length === 0) {
     return (
       <div className="fv-sim2">
@@ -149,6 +226,45 @@ export function RouteHistoryPanel() {
 
   return (
     <div className="fv-sim2 fv-sim2__history">
+      <div className="fv-sim2__routes-head">
+        <span className="fv-sim2__routes-count">
+          {checkedEntries.length > 0
+            ? `${checkedEntries.length} ${t('selected', 'selected')}`
+            : `${entries.length} ${t('routes', 'routes')}`}
+        </span>
+        <span className="fv-sim2__routes-tools" aria-label={t('routeTools', 'Route tools')}>
+          <button
+            type="button"
+            className="fv-sim2__routes-btn"
+            onClick={exportCheckedHistory}
+            disabled={checkedEntries.length === 0}
+            title={t('exportCheckedHint', 'Export the checked routes (RTZ)')}
+            aria-label={t('exportRoutes', 'Export routes')}
+          >
+            <i className="fas fa-download" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="fv-sim2__routes-btn fv-sim2__routes-btn--primary"
+            onClick={addCheckedHistoryToSavedPassages}
+            disabled={checkedEntries.length === 0}
+            title={t('addCheckedToSavedPassages', 'Add checked routes to Saved Passages')}
+          >
+            <i className="fas fa-bookmark" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="fv-sim2__routes-btn fv-sim2__routes-btn--danger"
+            onClick={deleteCheckedHistory}
+            disabled={checkedEntries.length === 0}
+            title={t('deleteCheckedHint', 'Delete the checked routes from All Routes')}
+            aria-label={t('delete', 'Delete')}
+          >
+            <i className="fas fa-trash" aria-hidden="true" />
+          </button>
+          {savedPassageMsg && <span className="fv-sim2__routes-note">{savedPassageMsg}</span>}
+        </span>
+      </div>
       <div className="fv-sim2__table-wrap">
         <table className="fv-sim2__table">
           <thead>

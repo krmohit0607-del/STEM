@@ -15,6 +15,7 @@
  */
 
 import { ensureLiveData, sampleLiveField, MAX_FORECAST_HOURS, type LatLngBounds } from './openMeteo';
+import { antimeridianAwareBoundsBox } from './antimeridian';
 import { sampleWeatherField } from './weatherField';
 import { unwrapRouteCoordinates } from './antimeridian';
 
@@ -85,22 +86,7 @@ function samplePath(path: Array<[number, number]>, progress: number): [number, n
 
 /** Bounding box (with a little padding) covering every route's path. */
 export function boundsForRoutes(routes: SnapshotRouteInput[]): LatLngBounds | null {
-  let south = Infinity;
-  let north = -Infinity;
-  let west = Infinity;
-  let east = -Infinity;
-  routes.forEach((r) =>
-    r.path.forEach(([lat, lon]) => {
-      if (lat < south) south = lat;
-      if (lat > north) north = lat;
-      if (lon < west) west = lon;
-      if (lon > east) east = lon;
-    }),
-  );
-  if (!Number.isFinite(south)) return null;
-  const padLat = Math.max(0.5, (north - south) * 0.08);
-  const padLon = Math.max(0.5, (east - west) * 0.08);
-  return { south: south - padLat, north: north + padLat, west: west - padLon, east: east + padLon };
+  return antimeridianAwareBoundsBox(routes.flatMap((r) => r.path));
 }
 
 /** Weather magnitude at a fractional position along a route (live grid

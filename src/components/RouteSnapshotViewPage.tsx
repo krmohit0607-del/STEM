@@ -36,8 +36,32 @@ function niceCeil(v: number): number {
   return Math.ceil(v / 5) * 5 || 1;
 }
 
-/** Linearly interpolate a `[lat, lon]` polyline at fractional `progress`
- *  (0 = start, `path.length - 1` = end). */
+/**
+ * Interpolate a point a fraction `t` of the way from `(lat0, lon0)` to
+ * `(lat1, lon1)` along the straight line Leaflet actually draws between
+ * them — a rhumb line on this Mercator map, not a straight line in raw
+ * lat/lon degrees (see the identical helper in RouteSimulatorPanel.tsx for
+ * the full explanation).
+ */
+function lerpOnRenderedLine(
+  lat0: number,
+  lon0: number,
+  lat1: number,
+  lon1: number,
+  t: number,
+): [number, number] {
+  const toMercatorY = (latDeg: number) => Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
+  const fromMercatorY = (y: number) => (Math.atan(Math.exp(y)) * 360) / Math.PI - 90;
+  const y0 = toMercatorY(lat0);
+  const y1 = toMercatorY(lat1);
+  const lat = fromMercatorY(y0 + (y1 - y0) * t);
+  const lon = lon0 + (lon1 - lon0) * t;
+  return [lat, lon];
+}
+
+/** Interpolate a `[lat, lon]` polyline at fractional `progress`
+ *  (0 = start, `path.length - 1` = end), landing exactly on the straight
+ *  (rhumb) line Leaflet renders between each pair of vertices. */
 function samplePath(path: Array<[number, number]>, progress: number): [number, number] {
   const last = path.length - 1;
   if (last < 0) return [0, 0];
@@ -47,7 +71,7 @@ function samplePath(path: Array<[number, number]>, progress: number): [number, n
   const t = p - i0;
   const [lat0, lon0] = path[i0];
   const [lat1, lon1] = path[i1];
-  return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
+  return lerpOnRenderedLine(lat0, lon0, lat1, lon1, t);
 }
 
 /** A small, read-only weather chart for one locked factor — same visual

@@ -3,6 +3,7 @@ import {
   interiorLandSamples,
   haversineNM,
   type OptimizedRoute,
+  type OptimizeOptions,
   type LatLon,
 } from './routeOptimizer';
 
@@ -139,6 +140,7 @@ export function computeRouteVariants(
   dep: LatLon,
   arr: LatLon,
   emit: EmitVariant,
+  extraOptions: OptimizeOptions = {},
 ): number {
   const acceptedPaths: Array<Array<[number, number]>> = [];
   let emitted = 0;
@@ -161,13 +163,13 @@ export function computeRouteVariants(
   };
 
   // Primary optimum — always shown, and used to size the alternate search box.
-  const optimal = findBestOptimizedRoute(dep, arr);
+  const optimal = findBestOptimizedRoute(dep, arr, extraOptions);
   accept('optimal', optimal, true);
 
   // Shortest navigable route: its own tight box (with escalation) so it finds
   // the true minimum-distance corridor rather than being widened to the
   // optimum's weather detour.
-  const shortest = findBestOptimizedRoute(dep, arr, { hazardAware: false });
+  const shortest = findBestOptimizedRoute(dep, arr, { ...extraOptions, hazardAware: false });
   accept('shortest', shortest);
 
   // Distinct alternatives: steer away from the already-shown tracks. Reuse the
@@ -177,6 +179,7 @@ export function computeRouteVariants(
   const boxOpts = { gridMarginDeg: coverMargin, maxNodes: 120000 };
 
   const altA = findBestOptimizedRoute(dep, arr, {
+    ...extraOptions,
     ...boxOpts,
     avoidPaths: acceptedPaths.map((p) => p),
     avoidRadiusDeg: 6,
@@ -185,6 +188,7 @@ export function computeRouteVariants(
   accept('altA', altA);
 
   const altB = findBestOptimizedRoute(dep, arr, {
+    ...extraOptions,
     ...boxOpts,
     avoidPaths: acceptedPaths.map((p) => p),
     avoidRadiusDeg: 6,
@@ -196,6 +200,6 @@ export function computeRouteVariants(
 }
 
 /** Best-effort route used when nothing could be emitted. */
-export function computeFallbackRoute(dep: LatLon, arr: LatLon): OptimizedRoute {
-  return findBestOptimizedRoute(dep, arr);
+export function computeFallbackRoute(dep: LatLon, arr: LatLon, extraOptions: OptimizeOptions = {}): OptimizedRoute {
+  return findBestOptimizedRoute(dep, arr, extraOptions);
 }

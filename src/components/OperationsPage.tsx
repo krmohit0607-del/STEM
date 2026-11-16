@@ -3041,6 +3041,9 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
   const outIsTime = outType === 'TCOUT' || outType === 'TCTOUT';
   const outIsVoyage = outType === 'VOUT';
   const showDualHire = hasTcIn && outIsTime && !hasVin && !outIsVoyage;
+  // VIN-VOUT is pure freight-in/freight-out (no TC leg on either side), so there's no bunker
+  // delivery/redelivery settlement to track — unlike OWN-VOUT, which keeps it.
+  const isVinVout = hasVin && outIsVoyage;
 
   const showDelivery = hasTcIn || outIsTime;
   const showVoyageCargo = hasVin || outIsVoyage;
@@ -3277,14 +3280,16 @@ export function VoyageDetailsTab({ recap, setRecap, voyage, status }: { recap: R
             </div>
           )}
           </div>
-          <div className="fv-ops__owners-bunker">
-            <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunker Settlement</div>
-            <table className="fv-ops__owners-bunker-table"><thead><tr><th>Fuel</th><th>BOD (MT)</th><th>BOR (MT)</th><th>CP Price (USD/MT)</th></tr></thead><tbody>
-            {recap.bunkers.map((fuel, index) => (
-              <tr key={`${fuel.fuel}-${index}`}><td>{fuel.fuel || 'Fuel'}</td><td><input className="fv-ops__vd-in" inputMode="decimal" value={ownersBodDisplay(fuel)} onChange={(e) => { const v = e.target.value; setRecap((current) => { const bunkers = current.bunkers.map((line, lineIndex) => (lineIndex === index ? { ...line, bod: v } : line)); const field = startRobFieldFor(current.etaPlan.perf, fuel.fuel); if (!field) return { ...current, bunkers }; const etaPlan = field.kind === 'main' ? { ...current.etaPlan, startRobVlsfo: v } : field.kind === 'sub' ? { ...current.etaPlan, startRobMgo: v } : { ...current.etaPlan, startRobExtra: { ...(current.etaPlan.startRobExtra ?? {}), [field.extraId as string]: v } }; return { ...current, bunkers, etaPlan }; }); }} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.actualBor} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: e.target.value } : line) }))} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={cpPriceFor(recap, fuel.fuel)} onChange={(e) => setRecap((current) => applyCpPriceEdit(current, index, e.target.value))} /></td></tr>
-            ))}
-            </tbody></table>
-          </div>
+          {!isVinVout && (
+            <div className="fv-ops__owners-bunker">
+              <div className="fv-ops__vd-sub-head"><i className="fas fa-gas-pump" aria-hidden="true" /> Bunker Settlement</div>
+              <table className="fv-ops__owners-bunker-table"><thead><tr><th>Fuel</th><th>BOD (MT)</th><th>BOR (MT)</th><th>CP Price (USD/MT)</th></tr></thead><tbody>
+              {recap.bunkers.map((fuel, index) => (
+                <tr key={`${fuel.fuel}-${index}`}><td>{fuel.fuel || 'Fuel'}</td><td><input className="fv-ops__vd-in" inputMode="decimal" value={ownersBodDisplay(fuel)} onChange={(e) => { const v = e.target.value; setRecap((current) => { const bunkers = current.bunkers.map((line, lineIndex) => (lineIndex === index ? { ...line, bod: v } : line)); const field = startRobFieldFor(current.etaPlan.perf, fuel.fuel); if (!field) return { ...current, bunkers }; const etaPlan = field.kind === 'main' ? { ...current.etaPlan, startRobVlsfo: v } : field.kind === 'sub' ? { ...current.etaPlan, startRobMgo: v } : { ...current.etaPlan, startRobExtra: { ...(current.etaPlan.startRobExtra ?? {}), [field.extraId as string]: v } }; return { ...current, bunkers, etaPlan }; }); }} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={fuel.actualBor} onChange={(e) => setRecap((current) => ({ ...current, bunkers: current.bunkers.map((line, lineIndex) => lineIndex === index ? { ...line, actualBor: e.target.value } : line) }))} /></td><td><input className="fv-ops__vd-in" inputMode="decimal" value={cpPriceFor(recap, fuel.fuel)} onChange={(e) => setRecap((current) => applyCpPriceEdit(current, index, e.target.value))} /></td></tr>
+              ))}
+              </tbody></table>
+            </div>
+          )}
           </div>
           {showHireFields && (
             <div className="fv-ops__vd-sub">
@@ -3633,6 +3638,11 @@ function BunkersCard({ recap, setRecap, voyage }: { recap: Recap; setRecap: Disp
       return kept.length === r.bunkers.length ? r : { ...r, bunkers: kept };
     });
   }, [wantedKey, setRecap]);
+  // VIN-VOUT is pure freight-in/freight-out (no TC leg either side) — no bunker delivery/
+  // redelivery settlement applies, unlike OWN-VOUT, where this card stays.
+  const voyageTypeUp = (recap.voyageFixType || '').toUpperCase();
+  const [bunkerInType = '', bunkerOutType = ''] = voyageTypeUp.split('-');
+  if (bunkerInType === 'VIN' && bunkerOutType === 'VOUT') return null;
   return (
     <Card
       title="Bunkers"
@@ -5782,6 +5792,9 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
   const voyageType = (recap.voyageFixType || '').toUpperCase();
   const [inType = '', outType = ''] = voyageType.split('-');
   const showDualHire = (inType === 'TCIN' || inType === 'TCTIN') && (outType === 'TCOUT' || outType === 'TCTOUT');
+  // VIN-VOUT is pure freight-in/freight-out (no TC leg either side) — there's no hire to pay,
+  // unlike OWN-VOUT, where the owners' hire schedule stays.
+  const isVinVout = inType === 'VIN' && outType === 'VOUT';
   const ballastBonusAmt = num(recap.ballastBonus);
   const stored = recap.freightLaytime;
   const valid = !!stored && Array.isArray(stored.invoices) && Array.isArray(stored.laytimes);
@@ -6674,6 +6687,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
 
   return (
     <>
+    {!isVinVout && (
     <Card title="Hire Payment Schedule" icon="fa-money-bill-wave" right={
       <div className="fv-ops__card-controls">
         <button type="button" className="fv-ops__btn fv-ops__btn--sm" onClick={() => setManualExtra((x) => x + 1)} title="Add installment beyond estimated redelivery"><i className="fas fa-plus" aria-hidden="true" /> Add</button>
@@ -6805,6 +6819,7 @@ export function HireTab({ recap, setRecap, pnl, voyage, module = 'Operations' }:
         <i className="fas fa-diagram-project" aria-hidden="true" /> Action flow: Draft → Operations <b>Send for Approval</b> → Manager <b>Approve</b> → Operations <b>Send for Payment</b> → Accounts. The Status column reflects each step. A sent payment can only be reopened by a manager. Tick <b>BB</b> to choose which hire pays the ballast bonus ({money(ballastBonusAmt)}); <b>BOR</b> chooses which hire the bunker settlement (BOD − BOR) falls due on (default the final hire).
       </p>
     </Card>
+    )}
 
     {showDualHire && (
       <Card title="Charterers Hire Payment Schedule" icon="fa-handshake" right={

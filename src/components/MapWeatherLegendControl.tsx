@@ -5,7 +5,7 @@ import L, { type ControlPosition } from 'leaflet';
 
 import { getFieldFactor } from '../data/weatherField';
 import { useMapBaseLayerId, useNauticalOpacity } from './MapLayersControl';
-import { useWeatherFieldSelection } from './WeatherFieldControl';
+import { useWeatherFieldSelection } from '../data/weatherFieldSelection';
 
 /**
  * The nautical-chart-opacity slider + weather colour-code legend, as a bare

@@ -32,6 +32,9 @@ export interface RouteHistoryCriteria {
   etd: string;
   /** ISO date-time, for the "specific ETA" scenario. */
   targetEta?: string | null;
+  /** Just-In-Time arrival rule and, for BETWEEN, the ISO window end. */
+  arrivalRule?: 'ON' | 'BETWEEN' | 'BEFORE' | 'AFTER';
+  arrivalWindowEnd?: string | null;
   customSimulation?: {
     speedKn: number;
     consumptionPerDay: number;
@@ -75,14 +78,23 @@ export interface RouteHistoryEntry {
   /** The base route this was generated from (for context in the list). */
   baseRouteName: string;
   name: string;
-  scenarioId: string;
+  /** Present for optimizer-generated entries; absent for a manually saved/
+   *  edited route archived here after going unused (see `source`). */
+  scenarioId?: string;
   generatedAt: string;
   path: Array<[number, number]>;
   summary: RouteHistorySummary;
-  criteria: RouteHistoryCriteria;
+  /** Present for optimizer-generated entries; absent for a manually saved/
+   *  edited route (nothing to summarize — it wasn't generated under a
+   *  scenario/market/ETD). */
+  criteria?: RouteHistoryCriteria;
   /** Weather along the route, locked at the moment it was generated — what
    *  the "View" link shows, instead of re-sampling current/live weather. */
   weather?: FrozenWeatherFactor[];
+  /** `'manual'` for a route the user plotted/edited/saved directly (not
+   *  from an Optimization run) that was archived here after going unused in
+   *  the Route Simulator; absent (optimizer-generated) otherwise. */
+  source?: 'manual';
 }
 
 export function readRouteHistoryRaw(): RouteHistoryEntry[] {
@@ -116,13 +128,29 @@ function writeRouteHistoryRaw(entries: RouteHistoryEntry[]): void {
   pushRouteHistory(entries);
 }
 
-/** Append new history entries (newest first) — append-only, never removed. */
+/** Append new history entries (newest first) — not automatically removed by
+ *  anything in this app, so past candidates/criteria are never silently
+ *  lost; see `deleteRouteHistoryEntries` below for the user-initiated
+ *  removal path (e.g. "All Routes" panel's own Delete action). */
 export function appendRouteHistory(entries: RouteHistoryEntry[]): void {
   if (entries.length === 0) return;
   const all = readRouteHistoryRaw();
   writeRouteHistoryRaw([...entries, ...all]);
   // Reuse the cross-component "something route-related changed" signal so
   // the "All Routes" panel (and anything else reading this store) re-reads.
+  bumpSavedRoutes();
+}
+
+/** Remove specific history entries by id — a deliberate user action (e.g.
+ *  the "All Routes" panel's own Delete button for checked rows), distinct
+ *  from the automatic append-only recording above. */
+export function deleteRouteHistoryEntries(ids: string[]): void {
+  if (ids.length === 0) return;
+  const idSet = new Set(ids);
+  const all = readRouteHistoryRaw();
+  const next = all.filter((e) => !idSet.has(e.id));
+  if (next.length === all.length) return;
+  writeRouteHistoryRaw(next);
   bumpSavedRoutes();
 }
 
@@ -135,15 +163,22 @@ export function readRouteHistoryForVoyage(voyageId: string | undefined): RouteHi
 }
 
 /** Pull the backend copy of route history down into `localStorage` — call
- *  once per session. Returns `true` when local data changed. */
+ *  once per session. Merges rather than replaces: this store is append-only
+ *  (an entry already written locally — e.g. seconds ago, before its own
+ *  debounced backend push has even landed — must never be dropped just
+ *  because this GET's response was still the pre-push backend snapshot).
+ *  Returns `true` when local data changed. */
 export async function hydrateRouteHistoryFromBackend(): Promise<boolean> {
   try {
     const res = await settingsApi.get(ROUTE_HISTORY_SETTING);
     if (!res?.valueJson) return false;
     const parsed = JSON.parse(res.valueJson);
     if (!Array.isArray(parsed)) return false;
+    const local = readRouteHistoryRaw();
+    const localIds = new Set(local.map((e) => e.id));
+    const merged = [...local, ...parsed.filter((e) => e && typeof e === 'object' && !localIds.has(e.id))];
     const localRaw = window.localStorage.getItem(ROUTE_HISTORY_KEY);
-    const nextRaw = JSON.stringify(parsed);
+    const nextRaw = JSON.stringify(merged);
     if (localRaw === nextRaw) return false;
     window.localStorage.setItem(ROUTE_HISTORY_KEY, nextRaw);
     return true;

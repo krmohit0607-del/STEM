@@ -133,7 +133,7 @@ export const FLEET_TASKS: TaskRow[] = [
   {
     priority: 'HIGH', dueLt: 870, dueUtc: 270, remaining: '00:30', orderId: 'OPT010',
     vessel: 'MV Voyager', createdDate: '16-Jun-2026 18:25', pic: 'Rahul', client: 'Cargill',
-    clientType: 'Owner', voyageType: 'TCTIN-TCOUT', service: 'RPM', status: 'At Sea',
+    clientType: 'Owner', voyageType: 'TCTIN-TCTOUT', service: 'RPM', status: 'At Sea',
     legDesc: 'B+RD', portFrom: 'Fujairah', portVia: 'Colombo', portTo: 'Singapore',
     etd: '13-Jun 1200', eta: '19-Jun 0600', lastNoon: 4, lastAis: 20,
     wx: 'Y', int: 'Y', eov: 'N', opt: 'Y', openTasks: 6, tags: 'Storm, ETA, Deviation',

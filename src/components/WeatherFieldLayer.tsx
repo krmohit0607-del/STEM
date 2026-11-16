@@ -4,7 +4,7 @@ import L from 'leaflet';
 import { contours } from 'd3-contour';
 import * as polygonClippingNs from 'polygon-clipping';
 
-import { bandColor, getFieldFactor, sampleWeatherField } from '../data/weatherField';
+import { getFieldFactor, sampleWeatherField, smoothColorRgb } from '../data/weatherField';
 import { ensureLiveData, hasLiveSource, sampleLiveField } from '../data/openMeteo';
 import { landPolygonsInBounds } from '../data/landMaskGeo';
 import { isLand } from '../data/landMask';
@@ -23,27 +23,40 @@ const polygonClipping = (polygonClippingNs as unknown as {
   default: { difference(subject: LonLatMultiPolygon, ...clips: LonLatMultiPolygon[]): LonLatMultiPolygon };
 }).default;
 
+/** Number of colour bands the contour is split into — far more than the
+ *  factor's own legend stops (5-7) so adjacent bands are close in colour and
+ *  read as a smooth, merging gradient instead of a handful of visibly
+ *  distinct stripes, while still being real vector polygons (crisp at any
+ *  zoom/DPR, no raster upscaling blur or blockiness). Kept modest (not 20+)
+ *  since each extra band is another marching-squares pass plus a land-clip
+ *  boolean op — this is the dominant cost of a redraw. */
+const GRADIENT_BANDS = 12;
+
+/** Fixed screen-space spacing (px) between direction arrows. */
+const ARROW_SPACING = 30;
+
+/** Minimum time (ms) between colour-field/isobar recomputes — the expensive
+ *  part of a redraw (marching squares + land-clip boolean ops). Direction
+ *  arrows are NOT gated by this (they're cheap and sampled independently),
+ *  so they keep tracking the forecast hour responsively even while this is
+ *  throttled, e.g. during fast simulation playback or timeline scrubbing. */
+const HEAVY_REDRAW_MIN_INTERVAL_MS = 200;
+
 /**
- * MarineTraffic-style weather field on the map: a contour-chart colour field
- * (magnitude quantised into discrete bands, exact smooth boundaries via
- * marching squares — see `d3-contour`) plus, for vector factors, a grid of
- * direction glyphs — proper wind barbs for wind/gusts, small tinted arrows
- * for waves/swell/currents, so each factor reads as its own distinct colour
- * + pattern when several are layered together. Drop it as a child of any
- * `<MapContainer>`:
+ * Weather field on the map: a smooth colour gradient built from many
+ * closely-spaced vector isoband contours (marching squares via `d3-contour`,
+ * clipped to the exact coastline via `polygon-clipping`) plus, for
+ * directional factors (wind, gusts, currents, waves, swell), a fixed grid of
+ * simple direction arrows. Drop it as a child of any `<MapContainer>`:
  *
  *   <MapContainer ...>
  *     <WeatherFieldLayer factorId="wind" />
  *   </MapContainer>
  *
- * Performance: the contour polygons are a real Leaflet vector layer, so
- * Leaflet pans/zooms it the same (cheap, GPU-composited) way it does tile
- * layers — content is only recomputed on `moveend`/`zoomend`, not on every
- * intermediate drag frame, which is what makes this feel smooth. The
- * direction-glyph canvas follows the same schedule. `hour` is read from a
- * ref (not a redraw-everything effect dependency) so forecast
- * playback/scrubbing can update many times a second without re-creating the
- * map pane/layers.
+ * Performance: both the colour field and the arrow grid only recompute on
+ * `moveend`/`zoomend`/an `hour` change, same as a tile layer — no continuous
+ * animation loop, so panning/zooming stays smooth regardless of how many
+ * factors are active at once.
  */
 export function WeatherFieldLayer({
   factorId,
@@ -53,9 +66,9 @@ export function WeatherFieldLayer({
   sampleOverride,
 }: {
   factorId: string;
-  /** Paint the filled colour field (set false to draw only arrows). */
+  /** Paint the filled colour field / isobar lines. */
   showField?: boolean;
-  /** Draw direction/magnitude arrows for vector factors. */
+  /** Draw the direction-arrow grid for directional factors. */
   showArrows?: boolean;
   /** Hours ahead of now to forecast (0 = current conditions); may be
    *  fractional while scrubbing/playing a simulation. */
@@ -90,9 +103,16 @@ export function WeatherFieldLayer({
   useEffect(() => {
     const factor = getFieldFactor(factorId);
     if (!factor) return;
+    const f = factor; // non-undefined alias, so nested closures below keep the narrowed type
+    // `ensureLiveData`'s fetch callback (`schedule`, passed in as `onReady`)
+    // is stored by the data layer and can fire long after this effect has
+    // unmounted (e.g. a slow network request that resolves after the user
+    // toggled the factor off) — without this guard that stale callback would
+    // re-run `draw()` and re-add map layers that nothing will ever clean up
+    // again, since the real cleanup below has already run.
+    let alive = true;
 
-    // Glyphs (wind barbs / vector arrows) render into a dedicated canvas
-    // pane above the tiles but below route/marker overlays (zIndex 400).
+    // Direction arrows render into their own canvas, above the colour contours.
     const GLYPH_PANE = 'fvWeatherFieldPane';
     if (!map.getPane(GLYPH_PANE)) map.createPane(GLYPH_PANE);
     const glyphPane = map.getPane(GLYPH_PANE);
@@ -101,7 +121,7 @@ export function WeatherFieldLayer({
     glyphPane.style.pointerEvents = 'none';
 
     // The colour-band contours render as real Leaflet vector paths, in their
-    // own pane just below the glyphs.
+    // own pane just below the arrows.
     const CONTOUR_PANE = 'fvWeatherContourPane';
     if (!map.getPane(CONTOUR_PANE)) map.createPane(CONTOUR_PANE);
     const contourPane = map.getPane(CONTOUR_PANE);
@@ -110,6 +130,8 @@ export function WeatherFieldLayer({
     contourPane.style.pointerEvents = 'none';
     const contourRenderer = L.canvas({ pane: CONTOUR_PANE, padding: 0.2 });
     let contourLayer: L.LayerGroup | null = null;
+    // Pressure value labels along each isobar line — only used in isobar mode.
+    let labelLayer: L.LayerGroup | null = null;
 
     const glyphCanvas = document.createElement('canvas');
     glyphCanvas.className = 'fv-wf-canvas';
@@ -122,6 +144,23 @@ export function WeatherFieldLayer({
     // actually pans/zooms, so recomputing them every tick would be wasted work.
     let landCacheKey = '';
     let landCache: LonLatMultiPolygon = [];
+    // When the heavy colour-field/isobar recompute last actually ran —
+    // drives the `HEAVY_REDRAW_MIN_INTERVAL_MS` throttle below.
+    let lastHeavyAt = 0;
+    // When a redraw arrives while the throttle window is still open, its
+    // heavy recompute is skipped outright (see below) with nothing else
+    // queued to pick it up — if that was the redraw carrying a live grid
+    // that had *just* finished loading (a common case: panning/zooming
+    // fires `moveend`, and the resulting fetch often resolves within the
+    // same ~200ms window), the field is left showing whatever the last
+    // *successful* heavy recompute drew — stale, or even blank if that was
+    // before any data existed — until some unrelated later event happens to
+    // land outside the window. This timer guarantees one is always scheduled
+    // to actually run once the window reopens, instead of silently dropping
+    // the update. Tracked outside React state since it's pure scheduling
+    // bookkeeping for the render loop below, not anything the component
+    // needs to re-render for.
+    let catchUpTimer = 0;
 
     // Pull live values from Open-Meteo when available, otherwise fall back
     // to the deterministic synthetic field (e.g. while a grid is loading) —
@@ -144,7 +183,41 @@ export function WeatherFieldLayer({
       return live ?? sampleWeatherField(lat, lon, factorId, hourRef.current);
     };
 
+    // At low zoom, a single arrow's spacing covers a large geographic
+    // distance — sampling direction at just that one point can land on
+    // genuinely different small-scale turbulence between neighbours, which
+    // reads as noisy/incoherent ("arrows pointing every which way") instead
+    // of the broad, smoothly-turning pattern a real wind chart shows at that
+    // scale. Average several nearby samples (circular mean for direction) to
+    // recover that coherence; the averaging radius grows as zoom decreases
+    // and disappears entirely at high zoom, where single-point sampling
+    // already looks fine and stays fully responsive to local detail.
+    const sampleForArrow = (lat: number, lon: number, zoom: number) => {
+      const spreadDeg = Math.max(0, (9 - zoom) * 0.7);
+      if (spreadDeg <= 0) return sample(lat, lon);
+      const offsets: Array<[number, number]> = [
+        [0, 0],
+        [spreadDeg, 0],
+        [-spreadDeg, 0],
+        [0, spreadDeg],
+        [0, -spreadDeg],
+      ];
+      let sx = 0;
+      let sy = 0;
+      let magSum = 0;
+      for (const [dlat, dlon] of offsets) {
+        const s = sample(lat + dlat, lon + dlon);
+        const rad = (s.directionDeg * Math.PI) / 180;
+        sx += Math.sin(rad);
+        sy += Math.cos(rad);
+        magSum += s.magnitude;
+      }
+      const directionDeg = ((Math.atan2(sx, sy) * 180) / Math.PI + 360) % 360;
+      return { magnitude: magSum / offsets.length, directionDeg };
+    };
+
     const draw = () => {
+      if (!alive) return;
       const size = map.getSize();
       const w = size.x;
       const h = size.y;
@@ -164,79 +237,186 @@ export function WeatherFieldLayer({
         );
       }
 
-      // --- colour field: a real smooth isoband contour (marching squares
-      // via d3-contour) at each band threshold, each drawn over the last so
-      // the visible remainder of the lower band is its own flat colour,
-      // exactly like a significant-wave-height chart — with genuinely
-      // smooth, curved boundaries instead of a pixel staircase, clipped to
-      // water only against the real (vector, not grid-sampled) coastline so
-      // land stays clearly visible and uncoloured. ---
-      if (showField) {
-        const bounds = map.getBounds();
-        const north = bounds.getNorth();
-        const south = bounds.getSouth();
-        const west = bounds.getWest();
-        const east = bounds.getEast();
-        // Resolution bumped vs. a naive "one sample per ~7px" grid: finer
-        // marching-squares cells mean each isoline needs less corner-cutting
-        // to look smooth, *and* means the boundary moves in small, gradual
-        // steps as `hour` advances rather than a coarse cell occasionally
-        // flipping and visibly jumping the contour.
-        const cols = Math.max(70, Math.min(220, Math.round(w / 5)));
-        const rows = Math.max(48, Math.min(150, Math.round(h / 5)));
+      // The colour field/isobar recompute (marching squares + land-clip
+      // boolean ops) is the expensive part of a redraw — throttle it to a
+      // fixed rate so fast simulation playback or timeline scrubbing can't
+      // hammer the main thread, instead of recomputing on every single tick.
+      // The direction arrows below are NOT gated by this — they're cheap and
+      // sampled independently, so they stay responsive to `hour` regardless.
+      const now = performance.now();
+      if (now - lastHeavyAt >= HEAVY_REDRAW_MIN_INTERVAL_MS || lastHeavyAt === 0) {
+        lastHeavyAt = now;
 
-        const gridToLonLat = (gx: number, gy: number): [number, number] => {
-          const fx = gx / (cols - 1);
-          const fy = gy / (rows - 1);
-          return [west + (east - west) * fx, north + (south - north) * fy];
-        };
+      const bounds = map.getBounds();
+      const north = bounds.getNorth();
+      const south = bounds.getSouth();
+      const west = bounds.getWest();
+      const east = bounds.getEast();
+      // Finer marching-squares grid than a raster approach would need —
+      // real vector polygons, so resolution controls curve smoothness, not
+      // final on-screen sharpness (that stays crisp at any zoom/DPR).
+      const cols = Math.max(70, Math.min(220, Math.round(w / 5)));
+      const rows = Math.max(48, Math.min(150, Math.round(h / 5)));
 
-        const values: number[] = new Array(cols * rows);
-        for (let gy = 0; gy < rows; gy += 1) {
-          for (let gx = 0; gx < cols; gx += 1) {
-            const [lon, lat] = gridToLonLat(gx, gy);
-            values[gy * cols + gx] = sample(lat, lon).magnitude;
-          }
+      const gridToLonLat = (gx: number, gy: number): [number, number] => {
+        const fx = gx / (cols - 1);
+        const fy = gy / (rows - 1);
+        return [west + (east - west) * fx, north + (south - north) * fy];
+      };
+
+      const values: number[] = new Array(cols * rows);
+      for (let gy = 0; gy < rows; gy += 1) {
+        for (let gx = 0; gx < cols; gx += 1) {
+          const [lon, lat] = gridToLonLat(gx, gy);
+          values[gy * cols + gx] = sample(lat, lon).magnitude;
         }
+      }
 
-        const thresholds = factor.stops.map(([frac]) => frac * factor.max);
-        const bands = contours().size([cols, rows]).thresholds(thresholds)(values);
+      // Pre-clipped (to the viewport) land rings — exact Natural Earth
+      // coastline geometry, not an approximation of the weather grid.
+      // Cached per viewport since it's identical across hour-only redraws.
+      // `bounds` can read past +-180 deg (e.g. west=180, east=220) once the
+      // user pans into an adjacent world copy via `worldCopyJump` — land
+      // polygons are stored in canonical +-180 coordinates, so querying
+      // with the raw, shifted bounds would always come back empty (no
+      // land-clip in that pan position). Query in the canonical copy
+      // nearest this viewport, then shift the result back.
+      const landKey = `${west.toFixed(2)},${south.toFixed(2)},${east.toFixed(2)},${north.toFixed(2)}`;
+      if (landKey !== landCacheKey) {
+        // A viewport that simply straddles the real antimeridian (e.g.
+        // west=170, east=190) needs land from BOTH canonical copies — the
+        // part already inside +-180 (west corner's copy) and the part
+        // that only exists as negative longitudes on the other side of
+        // 180 (east corner's copy). A single centroid-rounded shift only
+        // ever queries one of the two, silently dropping land (and so the
+        // colour field bleeding over/under it) on whichever side lost.
+        const shifts = Array.from(
+          new Set([Math.round(west / 360) * 360, Math.round(east / 360) * 360]),
+        );
+        landCache = shifts.flatMap((shift) => {
+          const canonical = landPolygonsInBounds({
+            west: west - shift,
+            east: east - shift,
+            south,
+            north,
+          }) as unknown as LonLatMultiPolygon;
+          return shift === 0
+            ? canonical
+            : canonical.map((polygon) => polygon.map((ring) => ring.map(([lon, lat]) => [lon + shift, lat] as LonLatPoint)));
+        });
+        landCacheKey = landKey;
+      }
 
-        // Pre-clipped (to the viewport) land rings — exact Natural Earth
-        // coastline geometry, not an approximation of the weather grid.
-        // Cached per viewport since it's identical across hour-only redraws.
-        const landKey = `${west.toFixed(2)},${south.toFixed(2)},${east.toFixed(2)},${north.toFixed(2)}`;
-        if (landKey !== landCacheKey) {
-          landCache = landPolygonsInBounds({ west, south, east, north }) as unknown as LonLatMultiPolygon;
-          landCacheKey = landKey;
+      if (showField && f.isobar) {
+        // Traditional synoptic isobar lines: thin stroked curves at a fixed
+        // physical pressure interval (not a filled gradient), each labelled
+        // with its hPa value — drawn over land as well as sea, same as a
+        // real weather chart (pressure isn't a marine-only quantity).
+        const ISOBAR_INTERVAL_HPA = 4;
+        let minV = Infinity;
+        let maxV = -Infinity;
+        for (const val of values) {
+          if (val < minV) minV = val;
+          if (val > maxV) maxV = val;
         }
-        const land = landCache;
-
-        const polygons = bands
-          .map((band, i) => {
-            if (band.coordinates.length === 0) return null;
-            // Chaikin-smooth each isoline ring *before* clipping to land —
-            // this rounds the raw marching-squares "staircase" into a
-            // smooth, organic curve in open water (what makes the field
-            // read like a real wave/wind chart instead of a pixel grid,
-            // and keeps the boundary easing gradually between forecast
-            // hours instead of visibly stair-stepping), while the
-            // subsequent land clip still cuts an exact, un-softened edge
-            // against the real coastline — so smoothing can never push
-            // colour onto land.
+        const lines: L.Polygon[] = [];
+        const labels: L.Marker[] = [];
+        if (Number.isFinite(minV) && Number.isFinite(maxV)) {
+          const start = Math.ceil(minV / ISOBAR_INTERVAL_HPA) * ISOBAR_INTERVAL_HPA;
+          const thresholds: number[] = [];
+          for (let t = start; t <= maxV; t += ISOBAR_INTERVAL_HPA) thresholds.push(t);
+          const bands = thresholds.length
+            ? contours().size([cols, rows]).thresholds(thresholds)(values)
+            : [];
+          for (const band of bands) {
+            if (band.coordinates.length === 0) continue;
             const lonLat: LonLatMultiPolygon = band.coordinates.map((polygon) =>
               polygon.map(
                 (ring) =>
                   chaikinSmoothRing(ring.map(([gx, gy]): LonLatPoint => gridToLonLat(gx, gy))) as LonLatPoint[],
               ),
             );
-            // The land data's rings are plain number[][], structurally the
-            // same shape as LonLatMultiPolygon at runtime, just not typed as
-            // strict 2-tuples — cast at this narrow boundary. Always clip
-            // (even mid-animation) so weather never flashes over land while
-            // the forecast hour is scrubbing/playing. Guarded: a pathological
-            // input (e.g. near-world bounds) can make the boolean op throw —
-            // skip that band rather than letting one bad band blank the rest.
+            const latlngs = lonLat.map((polygon) =>
+              polygon.map((ring) => ring.map(([lon, lat]) => L.latLng(lat, lon))),
+            );
+            // Dark halo first, bright white line on top — stays clearly
+            // visible whether it's crossing light land tiles, dark ocean,
+            // or (if a colour field is layered underneath for another
+            // factor) any background hue, unlike a single mid-tone stroke.
+            lines.push(
+              L.polygon(latlngs, {
+                renderer: contourRenderer,
+                pane: CONTOUR_PANE,
+                stroke: true,
+                color: 'rgba(6,10,20,0.55)',
+                weight: 2.75,
+                fill: false,
+                interactive: false,
+              }),
+            );
+            lines.push(
+              L.polygon(latlngs, {
+                renderer: contourRenderer,
+                pane: CONTOUR_PANE,
+                stroke: true,
+                color: '#ffffff',
+                weight: 1.25,
+                opacity: 0.95,
+                fill: false,
+                interactive: false,
+              }),
+            );
+            // One value label per separate ring (a band can have several
+            // disjoint closed loops — e.g. a high and a low in view at once).
+            for (const ring of lonLat) {
+              const pt = ring[0]?.[Math.floor(ring[0].length / 2)];
+              if (!pt) continue;
+              const [lon, lat] = pt;
+              labels.push(
+                L.marker(L.latLng(lat, lon), {
+                  pane: CONTOUR_PANE,
+                  interactive: false,
+                  icon: L.divIcon({
+                    className: 'fv-wf-isobar-label',
+                    html: String(Math.round(band.value)),
+                    iconSize: [28, 14],
+                  }),
+                }),
+              );
+            }
+          }
+        }
+        contourLayer?.remove();
+        contourLayer = lines.length ? L.layerGroup(lines).addTo(map) : null;
+        labelLayer?.remove();
+        labelLayer = labels.length ? L.layerGroup(labels).addTo(map) : null;
+      } else if (showField) {
+        labelLayer?.remove();
+        labelLayer = null;
+        const land = landCache;
+        // Many closely-spaced thresholds (not just the factor's 5-7 legend
+        // stops) so each band's colour is barely different from its
+        // neighbour — reads as a smooth continuous gradient, while every
+        // boundary is still an exact, crisp vector curve.
+        const thresholds = Array.from({ length: GRADIENT_BANDS }, (_, i) => (i / (GRADIENT_BANDS - 1)) * f.max);
+        const bands = contours().size([cols, rows]).thresholds(thresholds)(values);
+
+        const polygons = bands
+          .map((band, i) => {
+            if (band.coordinates.length === 0) return null;
+            // Chaikin-smooth each isoline ring *before* clipping to land —
+            // rounds the raw marching-squares "staircase" into a smooth,
+            // organic curve in open water, and keeps the boundary easing
+            // gradually between forecast hours instead of visibly
+            // stair-stepping, while the subsequent land clip still cuts an
+            // exact, un-softened edge against the real coastline — so
+            // smoothing can never push colour onto land.
+            const lonLat: LonLatMultiPolygon = band.coordinates.map((polygon) =>
+              polygon.map(
+                (ring) =>
+                  chaikinSmoothRing(ring.map(([gx, gy]): LonLatPoint => gridToLonLat(gx, gy))) as LonLatPoint[],
+              ),
+            );
             let water: LonLatMultiPolygon;
             try {
               water = land.length
@@ -249,14 +429,16 @@ export function WeatherFieldLayer({
             const latlngs = water.map((polygon) =>
               polygon.map((ring) => ring.map(([lon, lat]) => L.latLng(lat, lon))),
             );
+            const { r, g, b } = smoothColorRgb(f.stops, i / (GRADIENT_BANDS - 1));
             return L.polygon(latlngs, {
               renderer: contourRenderer,
               pane: CONTOUR_PANE,
-              stroke: true,
-              color: 'rgba(255, 255, 255, 0.6)',
-              weight: 1,
+              // No stroke — with this many closely-spaced bands, a visible
+              // border between each one would read as banding/stripes
+              // instead of the smooth merged gradient we're going for.
+              stroke: false,
               fill: true,
-              fillColor: bandColor(factor.stops, i),
+              fillColor: `rgb(${r},${g},${b})`,
               fillOpacity: 0.78,
               interactive: false,
             });
@@ -268,11 +450,23 @@ export function WeatherFieldLayer({
       } else {
         contourLayer?.remove();
         contourLayer = null;
+        labelLayer?.remove();
+        labelLayer = null;
+      }
+      } // end throttled heavy recompute
+      else if (!catchUpTimer) {
+        // Skipped this tick because the throttle window is still open —
+        // make sure whatever triggered this redraw (a just-arrived live
+        // grid, a pan/zoom, etc.) still gets painted once that window
+        // closes, instead of being silently lost.
+        const wait = Math.max(0, HEAVY_REDRAW_MIN_INTERVAL_MS - (now - lastHeavyAt)) + 10;
+        catchUpTimer = window.setTimeout(() => {
+          catchUpTimer = 0;
+          schedule();
+        }, wait);
       }
 
-      // --- direction glyphs on a fixed grid: real wind barbs for wind/gusts,
-      // tinted arrows for the other vector factors (waves, swell, currents)
-      // so each factor keeps its own recognisable colour + pattern. ---
+      // --- direction arrows on a fixed screen-space grid ---
       if (glyphCtx) {
         const dpr = window.devicePixelRatio || 1;
         glyphCanvas.width = Math.round(w * dpr);
@@ -282,25 +476,17 @@ export function WeatherFieldLayer({
         glyphCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
         glyphCtx.clearRect(0, 0, w, h);
 
-        if (showArrows && factor.directional) {
-          const color = factor.glyphColor ?? '#1a2233';
-          const spacing = 46;
-          const offsetX = (w % spacing) / 2;
-          const offsetY = (h % spacing) / 2;
-          for (let y = offsetY; y < h; y += spacing) {
-            for (let x = offsetX; x < w; x += spacing) {
+        if (showArrows && f.directional) {
+          const zoom = map.getZoom();
+          const offsetX = (w % ARROW_SPACING) / 2;
+          const offsetY = (h % ARROW_SPACING) / 2;
+          for (let y = offsetY; y < h; y += ARROW_SPACING) {
+            for (let x = offsetX; x < w; x += ARROW_SPACING) {
               const ll = map.containerPointToLatLng([x, y]);
               if (isLand(ll.lat, ll.lng)) continue;
-              const s = sample(ll.lat, ll.lng);
-              const frac = Math.max(0, Math.min(1, s.magnitude / factor.max));
-              glyphCtx.save();
-              glyphCtx.globalAlpha = 0.55 + frac * 0.45;
-              if (factor.id === 'wind' || factor.id === 'gusts') {
-                drawWindBarb(glyphCtx, x, y, s.magnitude, s.directionDeg, color);
-              } else {
-                drawVectorArrow(glyphCtx, x, y, s.directionDeg, color, frac);
-              }
-              glyphCtx.restore();
+              const s = sampleForArrow(ll.lat, ll.lng, zoom);
+              const frac = Math.max(0, Math.min(1, s.magnitude / f.max));
+              drawArrow(glyphCtx, x, y, s.directionDeg, frac);
             }
           }
         }
@@ -335,12 +521,15 @@ export function WeatherFieldLayer({
     map.on('moveend zoomend resize viewreset load', reset);
 
     return () => {
+      alive = false;
       map.off('moveend zoomend resize viewreset load', reset);
       cancelAnimationFrame(raf);
       window.clearTimeout(t1);
       window.clearTimeout(t2);
+      window.clearTimeout(catchUpTimer);
       scheduleRef.current = null;
       contourLayer?.remove();
+      labelLayer?.remove();
       glyphCanvas.remove();
     };
   }, [map, factorId, showField, showArrows]);
@@ -348,118 +537,44 @@ export function WeatherFieldLayer({
   return null;
 }
 
-
-/** Standard meteorological wind barb: shaft + pennants (50kt) / full ticks
- *  (10kt) / half ticks (5kt), rounded to the nearest 5 knots. */
-function drawWindBarb(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  speedKt: number,
-  dirDeg: number,
-  color: string,
-): void {
+/** Simple direction arrow — dark halo under a bright white fill/stroke so it
+ *  stays visible over any background colour, land tile, or ocean tint.
+ *  `frac` (0..1 of the factor's max) controls arrow length only. */
+function drawArrow(ctx: CanvasRenderingContext2D, cx: number, cy: number, dirDeg: number, frac: number): void {
   const rad = (dirDeg * Math.PI) / 180;
   const dx = Math.sin(rad);
   const dy = -Math.cos(rad);
-  const perpX = dy;
-  const perpY = -dx;
-  const shaftLen = 15;
-  const tipX = cx + dx * shaftLen;
-  const tipY = cy + dy * shaftLen;
-
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 1.25;
-  ctx.lineCap = 'round';
-
-  if (speedKt < 2.5) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
-    ctx.stroke();
-    return;
-  }
-
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(tipX, tipY);
-  ctx.stroke();
-
-  let remaining = Math.round(speedKt / 5) * 5;
-  const tickGap = 3.2;
-  const tickLen = 6.5;
-  let step = 0;
-  const tickBase = (n: number) => ({ x: tipX - dx * n * tickGap, y: tipY - dy * n * tickGap });
-
-  while (remaining >= 50) {
-    const base = tickBase(step);
-    const base2 = tickBase(step + 1.1);
-    ctx.beginPath();
-    ctx.moveTo(base.x, base.y);
-    ctx.lineTo(base.x + perpX * tickLen, base.y + perpY * tickLen);
-    ctx.lineTo(base2.x, base2.y);
-    ctx.closePath();
-    ctx.fill();
-    remaining -= 50;
-    step += 1.1;
-  }
-  while (remaining >= 10) {
-    const base = tickBase(step);
-    ctx.beginPath();
-    ctx.moveTo(base.x, base.y);
-    ctx.lineTo(base.x + perpX * tickLen, base.y + perpY * tickLen);
-    ctx.stroke();
-    remaining -= 10;
-    step += 1;
-  }
-  if (remaining >= 5) {
-    const base = tickBase(step);
-    ctx.beginPath();
-    ctx.moveTo(base.x, base.y);
-    ctx.lineTo(base.x + perpX * tickLen * 0.55, base.y + perpY * tickLen * 0.55);
-    ctx.stroke();
-  }
-}
-
-/** Small filled-head arrow used for non-wind vector factors (waves, swell,
- *  currents), length/opacity following the sampled magnitude. */
-function drawVectorArrow(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  dirDeg: number,
-  color: string,
-  frac: number,
-): void {
-  const rad = (dirDeg * Math.PI) / 180;
-  const dx = Math.sin(rad);
-  const dy = -Math.cos(rad);
-  const len = 7 + frac * 10;
+  const len = 5 + frac * 7;
   const tipX = cx + dx * len;
   const tipY = cy + dy * len;
-  const tailX = cx - dx * len * 0.4;
-  const tailY = cy - dy * len * 0.4;
-
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 1.4;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(tailX, tailY);
-  ctx.lineTo(tipX, tipY);
-  ctx.stroke();
-
-  const headLen = 4 + frac * 2.5;
+  const tailX = cx - dx * len * 0.35;
+  const tailY = cy - dy * len * 0.35;
+  const headLen = 2.75 + frac * 1.75;
   const headAngle = Math.PI / 7;
   const leftX = tipX - Math.sin(rad - headAngle) * headLen;
   const leftY = tipY + Math.cos(rad - headAngle) * headLen;
   const rightX = tipX - Math.sin(rad + headAngle) * headLen;
   const rightY = tipY + Math.cos(rad + headAngle) * headLen;
-  ctx.beginPath();
-  ctx.moveTo(tipX, tipY);
-  ctx.lineTo(leftX, leftY);
-  ctx.lineTo(rightX, rightY);
-  ctx.closePath();
-  ctx.fill();
+
+  const paint = (color: string, lineWidth: number) => {
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(tailX, tailY);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(leftX, leftY);
+    ctx.lineTo(rightX, rightY);
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  paint('rgba(6,10,20,0.55)', 2);
+  paint('#ffffff', 1);
 }
+
 

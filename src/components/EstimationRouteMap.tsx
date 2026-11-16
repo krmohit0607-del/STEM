@@ -5,7 +5,7 @@ import type { LatLngBoundsExpression, LatLngExpression } from 'leaflet';
 
 import { useWorldPorts, type WorldPort } from '../data/ports';
 import { generateSeaRoute, type SeaRoutePoint } from '../data/seaRoute';
-import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
+import { getAntimeridianAwareBounds, needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 
 // Clamp vertical panning to just inside the poles so the grey area past the
 // tiled world is never revealed; left wide open horizontally (worldCopyJump
@@ -207,6 +207,13 @@ export function EstimationRouteMap({
         return [lat, lon];
       }));
 
+  // Marker positions on the same continuous numberline as `routeLine`, so a
+  // stop near the dateline lands on the line instead of a different world
+  // copy of it; then (if needed) duplicated at adjacent world copies so
+  // panning past 180deg doesn't make the whole route disappear.
+  const wrappedStops = unwrapRouteCoordinates(stops.map((s): [number, number] => [s.lat, s.lon]));
+  const mapOffsets = needsWorldCopies(wrappedStops) ? [-360, 0, 360] : [0];
+
   const bounds = useMemo<LatLngBoundsExpression | null>(() => {
     if (stops.length === 0) return null;
     return getAntimeridianAwareBounds(stops.map((s) => [s.lat, s.lon]), 4);
@@ -242,6 +249,9 @@ export function EstimationRouteMap({
         {...(bounds ? { bounds } : { center: [20, 60] as LatLngExpression, zoom: 3 })}
         minZoom={2}
         maxZoom={10}
+        zoomSnap={0.25}
+        zoomDelta={0.5}
+        wheelPxPerZoomLevel={120}
         maxBounds={WORLD_PAN_BOUNDS}
         maxBoundsViscosity={1.0}
         worldCopyJump
@@ -254,25 +264,35 @@ export function EstimationRouteMap({
           maxNativeZoom={10}
           crossOrigin="anonymous"
         />
-        {routeLine.length >= 2 && (
-          <Polyline positions={routeLine} pathOptions={{ color: '#58a6ff', weight: 3, opacity: 0.9 }} />
+        {routeLine.length >= 2 &&
+          mapOffsets.map((offset) => (
+            <Polyline
+              key={`line-${offset}`}
+              positions={routeLine.map(([lat, lon]) => [lat, lon + offset] as LatLngExpression)}
+              pathOptions={{ color: '#58a6ff', weight: 3, opacity: 0.9 }}
+            />
+          ))}
+        {mapOffsets.flatMap((offset) =>
+          stops.map((s, i) => (
+            <Marker
+              key={`${s.name}-${i}-${offset}`}
+              position={offsetPoint(wrappedStops[i], offset)}
+              interactive={offset === 0}
+              icon={L.divIcon({
+                className: 'fv-ce__map-pin-wrap',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10],
+                html: `<span class="fv-ce__map-pin">${i + 1}</span>`,
+              })}
+            >
+              {offset === 0 && (
+                <Tooltip direction="top" offset={[0, -8]}>
+                  {s.type}: {s.name}{s.country ? `, ${s.country}` : ''}
+                </Tooltip>
+              )}
+            </Marker>
+          )),
         )}
-        {stops.map((s, i) => (
-          <Marker
-            key={`${s.name}-${i}`}
-            position={[s.lat, s.lon]}
-            icon={L.divIcon({
-              className: 'fv-ce__map-pin-wrap',
-              iconSize: [20, 20],
-              iconAnchor: [10, 10],
-              html: `<span class="fv-ce__map-pin">${i + 1}</span>`,
-            })}
-          >
-            <Tooltip direction="top" offset={[0, -8]}>
-              {s.type}: {s.name}{s.country ? `, ${s.country}` : ''}
-            </Tooltip>
-          </Marker>
-        ))}
       </MapContainer>
     </div>
   );

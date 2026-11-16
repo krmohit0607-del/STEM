@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { Voyage } from '../data/voyages';
 import {
@@ -221,7 +222,7 @@ export function GenerateCommsModal({
     }
   };
 
-  return (
+  return createPortal(
     <div className="fv-comms-overlay" role="presentation" onClick={onClose}>
       <div
         className="fv-comms"
@@ -356,6 +357,7 @@ export function GenerateCommsModal({
           aria-hidden="true"
         />
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -109,6 +109,7 @@ export interface BackendVesselDto {
   wslMaxWindsLaden?: string | null;
   wslMaxSeaStateBallast?: string | null;
   wslMaxSeaStateLaden?: string | null;
+  loadDiagramJson?: string | null;
 }
 
 export type CreateVesselDto = Omit<BackendVesselDto, 'id' | 'isActive' | 'createdAt' | 'history'>;

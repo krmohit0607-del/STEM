@@ -223,6 +223,7 @@ export function buildEmptyView(): VoyageView {
     wslMaxWindsLaden: '',
     wslMaxSeaStateBallast: '',
     wslMaxSeaStateLaden: '',
+    loadDiagramJson: '',
 
     optMode: '',
     optObjective: '',
@@ -316,8 +317,8 @@ export function buildView(v: Voyage): VoyageView {
   ];
 
   const mkSpeedCons = (): SpeedConsRow[] => [
-    { isDefault: true, description: 'ECO', speed: ecoSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: ecoCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: 'Biogas', dailyCons3: '0.1' },
-    { isDefault: false, description: 'FULL', speed: fullSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: fullCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: 'Biogas', dailyCons3: '0.1' },
+    { isDefault: true, description: 'ECO', speed: ecoSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: ecoCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: '', dailyCons3: '' },
+    { isDefault: false, description: 'FULL', speed: fullSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: fullCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.5', fuelType3: '', dailyCons3: '' },
     { isDefault: false, description: 'CUSTOM', speed: customSpeed.toFixed(1), fuelType1: 'VLSFO', dailyCons1: customCons.toFixed(1), fuelType2: 'LSMGO', dailyCons2: '0.4', fuelType3: '', dailyCons3: '' },
   ];
 
@@ -487,6 +488,7 @@ export function buildView(v: Voyage): VoyageView {
     wslMaxWindsLaden: '6',
     wslMaxSeaStateBallast: '5',
     wslMaxSeaStateLaden: '6',
+    loadDiagramJson: '',
 
     optMode: 'Min Fuel',
     optObjective: 'Minimise bunker consumption while meeting laycan',

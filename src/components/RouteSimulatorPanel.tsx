@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { createPortal } from 'react-dom';
 
 import { useL } from '../i18n/LocalizationProvider';
 import { mergeVoyageShared } from '../data/voyageOverrides';
@@ -18,13 +19,15 @@ import {
     clearActiveSimRoute,
   setSimWeatherHour,
   requestRouteEdit,
+  requestMapFit,
   useActiveSimRoute,
-  useEditCompareRoute,
   useRouteEditActive,
   useWeatherScrubHour,
+  useRoutesToolbarSlot,
   type WaypointEngineOverride,
 } from '../data/routeSimulatorStore';
 import { useSavedRoutesVersion, useOptimizationResults, useOptimizationRun, removeOptimizationResult, followOptimizedRoute, bumpSavedRoutes } from '../data/optimizationStore';
+import { OptimizationInsightsPanel } from './OptimizationInsightsPanel';
 import {
   readSavedRoutesRaw,
   writeSavedRoutesRaw,
@@ -36,8 +39,11 @@ import {
 import { computeRouteMetrics, DEFAULT_MARKET_FACTORS, type RouteMetrics } from '../data/routeMetrics';
 import { openScenarioReport } from '../data/optimizationReport';
 import { loadSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
-import { unwrapRouteCoordinates } from '../data/antimeridian';
+import { unwrapRouteCoordinates, antimeridianAwareBoundsBox } from '../data/antimeridian';
+import { parseRouteTable, parseRouteText, type ImportedRoute } from '../data/routeImport';
 import { useSelectedVoyage } from '../data/selectedVoyage';
+import { useRouteReportMarkers, type RouteReportMarker } from '../data/routeReportMarkers';
+import { reportsForLeg } from './RouteEditorMap';
 import { buildGuidanceEmail, downloadGuidancePdfFile, type GuidanceReportData } from '../data/guidanceReport';
 import {
   readAisPositionsForVoyage,
@@ -50,6 +56,8 @@ import {
   publishSimulatorSelection,
   type ComparisonCandidate,
 } from '../data/comparisonSelectionStore';
+import { markRouteUsed, getLastUsed, clearRouteUsage, isRouteStale } from '../data/routeUsageStore';
+import { appendRouteHistory, type RouteHistoryEntry } from '../data/routeHistoryStore';
 import { ReportEmailComposer } from './ReportEmailComposer';
 import * as XLSX from 'xlsx';
 
@@ -71,6 +79,16 @@ interface SavedWaypoint {
   lat: string;
   lon: string;
   name?: string;
+  /** Planned SOG (kt) departing this waypoint — mirrors `Waypoint.speed` in
+   *  RouteExplorerPage.tsx; needed here (not just for display) to compute a
+   *  drift-aware timing profile, so simulated playback actually sails each
+   *  leg at its own planned speed instead of one constant average for the
+   *  whole route. */
+  speed?: number;
+  /** ETA/ETD at this waypoint (ISO local string) — mirrors `Waypoint.eta`;
+   *  needed alongside `driftUntil` below to compute how long the vessel
+   *  should visibly hold position here during playback. */
+  eta?: string;
   rpmMin?: number;
   rpmMax?: number;
   mcrMin?: number;
@@ -145,6 +163,16 @@ function decToDM(value: number, isLat: boolean): string {
   return `${String(deg).padStart(pad, '0')}° ${min.toFixed(1)}' ${hemi}`;
 }
 
+/** Decimal degrees → `33° 51.215' N`: minutes to 3 decimals (about 2 m), so imported waypoints land where the file put them. */
+function decToDMPrecise(value: number, isLat: boolean): string {
+  const hemi = isLat ? (value >= 0 ? 'N' : 'S') : value >= 0 ? 'E' : 'W';
+  const totalThousandths = Math.round(Math.abs(value) * 60 * 1000);
+  const deg = Math.floor(totalThousandths / 60000);
+  const min = (totalThousandths - deg * 60000) / 1000;
+  const pad = isLat ? 2 : 3;
+  return `${String(deg).padStart(pad, '0')}° ${min.toFixed(3)}' ${hemi}`;
+}
+
 /** Great-circle distance in nautical miles. */
 function haversineNM(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -164,6 +192,106 @@ function pathDistanceNmLocal(path: Array<[number, number]>): number {
     d += haversineNM(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
   }
   return d;
+}
+
+/** Parse a `datetime-local` input value (local time) to epoch ms, or null. */
+function parseLocalDateTimeLocal(value: string | undefined): number | null {
+  if (!value) return null;
+  const t = new Date(value).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * Build a drift-aware timing profile for a saved route's waypoints, so
+ * simulated playback sails each leg at its own planned speed (not one
+ * constant average for the whole route) and visibly holds position at any
+ * waypoint with a drift wait set — mirrors the exact same logic
+ * RouteExplorerPage.tsx's own "publish to the simulator" effect already
+ * uses for the live/currently-edited route; without this, a *saved* route
+ * (the common case once an edit is actually saved rather than still being
+ * actively edited) silently reverted to naive constant-speed interpolation,
+ * so its drift waypoint would never actually appear to stop the vessel
+ * during playback — one more leg among equals, sailed straight through.
+ * Returns `{ path, timeHours }` — `path` may gain extra (duplicate-position)
+ * points for each drift hold, so it must replace the plain geometry path,
+ * not just add a parallel timing array to it.
+ *
+ * `voyageEtdMs` anchors every waypoint's *actual* arrival time (voyage ETD
+ * plus this route's own cumulative sailing time so far) — the drift wait is
+ * computed as "Drift until" minus that live/fresh arrival time, never a
+ * waypoint's own *stored* `eta` field. A saved route's stored per-waypoint
+ * ETAs reflect whatever the voyage's ETD happened to be the last time this
+ * route was actually edited/saved; if the ETD has since changed (a very
+ * normal thing to do — e.g. in CP & Leg Details), those stored values go
+ * stale and are never automatically refreshed just by viewing the route.
+ * Anchoring to the live, current ETD instead means the drift duration (and
+ * everything downstream of it — ETA/time-to-go/average speed) always
+ * reflects reality, not a frozen snapshot of some earlier ETD.
+ */
+function buildDriftAwareProfile(
+  waypoints: SavedWaypoint[],
+  voyageEtdMs: number,
+  reportMarkers?: RouteReportMarker[],
+): { path: Array<[number, number]>; timeHours: number[] } {
+  const pts = waypoints
+    .map((wp) => ({ wp, lat: dmToDec(wp.lat), lon: dmToDec(wp.lon) }))
+    .filter((p) => !Number.isNaN(p.lat) && !Number.isNaN(p.lon));
+  const path: Array<[number, number]> = [];
+  const timeHours: number[] = [];
+  if (pts.length === 0) return { path, timeHours };
+  let cumHours = 0;
+  path.push([pts[0].lat, pts[0].lon]);
+  timeHours.push(0);
+  const driftWaitHours = (wp: SavedWaypoint, arrivalCumHours: number): number => {
+    if (!wp.drift || !wp.driftUntil) return 0;
+    const untilMs = parseLocalDateTimeLocal(wp.driftUntil);
+    if (untilMs == null) return 0;
+    const arrivalMs = voyageEtdMs + arrivalCumHours * 3600_000;
+    return Math.max(0, (untilMs - arrivalMs) / 3600_000);
+  };
+  const waitAtDeparture = driftWaitHours(pts[0].wp, 0);
+  if (waitAtDeparture > 0) {
+    cumHours += waitAtDeparture;
+    path.push([pts[0].lat, pts[0].lon]);
+    timeHours.push(cumHours);
+  }
+  for (let i = 1; i < pts.length; i += 1) {
+    const prev = pts[i - 1];
+    const curr = pts[i];
+    const legSpeed = prev.wp.speed && prev.wp.speed > 0 ? prev.wp.speed : SERVICE_SPEED_KN;
+    // Thread this leg through any real reports chronologically between it
+    // and the previous waypoint (see `reportsForLeg` in RouteEditorMap.tsx)
+    // — keeps this saved-route row's own line/timing consistent with the
+    // same leg's rendering on the map (only meaningful for whichever saved
+    // route is this voyage's actual active one; `reportMarkers` is only
+    // ever passed for that row — see its caller in `simRoutes`).
+    if (reportMarkers && reportMarkers.length > 0) {
+      const etaMsA = voyageEtdMs + cumHours * 3600_000;
+      // Prefer the next waypoint's own (freshly computed) ETA as the upper
+      // bracket bound when available — more accurate than a plain
+      // distance/speed estimate once earlier legs have already threaded
+      // through their own reports or drift waits.
+      const estimatedEtaMsB =
+        etaMsA + (haversineNM(prev.lat, prev.lon, curr.lat, curr.lon) / legSpeed) * 3600_000;
+      const etaMsB = parseLocalDateTimeLocal(curr.wp.eta) ?? estimatedEtaMsB;
+      const through = reportsForLeg(reportMarkers, etaMsA, etaMsB);
+      for (const r of through) {
+        cumHours += haversineNM(path[path.length - 1][0], path[path.length - 1][1], r.pos[0], r.pos[1]) / legSpeed;
+        path.push([r.pos[0], r.pos[1]]);
+        timeHours.push(cumHours);
+      }
+    }
+    cumHours += haversineNM(path[path.length - 1][0], path[path.length - 1][1], curr.lat, curr.lon) / legSpeed;
+    path.push([curr.lat, curr.lon]);
+    timeHours.push(cumHours);
+    const waitHours = driftWaitHours(curr.wp, cumHours);
+    if (waitHours > 0) {
+      cumHours += waitHours;
+      path.push([curr.lat, curr.lon]);
+      timeHours.push(cumHours);
+    }
+  }
+  return { path, timeHours };
 }
 
 /** Initial true course from point 1 to point 2 (deg). */
@@ -200,7 +328,39 @@ function niceCeil(v: number): number {
   return Math.ceil(v / 5) * 5; // 5 steps
 }
 
-/** Linearly interpolate a `[lat, lon]` polyline at fractional `progress`. */
+/**
+ * Interpolate a point a fraction `t` of the way from `(lat0, lon0)` to
+ * `(lat1, lon1)` along the straight line Leaflet actually draws between
+ * them — which, on this Mercator map, is a rhumb line (constant bearing),
+ * not a straight line in raw lat/lon degrees. Longitude is linear in true
+ * lat/lon either way, but latitude is linear in *Mercator* y, not in raw
+ * degrees — so a naive `lat0*(1-t) + lat1*t` cuts noticeably inside the
+ * rendered line for any leg spanning real latitude (worse at higher
+ * latitudes), which is exactly why the simulated vessel/report markers were
+ * drifting visibly off the plotted track. `t` is assumed proportional to
+ * along-track distance (true here since each leg is sailed at one constant
+ * speed), which is also exactly proportional to the Mercator-y delta for a
+ * rhumb line, so a plain lerp in Mercator space lands precisely on it.
+ */
+function lerpOnRenderedLine(
+  lat0: number,
+  lon0: number,
+  lat1: number,
+  lon1: number,
+  t: number,
+): [number, number] {
+  const toMercatorY = (latDeg: number) => Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
+  const fromMercatorY = (y: number) => (Math.atan(Math.exp(y)) * 360) / Math.PI - 90;
+  const y0 = toMercatorY(lat0);
+  const y1 = toMercatorY(lat1);
+  const lat = fromMercatorY(y0 + (y1 - y0) * t);
+  const lon = lon0 + (lon1 - lon0) * t;
+  return [lat, lon];
+}
+
+/** Interpolate a `[lat, lon]` polyline at fractional `progress`, landing
+ *  exactly on the straight (rhumb) line Leaflet renders between each pair
+ *  of vertices — see `lerpOnRenderedLine`. */
 function samplePath(
   path: Array<[number, number]>,
   progress: number,
@@ -213,7 +373,7 @@ function samplePath(
   const t = p - i0;
   const [lat0, lon0] = path[i0];
   const [lat1, lon1] = path[i1];
-  return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
+  return lerpOnRenderedLine(lat0, lon0, lat1, lon1, t);
 }
 
 /**
@@ -239,7 +399,7 @@ function positionAtHours(
   const f = t1 > t0 ? (hours - t0) / (t1 - t0) : 0;
   const [lat0, lon0] = path[i];
   const [lat1, lon1] = path[i + 1];
-  return [lat0 * (1 - f) + lat1 * f, lon0 * (1 - f) + lon1 * f];
+  return lerpOnRenderedLine(lat0, lon0, lat1, lon1, f);
 }
 
 /** Clamp an hour offset into the live-forecast window as a whole number. */
@@ -273,8 +433,16 @@ function beaufort(kt: number): number {
 
 // --- Weather factors ---------------------------------------------------------
 
-const SIM_PLAY_DURATION_MS = 12000;
 const SIM_WEATHER_SAMPLES = 48;
+
+/** Voyage-hours advanced per real second of playback at the Route Simulator's
+ *  own Play button — matches the map's weather-timeline "1x" base rate (see
+ *  `WeatherFieldControl.tsx`'s `HOURS_PER_SEC`), so both playback controls
+ *  move at a consistent, meaningful pace tied to the voyage's actual planned
+ *  speed/schedule, instead of the previous fixed "whole voyage in exactly 12
+ *  seconds" (which made the ship's on-screen pace completely arbitrary and
+ *  inconsistent between a short and a long voyage). */
+const SIM_HOURS_PER_SEC = 1000 / 450;
 
 type WeatherFactorId = 'waves' | 'swell' | 'wind' | 'current';
 
@@ -451,7 +619,7 @@ function CompassRose({
 
 // --- Route export formats ----------------------------------------------------
 
-type ExportFormatId = 'rtz' | 'jrc' | 'tokimec' | 'furuno' | 'nacos' | 'totem';
+export type ExportFormatId = 'rtz' | 'jrc' | 'tokimec' | 'furuno' | 'nacos' | 'totem';
 
 interface ExportFormatDef {
   id: ExportFormatId;
@@ -475,7 +643,7 @@ const EXPORT_FORMAT_BY_ID: Record<ExportFormatId, ExportFormatDef> =
     ExportFormatDef
   >;
 
-interface ExportRoute {
+export interface ExportRoute {
   name: string;
   path: Array<[number, number]>;
 }
@@ -499,7 +667,7 @@ function toDdmm(value: number, isLat: boolean): string {
 }
 
 /** Build the file contents for a set of routes in the requested format. */
-function buildRouteExport(format: ExportFormatId, routes: ExportRoute[]): string {
+export function buildRouteExport(format: ExportFormatId, routes: ExportRoute[]): string {
   switch (format) {
     case 'rtz': {
       const routeXml = routes
@@ -607,7 +775,7 @@ export function RouteSimulatorPanel() {
 
   const activeRoute = useActiveSimRoute();
   const routeEditActive = useRouteEditActive();
-  const editCompareRoute = useEditCompareRoute();
+  const routesToolbarSlot = useRoutesToolbarSlot();
   const voyage = useSelectedVoyage();
 
   // System-generated optimized routes (from the route editor's Optimize run),
@@ -678,6 +846,8 @@ export function RouteSimulatorPanel() {
   // --- Playback state --------------------------------------------------------
   const [simClock, setSimClock] = useState(0);
   const [simPlaying, setSimPlaying] = useState(false);
+  // True once the user has used this panel's own controls (chart cursor drag, step/skip/play): the vessel then follows them instead of the map weather timeline until that timeline is moved again.
+  const [simDrives, setSimDrives] = useState(false);
   const simRafRef = useRef<number | null>(null);
   const simLastTsRef = useRef<number | null>(null);
   const [simFactor, setSimFactor] = useState<WeatherFactorId>('waves');
@@ -685,6 +855,7 @@ export function RouteSimulatorPanel() {
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [savedPassageMsg, setSavedPassageMsg] = useState('');
   const simFactorDef = WEATHER_FACTOR_BY_ID[simFactor];
+  const reportMarkers = useRouteReportMarkers();
 
   const slug = (value: string) =>
     value
@@ -693,6 +864,22 @@ export function RouteSimulatorPanel() {
       .replace(/^-+|-+$/g, '') || 'route';
 
   // --- Playable routes: active route (from map) + every saved route ----------
+  /** The voyage's current/live ETD, as an epoch — the anchor every route's
+   *  drift-wait math is computed against (see `buildDriftAwareProfile`), not
+   *  any waypoint's own potentially-stale stored `eta`. Deliberately
+   *  independent of `simBaseDate` below (which additionally falls back to
+   *  the live weather data's own timestamp, and itself depends on
+   *  `simBounds`, which is only known once `simRoutes` already exists) to
+   *  avoid a circular dependency — this narrower anchor only needs the
+   *  active route's own ETD, available immediately. */
+  const voyageEtdMs = useMemo(() => {
+    if (activeRoute?.etdIso) {
+      const d = new Date(activeRoute.etdIso).getTime();
+      if (!Number.isNaN(d)) return d;
+    }
+    return Date.now();
+  }, [activeRoute?.etdIso]);
+
   const simRoutes = useMemo<SimRoute[]>(() => {
     const base: Array<Omit<SimRoute, 'color' | 'active'>> = [];
     if (activeRoute && activeRoute.path.length >= 2) {
@@ -713,33 +900,32 @@ export function RouteSimulatorPanel() {
         waypointOverrides: activeRoute.waypointOverrides,
       });
     }
-    // While editing, the pre-edit original is shown as its own comparison row.
-    if (editCompareRoute && editCompareRoute.path.length >= 2) {
-      const oProfile = editCompareRoute.timeHours;
-      const oHours =
-        oProfile && oProfile.length > 0
-          ? oProfile[oProfile.length - 1]
-          : transitHours(editCompareRoute.distanceNm);
-      base.push({
-        id: editCompareRoute.id,
-        savedId: null,
-        label: editCompareRoute.label,
-        path: editCompareRoute.path,
-        distanceNm: editCompareRoute.distanceNm,
-        hours: oHours,
-        timeHours: oProfile,
-        sentAt: null,
-      });
-    }
     savedRoutes.forEach((r) => {
-      const path = r.waypoints
-        .map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number])
-        .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
+      // Skip a saved entry the live `activeRoute` publish above is already
+      // covering (its id is deliberately given the same `saved-{id}` shape
+      // when it's backing a real saved route — see RouteExplorerPage.tsx's
+      // own publish effect) — otherwise editing an existing route would
+      // show both a live, real-time-updating row *and* a second, stale one
+      // from this saved entry's last-saved content, which is exactly the
+      // kind of duplicate-row bug this file has had to fix more than once.
+      if (base.some((b) => b.id === `saved-${r.id}`)) return;
+      // Reports represent the vessel's actually-recorded positions, so they
+      // only ever matter for whichever saved route is this voyage's real
+      // active one — threading them into every other (hypothetical/
+      // candidate) saved route would be meaningless. Also keeps this row's
+      // line in step with the exact same leg's main rendering on the map
+      // (`RouteEditorMap.tsx`'s own per-waypoint polyline), which already
+      // threads through reports for whatever's currently loaded/active —
+      // without this, the two would visibly diverge into two different
+      // lines for what's supposed to be the same route.
+      const isActiveSavedRoute = activeRouteId?.replace(/^saved-/, '') === r.id;
+      const { path, timeHours } = buildDriftAwareProfile(
+        r.waypoints,
+        voyageEtdMs,
+        isActiveSavedRoute ? reportMarkers : undefined,
+      );
       if (path.length < 2) return;
-      let dist = 0;
-      for (let k = 1; k < path.length; k += 1) {
-        dist += haversineNM(path[k - 1][0], path[k - 1][1], path[k][0], path[k][1]);
-      }
+      const dist = pathDistanceNmLocal(path);
       const waypointOverrides = r.waypoints
         .filter(
           (wp) =>
@@ -765,7 +951,8 @@ export function RouteSimulatorPanel() {
         label: r.name,
         path,
         distanceNm: Math.round(dist),
-        hours: transitHours(dist),
+        hours: timeHours.length > 0 ? timeHours[timeHours.length - 1] : transitHours(dist),
+        timeHours,
         sentAt: r.savedAt,
         waypointOverrides: waypointOverrides.length > 0 ? waypointOverrides : undefined,
       });
@@ -827,7 +1014,125 @@ export function RouteSimulatorPanel() {
           ]
         : [];
     return [...mapped, ...optimized, ...ais];
-  }, [activeRoute, editCompareRoute, savedRoutes, activeRouteId, optimizedResults, aisPositions]);
+  }, [activeRoute, savedRoutes, activeRouteId, optimizedResults, aisPositions, voyageEtdMs, reportMarkers]);
+
+  /**
+   * Only the active route (and, while editing, the live route itself) is
+   * shown on the chart/map by default — every other saved/optimized route
+   * starts hidden via its own checkbox, requiring a deliberate opt-in to
+   * compare. Without this, every saved route for the voyage (there can be
+   * several) was visible simultaneously from the moment the page loaded,
+   * each drawing its own line on the weather chart — "one route" could
+   * easily look like two or more near-identical overlapping lines even
+   * outside an active edit session. Tracked via a ref (not reconsidered
+   * every render) so a route the user deliberately re-shows via its
+   * checkbox stays shown — this only auto-hides each id the *first* time
+   * it's ever seen. */
+  const autoHiddenOnceRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const keepVisible = new Set([activeRouteId, activeRoute?.id].filter(Boolean) as string[]);
+    const toHide = simRoutes
+      .map((r) => r.id)
+      .filter((id) => !keepVisible.has(id) && !autoHiddenOnceRef.current.has(id));
+    if (toHide.length === 0) return;
+    toHide.forEach((id) => autoHiddenOnceRef.current.add(id));
+    setHiddenIds((prev) => [...prev, ...toHide.filter((id) => !prev.includes(id))]);
+  }, [simRoutes, activeRouteId, activeRoute?.id]);
+
+  // Whichever route is active should always actually be visible — e.g.
+  // "Activate"-ing a different saved route promotes it to active, but it
+  // may have already been auto-hidden above back when it was just one of
+  // several non-active saved routes; un-hide it (and the live route, for
+  // the same reason) whenever either becomes the relevant one again.
+  useEffect(() => {
+    const mustShow = [activeRouteId, activeRoute?.id].filter(Boolean) as string[];
+    setHiddenIds((prev) => prev.filter((id) => !mustShow.includes(id)));
+  }, [activeRouteId, activeRoute?.id]);
+
+  // --- Auto-archive stale, unused, non-active routes to "All Routes" --------
+  // A non-active route (a saved route, or an optimizer scenario result)
+  // that's gone unused for `ROUTE_STALE_AFTER_MS` is quietly archived
+  // instead of cluttering this list forever: a saved route is recorded into
+  // the permanent "All Routes" history and dropped from the active
+  // saved-routes list; an optimizer result is simply dropped from the
+  // active list — it's already permanently recorded in "All Routes" from
+  // the moment its run completed (see `OptimizationRunDialog`), so nothing
+  // further needs saving. "Used" means made Active, selected/viewed in this
+  // table, or shown on the chart via its checkbox (see `routeUsageStore`);
+  // the active route itself is never swept. A route with no usage stamp
+  // yet gets one seeded immediately (its countdown starts from when it
+  // first appeared here) rather than being treated as already stale.
+  useEffect(() => {
+    const voyageId = voyage?.id;
+    if (!voyageId) return;
+
+    const sweep = () => {
+      savedRoutes.forEach((r) => {
+        const simId = `saved-${r.id}`;
+        if (simId === activeRouteId) return;
+        const lastUsed = getLastUsed(voyageId, simId);
+        if (lastUsed == null) {
+          markRouteUsed(voyageId, simId);
+          return;
+        }
+        if (!isRouteStale(lastUsed, undefined)) return;
+        const path = r.waypoints
+          .map((wp) => [dmToDec(wp.lat), dmToDec(wp.lon)] as [number, number])
+          .filter(([lat, lon]) => !Number.isNaN(lat) && !Number.isNaN(lon));
+        if (path.length >= 2) {
+          let dist = 0;
+          for (let k = 1; k < path.length; k += 1) {
+            dist += haversineNM(path[k - 1][0], path[k - 1][1], path[k][0], path[k][1]);
+          }
+          const nowIso = new Date().toISOString();
+          const entry: RouteHistoryEntry = {
+            id: `archived-${r.id}`,
+            voyageId,
+            baseRouteName: r.name,
+            name: r.name,
+            generatedAt: r.savedAt || nowIso,
+            path,
+            summary: {
+              distanceNm: Math.round(dist),
+              durationH: transitHours(dist),
+              speedKn: SERVICE_SPEED_KN,
+              ecaDistanceNm: 0,
+              ecaDurationH: 0,
+              fuelTons: 0,
+              ecaFuelTons: 0,
+              fuelCost: 0,
+              hireCost: 0,
+              euaCost: 0,
+              totalCost: 0,
+              co2Tons: 0,
+              etdIso: nowIso,
+              etaIso: nowIso,
+            },
+            source: 'manual',
+          };
+          appendRouteHistory([entry]);
+        }
+        deleteSavedRoute(r.id);
+        clearRouteUsage(voyageId, simId);
+      });
+
+      optimizedResults.forEach((o) => {
+        const lastUsed = getLastUsed(voyageId, o.id);
+        if (lastUsed == null) {
+          markRouteUsed(voyageId, o.id);
+          return;
+        }
+        if (!isRouteStale(lastUsed, undefined)) return;
+        removeOptimizationResult(o.id);
+        clearRouteUsage(voyageId, o.id);
+      });
+    };
+
+    sweep();
+    const interval = window.setInterval(sweep, 10 * 60_000);
+    return () => window.clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voyage?.id, savedRoutes, activeRouteId, optimizedResults]);
 
   const hasRoutes = simRoutes.length > 0;
 
@@ -934,8 +1239,14 @@ export function RouteSimulatorPanel() {
 
   // Mirror the planned route's colour (black when it's the active route) onto
   // the map, and draw waypoints for the active route only.
-  const plannedColor =
-    simRoutes.find((r) => r.id === 'active-planned')?.color ?? '#58a6ff';
+  const plannedRow = simRoutes.find((r) => r.id === 'active-planned');
+  // The editor's live route is only published as its own `'active-planned'`
+  // row when it's showing something genuinely different from this voyage's
+  // active saved route (see `RouteExplorerPage`'s publish effect) — the far
+  // more common case of simply *viewing* the already-active route has no
+  // such row to read a colour from, but the line drawn on the map is still
+  // that active route and must still render black, not fall back to blue.
+  const plannedColor = plannedRow?.color ?? (activeRouteId ? ACTIVE_ROUTE_COLOR : '#58a6ff');
   const plannedColorRef = useRef(plannedColor);
   plannedColorRef.current = plannedColor;
   useEffect(() => {
@@ -946,21 +1257,25 @@ export function RouteSimulatorPanel() {
   useEffect(() => () => setMapPlannedColor(plannedColorRef.current), []);
 
   const activeWaypoints = useMemo<Array<{ pos: [number, number]; color: string }>>(() => {
-    // Only the active route shows its waypoints; the planned route's waypoints
-    // are already drawn by the map editor.
-    if (!activeSimRoute || !activeSimRoute.savedId) return [];
-    const saved = savedRoutes.find((s) => s.id === activeSimRoute.savedId);
-    if (!saved) return [];
+    // The active saved route and the saved route selected in the table show their own waypoints,
+    // so an imported route can be checked point by point; the planned route's waypoints are
+    // already drawn by the map editor.
+    const shown = [activeSimRoute, simRoutes.find((r) => r.id === selectedRouteId)]
+      .filter((r, index, all): r is SimRoute => !!r && !!r.savedId && all.findIndex((other) => other?.id === r.id) === index);
     const out: Array<{ pos: [number, number]; color: string }> = [];
-    saved.waypoints.forEach((wp) => {
-      const lat = dmToDec(wp.lat);
-      const lon = dmToDec(wp.lon);
-      if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
-        out.push({ pos: [lat, lon], color: activeSimRoute.color });
-      }
+    shown.forEach((route) => {
+      const saved = savedRoutes.find((s) => s.id === route.savedId);
+      if (!saved) return;
+      saved.waypoints.forEach((wp) => {
+        const lat = dmToDec(wp.lat);
+        const lon = dmToDec(wp.lon);
+        if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+          out.push({ pos: [lat, lon], color: route.color });
+        }
+      });
     });
     return out;
-  }, [activeSimRoute, savedRoutes]);
+  }, [activeSimRoute, simRoutes, selectedRouteId, savedRoutes]);
 
   const activeWaypointsRef = useRef(activeWaypoints);
   activeWaypointsRef.current = activeWaypoints;
@@ -976,29 +1291,10 @@ export function RouteSimulatorPanel() {
     [visibleRoutes],
   );
 
-  const simBounds = useMemo<LatLngBounds | null>(() => {
-    let south = Infinity;
-    let north = -Infinity;
-    let west = Infinity;
-    let east = -Infinity;
-    visibleRoutes.forEach((r) =>
-      r.path.forEach(([lat, lon]) => {
-        if (lat < south) south = lat;
-        if (lat > north) north = lat;
-        if (lon < west) west = lon;
-        if (lon > east) east = lon;
-      }),
-    );
-    if (!Number.isFinite(south)) return null;
-    const padLat = Math.max(0.5, (north - south) * 0.08);
-    const padLon = Math.max(0.5, (east - west) * 0.08);
-    return {
-      south: south - padLat,
-      north: north + padLat,
-      west: west - padLon,
-      east: east + padLon,
-    };
-  }, [visibleRoutes]);
+  const simBounds = useMemo<LatLngBounds | null>(
+    () => antimeridianAwareBoundsBox(visibleRoutes.flatMap((r) => r.path)),
+    [visibleRoutes],
+  );
 
   // Load the live grid for every read-out factor over the routes' bounds.
   useEffect(() => {
@@ -1121,10 +1417,36 @@ export function RouteSimulatorPanel() {
     return { series, maxW, dataMax, dataMin };
   }, [visibleRoutes, simFactorDef, simBounds, liveVersion]);
 
+  // The Route Simulator's own Play button starts from "today" — where the
+  // vessel would realistically be right now given its ETD and each leg's
+  // planned speed — not from the voyage's absolute start, so the first
+  // thing you see on load already reflects the real forecast position. Only
+  // applies until the user actually interacts with playback themselves
+  // (`userTouchedSimRef`); after that, their manual position always wins and
+  // is never silently overridden by this.
+  const userTouchedSimRef = useRef(false);
+  const todayElapsedFraction = (): number => {
+    if (simMaxHours <= 0) return 0;
+    const base = simBaseDate.getTime();
+    if (Number.isNaN(base)) return 0;
+    const elapsedHours = Math.max(0, Math.min(simMaxHours, (Date.now() - base) / 3600_000));
+    return elapsedHours / simMaxHours;
+  };
+
   useEffect(() => {
     setSimPlaying(false);
-    setSimClock(0);
+    if (!userTouchedSimRef.current) setSimClock(todayElapsedFraction());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedRoutes, activeRoute?.id]);
+
+  // Once the base date/max hours actually resolve (they depend on the
+  // weather fetch and the active route's ETD, both async), (re)apply
+  // "today" as the starting position — same guard, so a manual seek is
+  // never clobbered once the user has touched the controls.
+  useEffect(() => {
+    if (!userTouchedSimRef.current) setSimClock(todayElapsedFraction());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simBaseDate, simMaxHours]);
 
   useEffect(() => {
     setSelectedRouteId((prev) =>
@@ -1141,13 +1463,14 @@ export function RouteSimulatorPanel() {
       simLastTsRef.current = null;
       return;
     }
-    const speed = 1 / SIM_PLAY_DURATION_MS;
+    const hoursPerMs = SIM_HOURS_PER_SEC / 1000;
     const tick = (ts: number) => {
       if (simLastTsRef.current == null) simLastTsRef.current = ts;
       const dt = ts - simLastTsRef.current;
       simLastTsRef.current = ts;
       setSimClock((prev) => {
-        const next = prev + dt * speed;
+        if (simMaxHours <= 0) return prev;
+        const next = prev + (dt * hoursPerMs) / simMaxHours;
         if (next >= 1) {
           setSimPlaying(false);
           return 1;
@@ -1164,7 +1487,7 @@ export function RouteSimulatorPanel() {
       }
       simLastTsRef.current = null;
     };
-  }, [simPlaying]);
+  }, [simPlaying, simMaxHours]);
 
   const simElapsedHours = simClock * simMaxHours;
 
@@ -1182,7 +1505,12 @@ export function RouteSimulatorPanel() {
   // the first/last waypoint, so only the weather itself keeps moving with
   // the timeline in that case, not the ship.
   const weatherScrubHour = useWeatherScrubHour();
-  const simIsActive = simPlaying;
+  const simIsActive = simPlaying || simDrives;
+  useEffect(() => {
+    setSimDrives(false);
+    setSimPlaying(false);
+    setSimClock(0);
+  }, [weatherScrubHour]);
   const weatherDrivenElapsedHours = useMemo(() => {
     if (simIsActive || weatherScrubHour == null || simMaxHours <= 0) return null;
     const base = simBaseDate.getTime();
@@ -1491,6 +1819,8 @@ export function RouteSimulatorPanel() {
   };
   const onPlotPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
+    userTouchedSimRef.current = true;
+    setSimDrives(true);
     setSimPlaying(false);
     scrubToClientX(e.clientX);
     const onMove = (ev: PointerEvent) => scrubToClientX(ev.clientX);
@@ -1551,13 +1881,18 @@ export function RouteSimulatorPanel() {
     setActiveRouteId(routeId);
     writeActiveRouteId(voyage?.id, routeId);
     if (voyage?.id) mergeVoyageShared(voyage.id, { leg1AutoRoute: false });
+    markRouteUsed(voyage?.id, routeId);
   };
 
   /** Toggle whether a route is drawn on the chart / map. */
   const toggleRouteVisible = (routeId: string) => {
-    setHiddenIds((prev) =>
-      prev.includes(routeId) ? prev.filter((x) => x !== routeId) : [...prev, routeId],
-    );
+    setHiddenIds((prev) => {
+      const nowHidden = prev.includes(routeId);
+      // Turning a route *on* (making it visible) counts as using it; turning
+      // it off doesn't reset that — it just stops showing on the chart.
+      if (nowHidden) markRouteUsed(voyage?.id, routeId);
+      return nowHidden ? prev.filter((x) => x !== routeId) : [...prev, routeId];
+    });
   };
 
   /** Rename a saved route. */
@@ -1627,107 +1962,59 @@ export function RouteSimulatorPanel() {
     savedAt: new Date().toISOString(),
     waypoints: points.map(([lat, lon], index) => ({
       id: `wp-import-${Date.now()}-${index}`,
-      name: index === 0 ? 'Departure' : index === points.length - 1 ? 'Arrival' : `WP ${index}`,
-      lat: decToDM(lat, true), lon: decToDM(lon, false), course: 0, speed: SERVICE_SPEED_KN,
+      name: index === 0 ? 'Departure' : index === points.length - 1 ? 'Arrival' : `WP ${index + 1}`,
+      lat: decToDMPrecise(lat, true), lon: decToDMPrecise(lon, false), course: 0, speed: SERVICE_SPEED_KN,
       distanceFromPrev: index === 0 ? 0 : haversineNM(points[index - 1][0], points[index - 1][1], lat, lon),
       eta: '', drift: false, isPort: index === 0 || index === points.length - 1, legType: 'rhumb',
     })),
   });
 
-  const parseRouteText = (text: string, extension: string): SavedRoute[] => {
-    if (extension === 'rtz' || extension === 'xml') {
-      const points: Array<[number, number]> = [];
-      const matches = text.matchAll(/<position\b[^>]*\blat="([-+\d.]+)"[^>]*\blon="([-+\d.]+)"[^>]*\/?\s*>/gi);
-      for (const match of matches) points.push([Number(match[1]), Number(match[2])]);
-      return points.length >= 2 ? [importedWaypoints(points, 'Imported RTZ route')] : [];
-    }
-    const lines = text.split(/\r?\n/).filter((line) => line.trim());
-    if (lines.length < 2) return [];
-    const parseCsv = (line: string) => line.split(',').map((value) => value.trim().replace(/^"|"$/g, ''));
-    const parsedRows = lines.map(parseCsv);
-    const headerRowIndex = findCoordinateHeaderRow(parsedRows);
-    if (headerRowIndex < 0) return [];
-    const header = parsedRows[headerRowIndex].map(normalizeColumnName);
-    const latIndex = findCoordinateColumn(header, 'lat');
-    const lonIndex = findCoordinateColumn(header, 'lon');
-    if (latIndex < 0 || lonIndex < 0) return [];
-    const points = parsedRows.slice(headerRowIndex + 1).map((row) => [parseCoordinateValue(row[latIndex], true), parseCoordinateValue(row[lonIndex], false)] as [number, number]).filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
-    return points.length >= 2 ? [importedWaypoints(points, 'Imported CSV route')] : [];
-  };
-
-  const normalizeColumnName = (value: unknown): string => String(value ?? '').toLowerCase().replace(/[^a-z]/g, '');
-
-  const findCoordinateColumn = (header: string[], axis: 'lat' | 'lon'): number => {
-    const aliases = axis === 'lat' ? ['lat', 'latitude', 'y', 'northing'] : ['lon', 'lng', 'longitude', 'x', 'easting'];
-    return header.findIndex((value) => aliases.includes(value) || aliases.some((alias) => value.startsWith(alias)));
-  };
-
-  const findCoordinateHeaderRow = (rows: unknown[][]): number => rows.slice(0, 20).findIndex((row) => {
-    const header = row.map(normalizeColumnName);
-    return findCoordinateColumn(header, 'lat') >= 0 && findCoordinateColumn(header, 'lon') >= 0;
-  });
-
-  const parseCoordinateValue = (value: unknown, latitude: boolean): number => {
-    if (typeof value === 'number') return value;
-    const raw = String(value ?? '').trim();
-    if (!raw) return NaN;
-    const parsed = Number(raw.replace(',', '.'));
-    if (Number.isFinite(parsed)) return parsed;
-    const result = dmToDec(raw);
-    return latitude && Math.abs(result) <= 90 || !latitude && Math.abs(result) <= 180 ? result : NaN;
-  };
-
-  const parseImportedJson = (text: string): SavedRoute[] => {
-    const parsed = JSON.parse(text);
-    const incoming = Array.isArray(parsed) ? parsed : [parsed];
-    return incoming.flatMap((route, index) => {
-      if (route && Array.isArray(route.waypoints)) {
-        const points: Array<[number, number]> = route.waypoints.map((wp: { lat?: string | number; lon?: string | number; lng?: string | number }) => [typeof wp.lat === 'number' ? wp.lat : dmToDec(String(wp.lat ?? '')), typeof wp.lon === 'number' ? wp.lon : dmToDec(String(wp.lon ?? wp.lng ?? ''))] as [number, number]).filter((point: [number, number]) => Number.isFinite(point[0]) && Number.isFinite(point[1]));
-        return points.length >= 2 ? [importedWaypoints(points, route.name || `Imported route ${index + 1}`)] : [];
-      }
-      if (route && Array.isArray(route.points)) {
-        const points: Array<[number, number]> = route.points.map((point: [number, number]) => [Number(point[0]), Number(point[1])] as [number, number]).filter((point: [number, number]) => Number.isFinite(point[0]) && Number.isFinite(point[1]));
-        return points.length >= 2 ? [importedWaypoints(points, route.name || `Imported route ${index + 1}`)] : [];
-      }
-      return [];
-    });
-  };
-
-  /** Open the file picker for JSON, CSV, RTZ, or Excel route files. */
+  /** Open the file picker for JSON, GeoJSON, CSV, TXT, RTZ, GPX, KML, or Excel route files. */
   const importRoutes = () => importInputRef.current?.click();
 
   const onImportFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
+    const notes: string[] = [];
     try {
       const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
-      let cleaned: SavedRoute[] = [];
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'Imported route';
+      let found: ImportedRoute[] = [];
       if (extension === 'xlsx' || extension === 'xls') {
         const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
         workbook.SheetNames.forEach((sheetName) => {
           const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: true, defval: '' });
-          const headerRowIndex = findCoordinateHeaderRow(rows);
-          if (headerRowIndex < 0) return;
-          const header = (rows[headerRowIndex] ?? []).map(normalizeColumnName);
-          const latIndex = findCoordinateColumn(header, 'lat');
-          const lonIndex = findCoordinateColumn(header, 'lon');
-          if (latIndex < 0 || lonIndex < 0) return;
-          const points = rows.slice(headerRowIndex + 1).map((row) => [parseCoordinateValue(row[latIndex], true), parseCoordinateValue(row[lonIndex], false)] as [number, number]).filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
-          if (points.length >= 2) cleaned.push(importedWaypoints(points, `${sheetName} - Imported route`));
+          const label = workbook.SheetNames.length > 1 ? `${baseName} - ${sheetName}` : baseName;
+          found.push(...parseRouteTable(rows, label, notes));
         });
       } else {
-        const text = await file.text();
-        cleaned = extension === 'json' ? parseImportedJson(text) : parseRouteText(text, extension);
+        const result = parseRouteText(await file.text(), extension, baseName);
+        found = result.routes;
+        notes.push(...result.notes);
       }
-      if (cleaned.length === 0) throw new Error('No route coordinates found');
+      if (found.length === 0) throw new Error('No route coordinates found');
+      const cleaned = found.map((route) => importedWaypoints(route.points, route.name));
       const tagged = cleaned.map((r) => tagRouteWithVoyage(r, voyage?.id));
       writeSavedRoutes([...(readSavedRoutesRaw() as SavedRoute[]), ...tagged]);
       setSavedRoutes(readSavedRoutes(voyage?.id));
       bumpSavedRoutes();
-      setSavedPassageMsg(`${cleaned.length} route${cleaned.length === 1 ? '' : 's'} imported successfully.`);
+
+      // Show what was read: select the first imported route, make sure it is drawn, and zoom the map to it.
+      const firstSimId = `saved-${tagged[0].id}`;
+      const importedIds = tagged.map((r) => `saved-${r.id}`);
+      setHiddenIds((prev) => prev.filter((id) => !importedIds.includes(id)));
+      setSelectedRouteId(firstSimId);
+      requestMapFit(found.flatMap((route) => route.points));
+      const describe = (route: ImportedRoute) => {
+        const nm = route.points.slice(1).reduce((sum, point, i) => sum + haversineNM(route.points[i][0], route.points[i][1], point[0], point[1]), 0);
+        const at = ([lat, lon]: [number, number]) => `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+        return `${route.name} (${route.points.length} waypoints, ${Math.round(nm).toLocaleString()} NM, from ${at(route.points[0])} to ${at(route.points[route.points.length - 1])})`;
+      };
+      setSavedPassageMsg(`Imported ${found.map(describe).join('; ')}.${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`);
     } catch {
-      window.alert(t('importRoutesError', 'Could not import routes: invalid or unsupported file. Use JSON, CSV, RTZ, XLS, or XLSX.'));
+      const detail = notes.length > 0 ? `\n\n${notes.join('\n')}` : '';
+      window.alert(`${t('importRoutesError', 'Could not import routes: invalid or unsupported file. Use JSON, GeoJSON, CSV, TXT, RTZ, GPX, KML, XLS, or XLSX.')}${detail}`);
     }
   };
 
@@ -1737,7 +2024,7 @@ export function RouteSimulatorPanel() {
     if (toMerge.length < 2) return;
     const merged: SavedRoute = tagRouteWithVoyage(
       {
-        id: `route-${Date.now()}`,
+        id: `route-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         name: `${t('merged', 'Merged')} ${savedRoutes.length + 1}`,
         savedAt: new Date().toISOString(),
         waypoints: toMerge.flatMap((r) => r.waypoints),
@@ -1856,25 +2143,25 @@ export function RouteSimulatorPanel() {
                   {readout ? `${decToDM(readout.pos[0], true)}, ${decToDM(readout.pos[1], false)}` : '--'}
                 </span>
                 <div className="fv-sim2__buttons">
-                  <button type="button" onClick={() => { setSimPlaying(false); setSimClock(0); }}
+                  <button type="button" onClick={() => { userTouchedSimRef.current = true; setSimDrives(true); setSimPlaying(false); setSimClock(0); }}
                     title={t('restart', 'Restart')} aria-label={t('restart', 'Restart')}>
                     <i className="fas fa-backward-fast" aria-hidden="true" />
                   </button>
-                  <button type="button" onClick={() => { setSimPlaying(false); setSimClock((c) => Math.max(0, c - 0.05)); }}
+                  <button type="button" onClick={() => { userTouchedSimRef.current = true; setSimDrives(true); setSimPlaying(false); setSimClock((c) => Math.max(0, c - 0.05)); }}
                     title={t('stepBack', 'Step back')} aria-label={t('stepBack', 'Step back')}>
                     <i className="fas fa-backward-step" aria-hidden="true" />
                   </button>
                   <button type="button" className="fv-sim2__play"
-                    onClick={() => { if (!simPlaying && simClock >= 1) setSimClock(0); setSimPlaying((p) => !p); }}
+                    onClick={() => { userTouchedSimRef.current = true; setSimDrives(true); if (!simPlaying && simClock >= 1) setSimClock(0); setSimPlaying((p) => !p); }}
                     title={simPlaying ? t('pause', 'Pause') : t('play', 'Play')}
                     aria-label={simPlaying ? t('pause', 'Pause') : t('play', 'Play')}>
                     <i className={simPlaying ? 'fas fa-pause' : 'fas fa-play'} aria-hidden="true" />
                   </button>
-                  <button type="button" onClick={() => { setSimPlaying(false); setSimClock((c) => Math.min(1, c + 0.05)); }}
+                  <button type="button" onClick={() => { userTouchedSimRef.current = true; setSimDrives(true); setSimPlaying(false); setSimClock((c) => Math.min(1, c + 0.05)); }}
                     title={t('stepForward', 'Step forward')} aria-label={t('stepForward', 'Step forward')}>
                     <i className="fas fa-forward-step" aria-hidden="true" />
                   </button>
-                  <button type="button" onClick={() => { setSimPlaying(false); setSimClock(1); }}
+                  <button type="button" onClick={() => { userTouchedSimRef.current = true; setSimDrives(true); setSimPlaying(false); setSimClock(1); }}
                     title={t('skipToEnd', 'Skip to end')} aria-label={t('skipToEnd', 'Skip to end')}>
                     <i className="fas fa-forward-fast" aria-hidden="true" />
                   </button>
@@ -1954,17 +2241,25 @@ export function RouteSimulatorPanel() {
                       const isActive = s.id === activeRouteId;
                       const dim = selectedRouteId && selectedRouteId !== s.id;
                       const w = s.id === selectedRouteId ? 2.6 : 1.7;
+                      // The pre-edit "original" comparison line (shown
+                      // alongside the live edit so the two can be compared)
+                      // dashes itself — its path is often still very close
+                      // to the edited one right after duplicating, and two
+                      // solid near-identical lines read as an accidental
+                      // duplicate/glitch rather than a deliberate overlay.
+                      const isOriginalCompare = s.id === 'original-compare';
                       return (
                         <g key={s.id} strokeOpacity={dim ? 0.35 : 1}>
-                          {/* Light casing so the black active line stays visible. */}
-                          {isActive && (
-                            <polyline points={pts} fill="none" stroke="#ffffff"
-                              strokeOpacity={0.65} strokeWidth={w + 2}
-                              strokeLinejoin="round" strokeLinecap="round"
-                              vectorEffect="non-scaling-stroke" />
-                          )}
                           <polyline points={pts} fill="none" stroke={s.color}
                             strokeWidth={w} strokeLinejoin="round" strokeLinecap="round"
+                            strokeDasharray={isOriginalCompare ? '4 3' : undefined}
+                            // A single line per route — the active route (pure
+                            // black) gets a white glow via this filter instead
+                            // of a second, separately-drawn "casing" polyline
+                            // underneath, so it stays visible against the dark
+                            // chart background without ever actually being two
+                            // overlapping lines.
+                            style={isActive ? { filter: 'drop-shadow(0 0 1.2px #fff) drop-shadow(0 0 1.2px #fff)' } : undefined}
                             vectorEffect="non-scaling-stroke" />
                         </g>
                       );
@@ -1986,56 +2281,68 @@ export function RouteSimulatorPanel() {
               <span className="fv-sim2__routes-count">
                 {simRoutes.length} {t('routes', 'Routes')}
               </span>
-              <button
-                type="button"
-                className="fv-sim2__routes-btn fv-sim2__routes-btn--primary"
-                onClick={addCheckedToSavedPassages}
-                disabled={checkedRoutes.length === 0}
-                title={t('addCheckedToSavedPassages', 'Add checked routes to Saved Passages')}
-              >
-                <i className="fas fa-bookmark" aria-hidden="true" />
-              </button>
-              <span className="fv-sim2__routes-tools" aria-label={t('routeTools', 'Route tools')}>
-                <button type="button" className="fv-sim2__routes-btn" onClick={importRoutes} title={t('importRoutes', 'Import routes')} aria-label={t('importRoutes', 'Import routes')}>
-                  <i className="fas fa-upload" aria-hidden="true" />
-                </button>
-                <button type="button" className="fv-sim2__routes-btn" onClick={exportRoutes} disabled={simRoutes.length === 0} title={t('exportRoutes', 'Export routes')} aria-label={t('exportRoutes', 'Export routes')}>
-                  <i className="fas fa-download" aria-hidden="true" />
-                </button>
-                <button type="button" className="fv-sim2__routes-btn" onClick={mergeVisibleRoutes} disabled={mergeableCount < 2} title={t('mergeRoutes', 'Merge routes')} aria-label={t('mergeRoutes', 'Merge routes')}>
-                  <i className="fas fa-object-group" aria-hidden="true" />
-                </button>
-                <button type="button" className="fv-sim2__routes-btn" onClick={splitSelectedRoute} disabled={!canSplit} title={t('splitRoute', 'Split route')} aria-label={t('splitRoute', 'Split route')}>
-                  <i className="fas fa-code-branch" aria-hidden="true" />
-                </button>
-                {routeEditActive ? (
+              {/* Portaled up into the Route Explorer page's own header (same
+                  row as Save/Discard/Undo/Redo) when that slot is mounted —
+                  see `useRoutesToolbarSlot` — falling back to rendering right
+                  here otherwise (e.g. briefly on first mount). */}
+              {(() => {
+                const toolbar = (
                   <>
-                    <button type="button" className="fv-sim2__routes-btn fv-sim2__routes-btn--on" onClick={() => requestRouteEdit('activate')} title={t('activateEditHint', 'Keep this edited route')} aria-label={t('activate', 'Activate')}>
-                      <i className="fas fa-circle-check" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="fv-sim2__routes-btn fv-sim2__routes-btn--primary"
+                      onClick={addCheckedToSavedPassages}
+                      disabled={checkedRoutes.length === 0}
+                      title={t('addCheckedToSavedPassages', 'Add checked routes to Saved Passages')}
+                    >
+                      <i className="fas fa-bookmark" aria-hidden="true" />
                     </button>
-                    <button type="button" className="fv-sim2__routes-btn" onClick={() => requestRouteEdit('discard')} title={t('discardEditHint', 'Discard edits and restore the original route')} aria-label={t('discard', 'Discard')}>
-                      <i className="fas fa-rotate-left" aria-hidden="true" />
-                    </button>
+                    <span className="fv-sim2__routes-tools" aria-label={t('routeTools', 'Route tools')}>
+                      <button type="button" className="fv-sim2__routes-btn" onClick={importRoutes} title={t('importRoutes', 'Import routes')} aria-label={t('importRoutes', 'Import routes')}>
+                        <i className="fas fa-upload" aria-hidden="true" />
+                      </button>
+                      <button type="button" className="fv-sim2__routes-btn" onClick={exportRoutes} disabled={simRoutes.length === 0} title={t('exportRoutes', 'Export routes')} aria-label={t('exportRoutes', 'Export routes')}>
+                        <i className="fas fa-download" aria-hidden="true" />
+                      </button>
+                      <button type="button" className="fv-sim2__routes-btn" onClick={mergeVisibleRoutes} disabled={mergeableCount < 2} title={t('mergeRoutes', 'Merge routes')} aria-label={t('mergeRoutes', 'Merge routes')}>
+                        <i className="fas fa-object-group" aria-hidden="true" />
+                      </button>
+                      <button type="button" className="fv-sim2__routes-btn" onClick={splitSelectedRoute} disabled={!canSplit} title={t('splitRoute', 'Split route')} aria-label={t('splitRoute', 'Split route')}>
+                        <i className="fas fa-code-branch" aria-hidden="true" />
+                      </button>
+                      {routeEditActive ? (
+                        <>
+                          <button type="button" className="fv-sim2__routes-btn fv-sim2__routes-btn--on" onClick={() => requestRouteEdit('activate')} title={t('activateEditHint', 'Keep this edited route')} aria-label={t('activate', 'Activate')}>
+                            <i className="fas fa-circle-check" aria-hidden="true" />
+                          </button>
+                          <button type="button" className="fv-sim2__routes-btn" onClick={() => requestRouteEdit('discard')} title={t('discardEditHint', 'Discard edits and restore the original route')} aria-label={t('discard', 'Discard')}>
+                            <i className="fas fa-rotate-left" aria-hidden="true" />
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" className="fv-sim2__routes-btn" onClick={() => requestRouteEdit('start')} title={t('editRouteHint', 'Duplicate the route and edit the copy')} aria-label={t('duplicateEdit', 'Duplicate & Edit')}>
+                          <i className="fas fa-pen-to-square" aria-hidden="true" />
+                        </button>
+                      )}
+                      {optimizedResults.length > 0 && (
+                        <button type="button" className="fv-sim2__routes-btn" onClick={() => {
+                          const visible = optimizedResults.filter((o) => !hiddenIds.includes(o.id));
+                          openScenarioReport(
+                            visible.map((o) => ({ name: o.name, metrics: o.metrics })),
+                            optimizationRun,
+                            t('nmUnit', 'NM'),
+                          );
+                        }} title={t('optimizationReport', 'Optimization report')} aria-label={t('optimizationReport', 'Optimization report')}>
+                          <i className="fas fa-file-lines" aria-hidden="true" />
+                        </button>
+                      )}
+                      <OptimizationInsightsPanel voyageId={voyage?.id} route={optimizedResults.find((o) => o.id === selectedRouteId)} />
+                      <input ref={importInputRef} type="file" accept=".json,.geojson,.csv,.txt,.rtz,.xml,.gpx,.kml,.xls,.xlsx,application/json,text/csv,text/plain,application/xml,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onImportFile} hidden />
+                    </span>
                   </>
-                ) : (
-                  <button type="button" className="fv-sim2__routes-btn" onClick={() => requestRouteEdit('start')} title={t('editRouteHint', 'Duplicate the route and edit the copy')} aria-label={t('duplicateEdit', 'Duplicate & Edit')}>
-                    <i className="fas fa-pen-to-square" aria-hidden="true" />
-                  </button>
-                )}
-                {optimizedResults.length > 0 && (
-                  <button type="button" className="fv-sim2__routes-btn" onClick={() => {
-                    const visible = optimizedResults.filter((o) => !hiddenIds.includes(o.id));
-                    openScenarioReport(
-                      visible.map((o) => ({ name: o.name, metrics: o.metrics })),
-                      optimizationRun,
-                      t('nmUnit', 'NM'),
-                    );
-                  }} title={t('optimizationReport', 'Optimization report')} aria-label={t('optimizationReport', 'Optimization report')}>
-                    <i className="fas fa-file-lines" aria-hidden="true" />
-                  </button>
-                )}
-                <input ref={importInputRef} type="file" accept=".json,.csv,.rtz,.xml,.xls,.xlsx,application/json,text/csv,application/xml,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onImportFile} hidden />
-              </span>
+                );
+                return routesToolbarSlot ? createPortal(toolbar, routesToolbarSlot) : toolbar;
+              })()}
               {savedPassageMsg && <span className="fv-sim2__routes-note">{savedPassageMsg}</span>}
             </div>
             <div className="fv-sim2__table-wrap">
@@ -2076,7 +2383,10 @@ export function RouteSimulatorPanel() {
                     const totalCostToGo = fuelCostToGo + timeCostToGo + emissionsCostToGo;
                     return (
                       <tr key={r.id} className={isSel ? 'fv-sim2__trow--sel' : undefined}
-                        onClick={() => setSelectedRouteId(r.id)}>
+                        onClick={() => {
+                          setSelectedRouteId(r.id);
+                          markRouteUsed(voyage?.id, r.id);
+                        }}>
                         <td className="fv-sim2__col-check" onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"

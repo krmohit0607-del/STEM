@@ -7,6 +7,7 @@ import { WeatherFieldControl } from './WeatherFieldControl';
 import { MapWeatherLegendControl } from './MapWeatherLegendControl';
 import { sampleFrozenGrid, type FrozenWeatherGrid, type WeatherFactorId } from '../data/routeWeatherSnapshot';
 import type { SnapshotRouteItem } from '../data/routeSnapshotsStore';
+import { antimeridianAwareBoundsBox, needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 
 /** Fit the map to the given bounds once, when they first become available
  *  (e.g. once the snapshot has loaded) — not on every render. */
@@ -58,8 +59,27 @@ export function RouteSnapshotMap({
   const bounds = useMemo<LatLngBoundsExpression | null>(() => {
     const pts = routes.flatMap((r) => r.path);
     if (pts.length === 0) return null;
-    return L.latLngBounds(pts.map(([lat, lon]) => L.latLng(lat, lon)));
+    const box = antimeridianAwareBoundsBox(pts);
+    if (!box) return null;
+    return [
+      [box.south, box.west],
+      [box.north, box.east],
+    ];
   }, [routes]);
+
+  // Each route is unwrapped onto its own continuous numberline, then (if
+  // near the dateline) duplicated at adjacent world copies so it doesn't
+  // disappear when the user pans past 180deg — Leaflet only auto-repeats
+  // `<TileLayer>`s, never `<Polyline>`/`<Marker>`.
+  const renderRoutes = useMemo(
+    () =>
+      routes.map((r) => {
+        const path = unwrapRouteCoordinates(r.path);
+        const offsets = needsWorldCopies(path) ? [-360, 0, 360] : [0];
+        return { ...r, path, offsets };
+      }),
+    [routes],
+  );
 
   const sampleOverrides = useMemo(() => {
     if (!weatherGrids) return undefined;
@@ -76,6 +96,9 @@ export function RouteSnapshotMap({
       center={[20, 80]}
       zoom={3}
       minZoom={2}
+      zoomSnap={0.25}
+      zoomDelta={0.5}
+      wheelPxPerZoomLevel={120}
       worldCopyJump
       scrollWheelZoom
     >
@@ -107,12 +130,21 @@ export function RouteSnapshotMap({
 
       <FitBounds bounds={bounds} />
 
-      {routes.map((r) => (
-        <Polyline key={r.id} positions={r.path} pathOptions={{ color: r.color, weight: 3 }} />
-      ))}
-      {shipPositions.map((s) => (
-        <Marker key={s.id} position={s.pos} icon={shipIcon(s.color)} />
-      ))}
+      {renderRoutes.flatMap((r) =>
+        r.offsets.map((offset) => (
+          <Polyline
+            key={`${r.id}-${offset}`}
+            positions={r.path.map(([lat, lon]) => [lat, lon + offset] as [number, number])}
+            pathOptions={{ color: r.color, weight: 3 }}
+          />
+        )),
+      )}
+      {shipPositions.flatMap((s) => {
+        const offsets = needsWorldCopies([s.pos]) ? [-360, 0, 360] : [0];
+        return offsets.map((offset) => (
+          <Marker key={`${s.id}-${offset}`} position={offsetPoint(s.pos, offset)} icon={shipIcon(s.color)} />
+        ));
+      })}
 
       <MapLayersControl
         position="topright"

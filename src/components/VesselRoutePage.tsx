@@ -14,6 +14,7 @@ import { WeatherPointControl } from './WeatherPointControl';
 import { MapCursorPosition } from './MapCursorPosition';
 import { PORT_COORDS } from '../data/fleet';
 import type { Voyage } from '../data/voyages';
+import { needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 
 // Clamp vertical panning to just inside the poles so the grey area past the
 // tiled world is never revealed; left wide open horizontally (worldCopyJump
@@ -110,8 +111,15 @@ export function VesselRoutePage() {
     [voyage],
   );
   const linePositions = useMemo<LatLngExpression[]>(
-    () => waypoints.map((w) => w.coords as LatLngExpression),
+    () => unwrapRouteCoordinates(waypoints.map((w) => w.coords)) as LatLngExpression[],
     [waypoints],
+  );
+  // `worldCopyJump` lets the user pan into an adjacent copy of the tiled
+  // world; a route near the dateline needs rendering there too, or the line
+  // and its markers simply vanish once the user pans past 180deg.
+  const mapOffsets = useMemo(
+    () => (needsWorldCopies(linePositions as Array<[number, number]>) ? [-360, 0, 360] : [0]),
+    [linePositions],
   );
   const bounds = useMemo<LatLngBoundsExpression | null>(() => {
     if (waypoints.length === 0) return null;
@@ -125,13 +133,10 @@ export function VesselRoutePage() {
   }, [waypoints]);
   const shipPos = useMemo<[number, number] | null>(
     () =>
-      waypoints.length >= 2
-        ? pointAlong(
-            waypoints.map((w) => w.coords),
-            0.4,
-          )
-        : waypoints[0]?.coords ?? null,
-    [waypoints],
+      linePositions.length >= 2
+        ? pointAlong(linePositions as Array<[number, number]>, 0.4)
+        : (linePositions[0] as [number, number] | undefined) ?? null,
+    [linePositions],
   );
 
   if (isLoading) {
@@ -222,6 +227,9 @@ export function VesselRoutePage() {
                   : { center: [20, 0] as LatLngExpression, zoom: 3 })}
                 minZoom={2}
                 maxZoom={10}
+                zoomSnap={0.25}
+                zoomDelta={0.5}
+                wheelPxPerZoomLevel={120}
                 maxBounds={WORLD_PAN_BOUNDS}
                 maxBoundsViscosity={1.0}
                 worldCopyJump
@@ -235,43 +243,51 @@ export function VesselRoutePage() {
                   crossOrigin="anonymous"
                 />
 
-                {linePositions.length >= 2 && (
-                  <Polyline
-                    positions={linePositions}
-                    pathOptions={{ color: '#58a6ff', weight: 4, opacity: 0.9 }}
-                  />
+                {linePositions.length >= 2 &&
+                  mapOffsets.map((offset) => (
+                    <Polyline
+                      key={`line-${offset}`}
+                      positions={(linePositions as Array<[number, number]>).map(([lat, lon]) => [lat, lon + offset] as LatLngExpression)}
+                      pathOptions={{ color: '#58a6ff', weight: 4, opacity: 0.9 }}
+                    />
+                  ))}
+
+                {mapOffsets.flatMap((offset) =>
+                  waypoints.map((w, i) => (
+                    <Marker
+                      key={`${w.label}-${w.name}-${offset}`}
+                      position={offsetPoint((linePositions[i] as [number, number]) ?? w.coords, offset)}
+                      icon={waypointIcon(i, waypoints.length)}
+                      interactive={offset === 0}
+                    >
+                      {offset === 0 && (
+                        <Tooltip
+                          direction="top"
+                          offset={[0, -10]}
+                          opacity={1}
+                          className="fv-vessel-route__tooltip"
+                        >
+                          {w.label}: {w.name}
+                        </Tooltip>
+                      )}
+                    </Marker>
+                  )),
                 )}
 
-                {waypoints.map((w, i) => (
-                  <Marker
-                    key={`${w.label}-${w.name}`}
-                    position={w.coords}
-                    icon={waypointIcon(i, waypoints.length)}
-                  >
-                    <Tooltip
-                      direction="top"
-                      offset={[0, -10]}
-                      opacity={1}
-                      className="fv-vessel-route__tooltip"
-                    >
-                      {w.label}: {w.name}
-                    </Tooltip>
-                  </Marker>
-                ))}
-
-                {shipPos && (
-                  <Marker position={shipPos} icon={shipIcon()} zIndexOffset={1000}>
-                    <Tooltip
-                      direction="top"
-                      offset={[0, -14]}
-                      opacity={1}
-                      permanent
-                      className="fv-vessel-route__tooltip"
-                    >
-                      {voyage?.vessel} · {voyage?.status}
-                    </Tooltip>
-                  </Marker>
-                )}
+                {shipPos &&
+                  mapOffsets.map((offset) => (
+                    <Marker key={`ship-${offset}`} position={offsetPoint(shipPos, offset)} icon={shipIcon()} zIndexOffset={1000}>
+                      <Tooltip
+                        direction="top"
+                        offset={[0, -14]}
+                        opacity={1}
+                        permanent
+                        className="fv-vessel-route__tooltip"
+                      >
+                        {voyage?.vessel} · {voyage?.status}
+                      </Tooltip>
+                    </Marker>
+                  ))}
                 <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
                 {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
                 <WeatherFieldControl position="topright" />

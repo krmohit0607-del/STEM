@@ -21,13 +21,43 @@ import { settingsApi } from '../api/settingsApi';
 const SAVED_ROUTES_KEY = 'fv.savedRoutes';
 export const SAVED_ROUTES_SETTING = 'routes.savedRoutes';
 
+/** Some saved routes may share an `id` — an id-collision bug from `Date.now()`-
+ *  only id generation under rapid actions, now fixed at the source (every
+ *  caller uses a `Date.now()` + random/counter suffix instead — see
+ *  `RouteExplorerPage.tsx`'s `uniqueId` helper), but already-saved data from
+ *  before that fix can still have duplicates sitting in storage. Two routes
+ *  sharing an id render as two overlapping lines wherever that id is used as
+ *  a list key (e.g. the Route Simulator's weather chart, or a voyage/route
+ *  list), so re-key every repeat with a freshly-generated unique id here
+ *  instead of trusting storage — heals existing corrupted data on read. */
+function dedupeRouteIds(routes: unknown[]): { routes: unknown[]; changed: boolean } {
+  const seen = new Set<string>();
+  let changed = false;
+  const result = routes.map((r) => {
+    const id = (r as { id?: string } | null)?.id;
+    if (typeof id !== 'string' || !seen.has(id)) {
+      if (typeof id === 'string') seen.add(id);
+      return r;
+    }
+    changed = true;
+    let newId = `route-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    while (seen.has(newId)) newId = `route-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    seen.add(newId);
+    return { ...(r as object), id: newId };
+  });
+  return { routes: result, changed };
+}
+
 /** Read the raw saved-routes array (whatever shape each caller expects). */
 export function readSavedRoutesRaw(): unknown[] {
   try {
     const raw = window.localStorage.getItem(SAVED_ROUTES_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    const { routes, changed } = dedupeRouteIds(parsed);
+    if (changed) writeSavedRoutesRaw(routes);
+    return routes;
   } catch {
     return [];
   }
@@ -155,9 +185,10 @@ export function readRouteEditorRouteId(voyageId: string | undefined): string | n
   return map[LEGACY_ENTRY] ?? null;
 }
 
-export function writeRouteEditorRouteId(voyageId: string | undefined, id: string): void {
+export function writeRouteEditorRouteId(voyageId: string | undefined, id: string | null): void {
   if (!voyageId) return;
   const map = readRouteIdMap(ROUTE_EDITOR_ROUTE_KEY);
-  map[voyageId] = id;
+  if (id == null) delete map[voyageId];
+  else map[voyageId] = id;
   writeRouteIdMap(ROUTE_EDITOR_ROUTE_KEY, map);
 }

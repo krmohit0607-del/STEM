@@ -17,6 +17,7 @@ import {
   type VesselGroup,
 } from '../data/vessels';
 import { vesselsApi } from '../api/vesselsApi';
+import { LoadDiagramTable } from './voyage/LoadDiagramTable';
 import { useAuth } from '../context/AuthContext';
 import { addNotification } from '../data/workflow';
 import {
@@ -525,6 +526,7 @@ const PERFORMANCE_TABLE_KEYS = new Set<VesselFieldKey>([
   ...ENGINE_LIMIT_ROWS.flatMap(([, min, max]) => (max ? [min, max] : [min])),
   ...TELEGRAPH_ROWS.flatMap(([, rpm, ballast, laden]) => [rpm, ballast, laden]),
   ...WEATHER_LIMIT_ROWS.flatMap(([, ballast, laden]) => [ballast, laden]),
+  'loadDiagramJson',
 ]);
 
 /** A single editable numeric cell shared by the three Performance tables below. */
@@ -658,6 +660,13 @@ function VesselEditor({
                   </table>
                 </div>
               </div>
+
+              <LoadDiagramTable
+                value={value.loadDiagramJson}
+                editing
+                onChange={(json) => set('loadDiagramJson', json)}
+                telegraph={value}
+              />
             </div>
           )}
         </fieldset>

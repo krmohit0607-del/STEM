@@ -31,6 +31,7 @@
 import { AREA_CONSTRAINTS } from './areaConstraints';
 import { isLand } from './landMask';
 import { normalizeLongitude } from './antimeridian';
+import { inlZoneAt } from './internationalNavigatingLimits';
 
 /**
  * Land avoidance penalty (fuel-tonne equivalents per NM). Much larger than any
@@ -58,6 +59,10 @@ export interface RouteHazards {
   heavyWeather: boolean;
   ice: boolean;
   cyclone: boolean;
+  /** Passed within the configured minimum charted depth (see `minDepthM`) — a charted Depth Mask, Reef, Shoal, Bank or Rock. */
+  depth: boolean;
+  /** Passed through a currently-active International Navigating Limits (INL) zone. */
+  inl: boolean;
 }
 
 export interface OptimizedRoute {
@@ -112,6 +117,17 @@ export interface OptimizeOptions {
   avoidRadiusDeg?: number;
   /** Peak per-NM penalty at the centre of the steer-away band. Default 340. */
   avoidPenaltyPerNm?: number;
+  /**
+   * Minimum required charted water depth (metres), strictly greater-than.
+   * Enforced as a hard obstacle (same severity as land) against this app's
+   * charted Depth Mask zones, and Reef/Shoal/Bank/Rock-named hazards are
+   * always hard-avoided regardless of this value. Default 15.
+   */
+  minDepthM?: number;
+  /** Reference date for seasonal International Navigating Limits (INL) zones. Default: now. */
+  voyageDate?: Date;
+  /** Vessel deadweight (mt), for DWT-gated INL zones (e.g. Gulf of Finland). */
+  vesselDwt?: number;
 }
 
 const R_NM = 3440.065; // Earth radius in nautical miles.
@@ -252,6 +268,10 @@ interface PreppedConstraint {
   maxLat: number;
   minLon: number;
   maxLon: number;
+  /** Charted depth threshold (m) parsed from a "Depth Mask (Nm)" name, if any — the zone represents water charted at or shallower than this. */
+  depthThresholdM: number | null;
+  /** Reef/Shoal/Bank/Rock-named hazard — always too shallow for any vessel, hard-avoided regardless of `minDepthM`. */
+  alwaysHardHazard: boolean;
 }
 
 /** How hard each zone type is avoided (fuel-tonne equivalents per NM). */
@@ -268,6 +288,17 @@ function zonePenalty(zoneType: string): number {
     default:
       return 900; // unknown coastal/limited zones: treat as strong avoid
   }
+}
+
+/** Parses "Depth Mask (15m)" / "Depth Mask (20m) and Buoys" style names — null if the name doesn't carry a depth. */
+function parseDepthThresholdM(name: string): number | null {
+  const m = /depth\s*mask\s*\((\d+(?:\.\d+)?)\s*m\)/i.exec(name);
+  return m ? Number(m[1]) : null;
+}
+
+/** Reef/Shoal/Bank/Rock-named charted hazards — too shallow for any vessel, independent of a specific depth figure. */
+function isAlwaysHardHazardName(name: string): boolean {
+  return /\b(reef|reefs|shoal|shoals|bank|banks|rock|rocks)\b/i.test(name);
 }
 
 const PREPPED_CONSTRAINTS: PreppedConstraint[] = AREA_CONSTRAINTS.map((c) => {
@@ -292,6 +323,8 @@ const PREPPED_CONSTRAINTS: PreppedConstraint[] = AREA_CONSTRAINTS.map((c) => {
     maxLat: Math.max(...rings.map((r) => r.maxLat)),
     minLon: Math.min(...rings.map((r) => r.minLon)),
     maxLon: Math.max(...rings.map((r) => r.maxLon)),
+    depthThresholdM: parseDepthThresholdM(c.name),
+    alwaysHardHazard: isAlwaysHardHazardName(c.name),
   };
 });
 
@@ -333,6 +366,67 @@ function areaPenaltyAt(
     }
   }
   return { penalty, hardObstacle };
+}
+
+/**
+ * Mandatory depth + INL context threaded alongside `activeConstraints`
+ * everywhere land is checked — these are hard obstacles exactly like land,
+ * never traded away for a shorter route.
+ */
+export interface HazardContext {
+  minDepthM: number;
+  voyageDate: Date;
+  vesselDwt?: number;
+}
+
+export const DEFAULT_MIN_DEPTH_M = 15;
+
+function hazardContextFrom(options: OptimizeOptions): HazardContext {
+  return {
+    minDepthM: options.minDepthM ?? DEFAULT_MIN_DEPTH_M,
+    voyageDate: options.voyageDate ?? new Date(),
+    vesselDwt: options.vesselDwt,
+  };
+}
+
+/**
+ * True when the point falls in a charted Depth Mask zone at or shallower than
+ * `minDepthM` (strictly: the requirement is depth > `minDepthM`, so a mask at
+ * exactly `minDepthM` or less fails it), or a Reef/Shoal/Bank/Rock-named
+ * hazard (always too shallow for any vessel, regardless of `minDepthM`).
+ */
+function isDepthOrNamedHazard(
+  lat: number,
+  lon: number,
+  candidates: PreppedConstraint[],
+  minDepthM: number,
+): boolean {
+  for (const c of candidates) {
+    if (!c.alwaysHardHazard && c.depthThresholdM == null) continue;
+    if (c.depthThresholdM != null && c.depthThresholdM > minDepthM) continue;
+    if (lat < c.minLat || lat > c.maxLat || lon < c.minLon || lon > c.maxLon) continue;
+    for (const r of c.rings) {
+      if (lat < r.minLat || lat > r.maxLat || lon < r.minLon || lon > r.maxLon) continue;
+      if (pointInRing(lat, lon, r.ring)) return true;
+    }
+  }
+  return false;
+}
+
+/** True when the point is in a currently-active, non-conditional INL zone (hard-blocked). Conditional zones (e.g. Bering Sea) are reported, not blocked. */
+function isInlBlocked(lat: number, lon: number, ctx: HazardContext): boolean {
+  const zone = inlZoneAt(lat, lon, ctx.voyageDate, ctx.vesselDwt);
+  return !!zone && !zone.conditional;
+}
+
+/** Combined depth + INL hard-obstacle check, to pair with `isLand` wherever that's tested. */
+function isMandatoryHazard(
+  lat: number,
+  lon: number,
+  candidates: PreppedConstraint[],
+  ctx: HazardContext,
+): boolean {
+  return isDepthOrNamedHazard(lat, lon, candidates, ctx.minDepthM) || isInlBlocked(lat, lon, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,9 +501,10 @@ export function findBestOptimizedRoute(
   arrival: LatLon,
   options: OptimizeOptions = {},
 ): OptimizedRoute {
+  const hazardCtx = hazardContextFrom(options);
   // First pass with the caller's options (or defaults).
   let best = searchRoute(departure, arrival, options);
-  let bestLand = interiorLandSamples(best.path, departure, arrival);
+  let bestLand = interiorLandSamples(best.path, departure, arrival, hazardCtx);
 
   // If the track still crosses land in its interior and the caller did not pin
   // the search box, progressively widen the search area (raising the node
@@ -423,7 +518,7 @@ export function findBestOptimizedRoute(
     ];
     for (const esc of escalations) {
       const attempt = searchRoute(departure, arrival, { ...options, ...esc });
-      const land = interiorLandSamples(attempt.path, departure, arrival);
+      const land = interiorLandSamples(attempt.path, departure, arrival, hazardCtx);
       if (land < bestLand) {
         best = attempt;
         bestLand = land;
@@ -437,12 +532,14 @@ export function findBestOptimizedRoute(
 /**
  * Number of densely-sampled points along the interior of `path` (excluding the
  * coastal band near either endpoint, since ports sit on land) that fall on
- * land. 0 means the route is clear of land between its port approaches.
+ * land OR a mandatory depth/INL hazard. 0 means the route is clear between
+ * its port approaches.
  */
 export function interiorLandSamples(
   path: Array<[number, number]>,
   departure: LatLon,
   arrival: LatLon,
+  hazardCtx: HazardContext = hazardContextFrom({}),
 ): number {
   if (path.length < 2) return 0;
   const near = (lat: number, lon: number, p: LatLon) => {
@@ -460,7 +557,7 @@ export function interiorLandSamples(
       const lat = aLat + (bLat - aLat) * f;
       const lon = wrapLon(aLon + dLon * f);
       if (near(lat, lon, departure) || near(lat, lon, arrival)) continue;
-      if (isLand(lat, lon)) count += 1;
+      if (isLand(lat, lon) || isMandatoryHazard(lat, lon, PREPPED_CONSTRAINTS, hazardCtx)) count += 1;
     }
   }
   return count;
@@ -486,6 +583,7 @@ function searchRoute(
     avoidRadiusDeg = 5,
     avoidPenaltyPerNm = 340,
   } = options;
+  const hazardCtx = hazardContextFrom(options);
 
   // Densify the steer-away tracks into a bounded set of sample points (in
   // wrapped-lon space) so cells near an already-chosen route can be penalised.
@@ -527,7 +625,7 @@ function searchRoute(
   if (directNm < 30) {
     const pts = greatCircle(departure, arrival, 24);
     const path = pts.map((p) => [p.lat, wrapLon(p.lon)] as [number, number]);
-    return scoreFinalPath(path, baseFuelPerNm, weatherWeight, avoidConstraints);
+    return scoreFinalPath(path, baseFuelPerNm, weatherWeight, avoidConstraints, hazardCtx);
   }
 
   // Search box around the direct track, with margin to allow detours.
@@ -597,7 +695,7 @@ function searchRoute(
     const cycloneCost = hazardAware && env.cycloneRisk > 0.2 ? env.cycloneRisk * 1800 : 0;
     const area = avoidConstraints ? areaPenaltyAt(lat, lon, activeConstraints).penalty : 0;
     let land = 0;
-    if (isLand(lat, lon)) {
+    if (isLand(lat, lon) || isMandatoryHazard(lat, lon, activeConstraints, hazardCtx)) {
       land = LAND_PENALTY_PER_NM;
     } else if (
       isLand(lat + coastBufferDeg, lon) ||
@@ -706,7 +804,7 @@ function searchRoute(
     // Should not happen with soft costs, but fall back to the great circle.
     const pts = greatCircle(departure, arrival, 48);
     const path = pts.map((p) => [p.lat, wrapLon(p.lon)] as [number, number]);
-    return scoreFinalPath(path, baseFuelPerNm, weatherWeight, avoidConstraints);
+    return scoreFinalPath(path, baseFuelPerNm, weatherWeight, avoidConstraints, hazardCtx);
   }
 
   // Reconstruct the node path.
@@ -726,13 +824,13 @@ function searchRoute(
   // Smooth the jagged grid path into the longest great-circle arcs that stay
   // clear of land and hard zones ("string pulling"), so open water is crossed
   // on a proper great circle instead of a stair-stepped straight line.
-  const smoothed = greatCircleStringPull(coords, activeConstraints, avoidConstraints);
+  const smoothed = greatCircleStringPull(coords, activeConstraints, avoidConstraints, hazardCtx);
 
   // Final safety pass: nudge any segment that still grazes a coastline (in a
   // narrow strait or approach channel) offshore with a clear via-point.
-  const repaired = repairLandClips(smoothed, activeConstraints, avoidConstraints);
+  const repaired = repairLandClips(smoothed, activeConstraints, avoidConstraints, hazardCtx);
 
-  return scoreFinalPath(repaired, baseFuelPerNm, weatherWeight, avoidConstraints);
+  return scoreFinalPath(repaired, baseFuelPerNm, weatherWeight, avoidConstraints, hazardCtx);
 }
 
 /**
@@ -756,7 +854,7 @@ export function findRouteVia(
     weatherWeight = 40,
     avoidConstraints = true,
   } = options;
-  return scoreFinalPath(path, baseFuelPerNm, weatherWeight, avoidConstraints);
+  return scoreFinalPath(path, baseFuelPerNm, weatherWeight, avoidConstraints, hazardContextFrom(options));
 }
 
 /**
@@ -768,13 +866,14 @@ function arcIsClear(
   b: LatLon,
   activeConstraints: PreppedConstraint[],
   avoidConstraints: boolean,
+  hazardCtx: HazardContext,
 ): boolean {
   const distNm = haversineNM(a, b);
   const segs = Math.max(2, Math.ceil(distNm / 6));
   const pts = greatCircle(a, b, segs);
   for (const p of pts) {
     const lo = wrapLon(p.lon);
-    if (isLand(p.lat, lo)) return false;
+    if (isLand(p.lat, lo) || isMandatoryHazard(p.lat, lo, activeConstraints, hazardCtx)) return false;
     if (avoidConstraints && areaPenaltyAt(p.lat, lo, activeConstraints).hardObstacle) {
       return false;
     }
@@ -793,6 +892,7 @@ function greatCircleStringPull(
   coords: Array<[number, number]>,
   activeConstraints: PreppedConstraint[],
   avoidConstraints: boolean,
+  hazardCtx: HazardContext,
 ): Array<[number, number]> {
   if (coords.length <= 2) return coords;
   const out: Array<[number, number]> = [coords[0]];
@@ -803,7 +903,7 @@ function greatCircleStringPull(
     let j = Math.min(coords.length - 1, i + maxJump);
     while (j > i + 1) {
       const b: LatLon = { lat: coords[j][0], lon: coords[j][1] };
-      if (arcIsClear(a, b, activeConstraints, avoidConstraints)) break;
+      if (arcIsClear(a, b, activeConstraints, avoidConstraints, hazardCtx)) break;
       j -= 1;
     }
     const b: LatLon = { lat: coords[j][0], lon: coords[j][1] };
@@ -829,6 +929,7 @@ function findClearVia(
   b: LatLon,
   activeConstraints: PreppedConstraint[],
   avoidConstraints: boolean,
+  hazardCtx: HazardContext,
 ): LatLon | null {
   const mLat = (a.lat + b.lat) / 2;
   let dLon = b.lon - a.lon;
@@ -847,8 +948,8 @@ function findClearVia(
       };
       if (via.lat > 85 || via.lat < -85) continue;
       if (
-        arcIsClear(a, via, activeConstraints, avoidConstraints) &&
-        arcIsClear(via, b, activeConstraints, avoidConstraints)
+        arcIsClear(a, via, activeConstraints, avoidConstraints, hazardCtx) &&
+        arcIsClear(via, b, activeConstraints, avoidConstraints, hazardCtx)
       ) {
         return via;
       }
@@ -866,14 +967,15 @@ function repairLandClips(
   path: Array<[number, number]>,
   activeConstraints: PreppedConstraint[],
   avoidConstraints: boolean,
+  hazardCtx: HazardContext,
 ): Array<[number, number]> {
   if (path.length < 2) return path;
   const out: Array<[number, number]> = [path[0]];
   for (let i = 1; i < path.length; i += 1) {
     const a: LatLon = { lat: out[out.length - 1][0], lon: out[out.length - 1][1] };
     const b: LatLon = { lat: path[i][0], lon: path[i][1] };
-    if (!arcIsClear(a, b, activeConstraints, avoidConstraints)) {
-      const via = findClearVia(a, b, activeConstraints, avoidConstraints);
+    if (!arcIsClear(a, b, activeConstraints, avoidConstraints, hazardCtx)) {
+      const via = findClearVia(a, b, activeConstraints, avoidConstraints, hazardCtx);
       if (via) out.push([via.lat, wrapLon(via.lon)]);
     }
     out.push(path[i]);
@@ -887,6 +989,7 @@ function scoreFinalPath(
   baseFuelPerNm: number,
   weatherWeight: number,
   avoidConstraints: boolean,
+  hazardCtx: HazardContext,
 ): OptimizedRoute {
   let distanceNm = 0;
   let fuelTons = 0;
@@ -899,6 +1002,8 @@ function scoreFinalPath(
     heavyWeather: false,
     ice: false,
     cyclone: false,
+    depth: false,
+    inl: false,
   };
 
   const sampleAt = (lat: number, lon: number) => {
@@ -915,7 +1020,10 @@ function scoreFinalPath(
       area = hit.penalty;
       if (hit.penalty > 0) hazards.areaConstraints = true;
     }
-    if (isLand(lat, wrapLon(lon))) hazards.land = true;
+    const lo = wrapLon(lon);
+    if (isLand(lat, lo)) hazards.land = true;
+    if (isDepthOrNamedHazard(lat, lo, PREPPED_CONSTRAINTS, hazardCtx.minDepthM)) hazards.depth = true;
+    if (inlZoneAt(lat, lo, hazardCtx.voyageDate, hazardCtx.vesselDwt)) hazards.inl = true;
     const fuelPerNm = baseFuelPerNm * (1 + weatherResistance(env));
     return {
       fuelPerNm,
@@ -949,4 +1057,29 @@ function scoreFinalPath(
     weatherPenalty: weatherSamples > 0 ? weatherSum / weatherSamples : 0,
     hazards,
   };
+}
+
+/**
+ * Human-readable report of the minimum-depth requirement and any INL zones a
+ * final path passes through — for surfacing to the user alongside a
+ * generated route. Re-walks the already-computed path (cheap: a handful of
+ * vertices, not the dense A* grid), so it's meant to be called once on the
+ * chosen route, not inside the search itself.
+ */
+export function describeMandatoryHazards(
+  path: Array<[number, number]>,
+  options: OptimizeOptions = {},
+): { minDepthM: number; depthOrHazardTouched: boolean; inlZones: Array<{ label: string; area: string; conditional: boolean; note?: string }> } {
+  const ctx = hazardContextFrom(options);
+  let depthOrHazardTouched = false;
+  const seenInl = new Map<string, { label: string; area: string; conditional: boolean; note?: string }>();
+  for (const [lat, lonRaw] of path) {
+    const lon = wrapLon(lonRaw);
+    if (isDepthOrNamedHazard(lat, lon, PREPPED_CONSTRAINTS, ctx.minDepthM)) depthOrHazardTouched = true;
+    const zone = inlZoneAt(lat, lon, ctx.voyageDate, ctx.vesselDwt);
+    if (zone && !seenInl.has(zone.id)) {
+      seenInl.set(zone.id, { label: zone.label, area: zone.area, conditional: !!zone.conditional, note: zone.note });
+    }
+  }
+  return { minDepthM: ctx.minDepthM, depthOrHazardTouched, inlZones: [...seenInl.values()] };
 }

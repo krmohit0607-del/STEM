@@ -31,7 +31,7 @@ const CARGO_OPTIONS = [
   'HR Coils', 'Rebar', 'Logs', 'Woodchips', 'Manganese Ore', 'Chrome Ore', 'Nickel Ore', 'Concentrates',
 ];
 
-const FIX_TYPES = ['TCIN-TCOUT', 'TCIN-VOUT', 'TCIN-TCTOUT', 'TCTIN-TCTOUT', 'TCTIN-TCOUT', 'TCTIN-VOUT', 'VIN-VOUT', 'VIN-TCTOUT', 'OWN-TCOUT', 'OWN-VOUT', 'OWN-TCTOUT'];
+const FIX_TYPES = ['TCIN-TCOUT', 'TCIN-VOUT', 'TCIN-TCTOUT', 'TCTIN-TCTOUT', 'TCTIN-VOUT', 'VIN-VOUT', 'OWN-TCOUT', 'OWN-VOUT', 'OWN-TCTOUT'];
 
 const seedCargo: CargoBook[] = [
   { id: 'CG-2608-001', commodity: 'Iron Ore', cargoType: 'Bulk', quantity: '170,000', tolerance: '±10%', loadPort: 'Port Hedland', dischargePort: 'Qingdao', loadRate: '90,000', dischargeRate: '70,000', frtRate: '', frtUnit: 'USD/MT', terms: 'FIOST', laycanStart: '2026-08-28', laycanEnd: '2026-09-03', voyageType: 'Voyage Charter', openDate: '2026-08-18', nominationDeadline: '2026-08-24', cargoStatus: 'Open', commercialStatus: 'Reviewing', pic: 'Amit', estimationStatus: 'Not Created', account: 'Cargill', remarks: '' },

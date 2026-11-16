@@ -127,6 +127,8 @@ export interface Vessel {
   wslMaxWindsLaden: string;
   wslMaxSeaStateBallast: string;
   wslMaxSeaStateLaden: string;
+  /** JSON array of {rpm, minPowerKw, maxPowerKw, maxTorqueKnm} rows (engine load diagram). */
+  loadDiagramJson: string;
 
   /** Newest-first log of field changes. */
   history: VesselChange[];
@@ -264,6 +266,7 @@ export const VESSEL_FIELDS: VesselFieldDef[] = [
   { key: 'wslMaxWindsLaden', label: 'Max Winds, Laden (BF)', group: 'Performance', type: 'number' },
   { key: 'wslMaxSeaStateBallast', label: 'Max Sea State, Ballast (DSS)', group: 'Performance', type: 'number' },
   { key: 'wslMaxSeaStateLaden', label: 'Max Sea State, Laden (DSS)', group: 'Performance', type: 'number' },
+  { key: 'loadDiagramJson', label: 'Engine Load Diagram', group: 'Performance' },
 ];
 
 /** A blank vessel with every field set to an empty string. */
@@ -390,6 +393,7 @@ function mapBackendToVessel(dto: BackendVesselDto): Vessel {
   v.wslMaxWindsLaden = dto.wslMaxWindsLaden ?? '';
   v.wslMaxSeaStateBallast = dto.wslMaxSeaStateBallast ?? '';
   v.wslMaxSeaStateLaden = dto.wslMaxSeaStateLaden ?? '';
+  v.loadDiagramJson = dto.loadDiagramJson ?? '';
   v.history = (dto.history ?? []).map((h) => ({
     at: h.changedAt,
     by: h.changedBy,
@@ -457,6 +461,15 @@ export function getVessels(): Vessel[] {
  */
 export function useVessels(): Vessel[] {
   return useSyncExternalStore(subscribeVessels, getVessels, getVessels);
+}
+
+/** The voyage's own IMO, else the IMO of the vessel in the vessel master with the same name. */
+export function imoForVoyage(voyage: { imo?: string; vessel?: string } | null | undefined, vessels: Vessel[]): string {
+  const own = voyage?.imo?.trim();
+  if (own) return own;
+  const name = voyage?.vessel?.trim().toLowerCase();
+  if (!name) return '';
+  return vessels.find((v) => v.name.trim().toLowerCase() === name)?.imo?.trim() ?? '';
 }
 
 export function saveVessels(vessels: Vessel[]): void {
@@ -573,6 +586,7 @@ export interface VesselProfileFields {
   wslMaxWindsLaden: string;
   wslMaxSeaStateBallast: string;
   wslMaxSeaStateLaden: string;
+  loadDiagramJson: string;
 }
 
 function boolStr(b: boolean): string {
@@ -648,6 +662,7 @@ export function vesselProfileFromVessel(v: Vessel): VesselProfileFields {
     wslMaxWindsLaden: v.wslMaxWindsLaden,
     wslMaxSeaStateBallast: v.wslMaxSeaStateBallast,
     wslMaxSeaStateLaden: v.wslMaxSeaStateLaden,
+    loadDiagramJson: v.loadDiagramJson,
   };
 }
 
@@ -715,6 +730,7 @@ export function syncVesselProfileFromVoyage(name: string, imo: string, profile: 
     wslMaxWindsLaden: profile.wslMaxWindsLaden,
     wslMaxSeaStateBallast: profile.wslMaxSeaStateBallast,
     wslMaxSeaStateLaden: profile.wslMaxSeaStateLaden,
+    loadDiagramJson: profile.loadDiagramJson,
   };
 
   const vessels = loadVessels();

@@ -3,7 +3,7 @@ import { Polygon, Tooltip } from 'react-leaflet';
 import type { PathOptions } from 'leaflet';
 
 import { AREA_CONSTRAINTS, type AreaConstraint } from '../data/areaConstraints';
-import { crossesAntimeridian, splitRingAtAntimeridian, wrappedMapCopies } from '../data/antimeridian';
+import { crossesAntimeridian, needsWorldCopies, splitRingAtAntimeridian, wrappedMapCopies } from '../data/antimeridian';
 
 export { splitRingAtAntimeridian, unwrapLongitudes as normalizeRingLonLat } from '../data/antimeridian';
 
@@ -133,7 +133,11 @@ export function AreaConstraintsLayer({
           <Fragment key={c.id}>
             {c.rings.map((ring, ri) => {
               const subRings = splitRingAtAntimeridian(ring);
-              const renderRings = crossesAntimeridian(ring, true)
+              // Not just rings that cross the dateline — any ring close
+              // enough to it needs extra world-copy renders too, otherwise it
+              // simply disappears once the user pans one world copy away
+              // (Leaflet only auto-repeats `<TileLayer>`s, never `<Polygon>`s).
+              const renderRings = subRings.some((positions) => crossesAntimeridian(ring, true) || needsWorldCopies(positions))
                 ? subRings.flatMap((positions) => wrappedMapCopies(positions))
                 : subRings;
               return renderRings.map((positions, renderIndex) => (

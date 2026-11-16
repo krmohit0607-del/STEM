@@ -205,6 +205,8 @@ export interface VoyageView {
   wslMaxWindsLaden: string;
   wslMaxSeaStateBallast: string;
   wslMaxSeaStateLaden: string;
+  /** Engine load diagram rows as JSON: [{rpm, minPowerKw, maxPowerKw, maxTorqueKnm}]. */
+  loadDiagramJson: string;
 
   // 4. Optimization
   optMode: string;

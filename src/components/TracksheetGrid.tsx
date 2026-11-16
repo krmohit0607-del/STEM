@@ -30,9 +30,12 @@ import { fetchPointWeatherAt } from '../data/openMeteo';
 import { setVesselPosition } from '../data/vesselPosition';
 import { setRouteReportMarkers } from '../data/routeReportMarkers';
 import { useActiveSimRoute } from '../data/routeSimulatorStore';
+import { readActiveRouteId, readSavedRoutesForVoyage } from '../data/savedRoutesStore';
 import { loadVoyageShared, mergeVoyageShared, subscribeVoyageShared } from '../data/voyageOverrides';
 import { queueCommsDraft } from '../data/commsStore';
 import { performanceApi, type TracksheetRowApiDto } from '../api/performanceApi';
+import { optimizationApi } from '../api/optimizationApi';
+import { addNotification } from '../data/workflow';
 import {
   beaufort,
   currentFactor,
@@ -104,6 +107,18 @@ export interface TrackRow {
   currF: number;
   /** Avg factor string `W / F / C`. */
   avgF: string;
+  /** Planned-departure placeholder (first waypoint at the ETD); becomes a normal report as soon as real data is entered. */
+  isDefault?: boolean;
+  /** True once this report row has been expanded/validated (its weather
+   *  factors sampled and its three 6-hourly breakup rows inserted ahead of
+   *  it) — cleared automatically if the active route's geometry changes
+   *  afterward (see `validatedRouteHash`), since the interpolation was
+   *  computed against the route as it stood at that moment. */
+  isValidated?: boolean;
+  /** Compact snapshot of the active route's path at the moment this row was
+   *  last validated — compared against the route's *current* path so a
+   *  later waypoint move/insert/delete invalidates this row automatically. */
+  validatedRouteHash?: string;
 }
 
 export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
@@ -253,8 +268,8 @@ export const STUB_ROWS: Omit<TrackRow, 'id' | 'nextPort'>[] = [
   },
 ];
 
-function n(value: number | null, digits = 2): string {
-  if (value === null) return '';
+function n(value: number | null | undefined, digits = 2): string {
+  if (value == null) return '';
   return value.toLocaleString(undefined, {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
@@ -263,12 +278,12 @@ function n(value: number | null, digits = 2): string {
 
 /** Keys of `TrackRow` whose value is a number (or null). */
 type NumField = {
-  [K in keyof TrackRow]: TrackRow[K] extends number | null ? K : never;
+  [K in keyof TrackRow]-?: TrackRow[K] extends number | null ? K : never;
 }[keyof TrackRow];
 
 /** Keys of `TrackRow` whose value is a string. */
 type StrField = {
-  [K in keyof TrackRow]: TrackRow[K] extends string ? K : never;
+  [K in keyof TrackRow]-?: TrackRow[K] extends string ? K : never;
 }[keyof TrackRow];
 
 /** Report-type (RT) codes shown in the RT column dropdown. */
@@ -412,6 +427,23 @@ export function computeSpeed(
 }
 
 /**
+ * After a tracksheet save, compare the latest report with the voyage's most
+ * recent optimization run. A suggestion is only recorded and announced — the
+ * route is never replaced; the operator decides whether to re-run Optimize.
+ * Voyages without a run (404) or offline checks are ignored.
+ */
+function checkOptimizationDrift(voyageId: string): void {
+  void optimizationApi
+    .checkVoyage(voyageId)
+    .then((result) => {
+      if (result.reoptimizeRecommended && result.recommendationAction === 'created') {
+        addNotification(`Re-optimization suggested: ${result.reasons.join(' ')}`, 'Optimization');
+      }
+    })
+    .catch(() => undefined);
+}
+
+/**
  * Parse a tracksheet coordinate such as `0545N` (05°45'N) or `15347E`
  * (153°47'E) to a signed decimal degree. The last two digits are minutes.
  */
@@ -441,6 +473,59 @@ function toCoord(dec: number, isLat: boolean): string {
   const degStr = String(deg).padStart(isLat ? 2 : 3, '0');
   const minStr = String(min).padStart(2, '0');
   return `${degStr}${minStr}${hemi}`;
+}
+
+/**
+ * Compact, order-sensitive content hash of a route path — used to detect
+ * whether the active route's geometry has changed since a report row was
+ * last validated (see `TrackRow.validatedRouteHash`). Not cryptographic;
+ * just needs to reliably differ whenever any point moves/is inserted/
+ * removed, and stay stable otherwise (re-renders that rebuild an
+ * equivalent array shouldn't spuriously invalidate already-validated rows).
+ */
+function hashRoutePath(path: Array<[number, number]> | undefined): string {
+  if (!path || path.length === 0) return '';
+  let h = 0;
+  for (const [lat, lon] of path) {
+    // Round to ~1m precision so float noise from re-densifying the same
+    // route doesn't register as a "change".
+    const latI = Math.round(lat * 1e5);
+    const lonI = Math.round(lon * 1e5);
+    h = (h * 31 + latI) | 0;
+    h = (h * 31 + lonI) | 0;
+  }
+  return `${path.length}:${h}`;
+}
+
+/**
+ * The current route geometry to compare validated reports against: the
+ * live, unsaved edit from `useActiveSimRoute()` while one is actually in
+ * progress (that store goes `null` again the moment the editor is merely
+ * *viewing* the voyage's already-active route, not editing it — see
+ * RouteExplorerPage.tsx's publish effect), otherwise the voyage's active
+ * *saved* route's own waypoints read directly from storage. Hashed from the
+ * raw lat/lon strings (not converted to decimal) — simpler, and sufficient
+ * since this only needs to detect "did anything change", not by how much.
+ */
+function currentRouteGeometryHash(
+  voyageId: string | undefined,
+  liveActivePath: Array<[number, number]> | undefined,
+): string {
+  if (liveActivePath && liveActivePath.length > 0) return `live:${hashRoutePath(liveActivePath)}`;
+  if (!voyageId) return '';
+  try {
+    const activeId = readActiveRouteId(voyageId)?.replace(/^saved-/, '') ?? null;
+    if (!activeId) return '';
+    const routes = readSavedRoutesForVoyage(voyageId) as Array<{
+      id: string;
+      waypoints?: Array<{ lat: string; lon: string }>;
+    }>;
+    const route = routes.find((r) => r.id === activeId);
+    if (!route?.waypoints?.length) return '';
+    return `saved:${route.waypoints.map((w) => `${w.lat}|${w.lon}`).join(';')}`;
+  } catch {
+    return '';
+  }
 }
 
 const COMPASS16 = [
@@ -692,6 +777,30 @@ export function TracksheetGrid() {
   const [validating, setValidating] = useState(false);
   const [forecasting, setForecasting] = useState(false);
   const [forecastData, setForecastData] = useState<{ lat: number; lng: number; label: string; windSpd: string; wavHt: string; time: string }[] | null>(null);
+  /** The grid's content as of the last successful load/save — compared
+   *  against the live `rows` to decide whether Save has anything to do.
+   *  Previously Save was only enabled while a row's checkbox happened to be
+   *  checked, regardless of whether anything had actually changed — a
+   *  direct cell edit without first checking a box left Save stuck
+   *  disabled. `null` until the very first load/save completes, so Save
+   *  stays correctly disabled before there's a baseline to compare against. */
+  const lastSavedRowsJsonRef = useRef<string | null>(null);
+  const [isGridDirty, setIsGridDirty] = useState(false);
+  /** True while the initial load (plus whatever `syncEtdRef` itself also
+   *  commits right after) is still settling — any `rows` update that lands
+   *  while this is true becomes (part of) the new "clean" baseline instead
+   *  of being mistaken for a user edit; see the load effect below. */
+  const isSettlingRef = useRef(true);
+  useEffect(() => {
+    if (isSettlingRef.current) {
+      lastSavedRowsJsonRef.current = JSON.stringify(rows);
+      setIsGridDirty(false);
+      return;
+    }
+    setIsGridDirty(
+      lastSavedRowsJsonRef.current != null && JSON.stringify(rows) !== lastSavedRowsJsonRef.current,
+    );
+  }, [rows]);
 
   // Good/bad weather day classification per row — reuses the exact ported
   // GWDM test (`classifyGoodWeatherRows`) the Interim Dashboard's "Good
@@ -726,12 +835,21 @@ export function TracksheetGrid() {
       const idx = prev.findIndex((row) => row.rt === 'D');
       if (idx < 0) {
         // No Departure/COSP report yet (and nothing else entered either) —
-        // seed a real first report from the shared voyage ETD instead of
-        // leaving the Tracksheet blank or showing unrelated dummy dates.
-        if (!shared || prev.length > 0) return prev;
-        const { date, time } = isoToRowDateTime(shared);
+        // seed a default departure report: the shared ETD (else the route's ETD,
+        // else now) at the route's first waypoint, so the voyage always has a
+        // starting position (e.g. for optimization) until the vessel's actual
+        // departure data replaces it.
+        if (prev.length > 0) return prev;
+        const startIso = shared ?? activeRoute?.etdIso ?? new Date().toISOString();
+        const { date, time } = isoToRowDateTime(startIso);
         if (!date || !time) return prev;
-        return [blankTrackRow('D', date, time)];
+        const first = activeRoute?.path?.[0];
+        return [{
+          ...blankTrackRow('D', date, time),
+          isDefault: true,
+          lat: first ? toCoord(first[0], true) : '',
+          lng: first ? toCoord(first[1], false) : '',
+        }];
       }
       const rowIso = rowDateTimeToIso(prev[idx].date, prev[idx].time);
       if (shared) {
@@ -752,15 +870,31 @@ export function TracksheetGrid() {
     const voyageId = selectedVoyage?.id;
     if (!voyageId) return;
     let cancelled = false;
+    isSettlingRef.current = true; // a fresh load/voyage switch — not a user edit
     void (async () => {
       try {
         const saved = await performanceApi.getTracksheet(voyageId);
-        if (!cancelled && saved.length > 0) setRows(saved);
+        // A Departure row saved earlier with no position and no fuel data is the same placeholder.
+        if (!cancelled && saved.length > 0) {
+          setRows(saved.map((row) => (
+            !row.isDefault && row.rt === 'D' && !row.lat.trim() && !row.lng.trim() &&
+            row.vlsfoRob == null && row.lsmgoRob == null && row.noneRob == null
+              ? { ...row, isDefault: true }
+              : row
+          )));
+        }
       } catch {
         /* backend may be offline — syncEtdRef below still seeds a Departure
            report locally so the grid isn't just blank. */
       } finally {
         if (!cancelled) syncEtdRef.current();
+        // `syncEtdRef` above may itself commit one more `setRows` — give
+        // that (and the one just above) a tick to fully settle before
+        // locking in whatever `rows` ends up as as the new "clean"
+        // baseline Save compares against.
+        setTimeout(() => {
+          if (!cancelled) isSettlingRef.current = false;
+        }, 0);
       }
     })();
     return () => {
@@ -772,6 +906,34 @@ export function TracksheetGrid() {
     syncEtdRef.current();
     return subscribeVoyageShared(selectedVoyage?.id, () => syncEtdRef.current());
   }, [selectedVoyage?.id]);
+
+  // The default departure row sits at the route's first waypoint (and follows
+  // it if the route changes) until real data is entered; a real departure
+  // report added later replaces it.
+  const firstWaypoint = activeRoute?.path?.[0];
+  const firstLat = firstWaypoint ? firstWaypoint[0] : null;
+  const firstLon = firstWaypoint ? firstWaypoint[1] : null;
+  useEffect(() => {
+    setRows((prev) => {
+      const hasActualDeparture = prev.some((row) => !row.isDefault && row.rt === 'D');
+      let changed = false;
+      let next = prev;
+      if (hasActualDeparture && prev.some((row) => row.isDefault)) {
+        next = prev.filter((row) => !row.isDefault);
+        changed = true;
+      }
+      if (firstLat != null && firstLon != null) {
+        const lat = toCoord(firstLat, true);
+        const lng = toCoord(firstLon, false);
+        next = next.map((row) => {
+          if (!row.isDefault || (row.lat === lat && row.lng === lng)) return row;
+          changed = true;
+          return { ...row, lat, lng };
+        });
+      }
+      return changed ? next : prev;
+    });
+  }, [firstLat, firstLon, rows]);
 
   const allChecked = rows.length > 0 && checkedIds.length === rows.length;
   const someChecked = checkedIds.length > 0;
@@ -885,14 +1047,18 @@ export function TracksheetGrid() {
 
   const saveSelected = async () => {
     // Persists the whole grid (the Performance module's tracksheet is a
-    // single ordered document per voyage) to its own backend/database;
-    // selection just gates the button per the existing UX convention.
+    // single ordered document per voyage) to its own backend/database — not
+    // just the checked rows; selection only gates *Delete* (which genuinely
+    // needs to know which rows), Save works on any pending change at all.
     const voyageId = selectedVoyage?.id;
     if (!voyageId) return;
     setSaveError(null);
     try {
       const payload: TracksheetRowApiDto[] = rows.map(({ id, nextPort, ...rest }) => ({ id, nextPort, ...rest }));
       await performanceApi.saveTracksheet(voyageId, selectedVoyage?.imo ?? '', payload);
+      checkOptimizationDrift(voyageId);
+      lastSavedRowsJsonRef.current = JSON.stringify(rows);
+      setIsGridDirty(false);
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 1500);
     } catch {
@@ -969,6 +1135,7 @@ export function TracksheetGrid() {
       const targetIds = new Set(
         someChecked ? checkedIds : src.filter((r) => r.rt === 'N').map((r) => r.id),
       );
+      const routeHashNow = currentRouteGeometryHash(selectedVoyage?.id, activeRoute?.path);
       const out: TrackRow[] = [];
       for (let i = 0; i < src.length; i++) {
         const cur = src[i];
@@ -1054,7 +1221,13 @@ export function TracksheetGrid() {
           const avgWind = weightedHours > 0 ? round2(weightedWind / weightedHours) : wxEnd.windF;
           const avgWave = weightedHours > 0 ? round2(weightedWave / weightedHours) : wxEnd.waveF;
           const avgCurr = weightedHours > 0 ? round2(weightedCurr / weightedHours) : wxEnd.currF;
-          out.push({ ...cur, ...wxEnd, avgF: `${avgWind} / ${avgWave} / ${avgCurr}` });
+          out.push({
+            ...cur,
+            ...wxEnd,
+            avgF: `${avgWind} / ${avgWave} / ${avgCurr}`,
+            isValidated: true,
+            validatedRouteHash: routeHashNow,
+          });
         } else {
           out.push(cur);
         }
@@ -1071,6 +1244,9 @@ export function TracksheetGrid() {
         try {
           const payload: TracksheetRowApiDto[] = out.map(({ id, nextPort, ...rest }) => ({ id, nextPort, ...rest }));
           await performanceApi.saveTracksheet(voyageId, selectedVoyage?.imo ?? '', payload);
+          checkOptimizationDrift(voyageId);
+          lastSavedRowsJsonRef.current = JSON.stringify(out);
+          setIsGridDirty(false);
           setSavedFlash(true);
           window.setTimeout(() => setSavedFlash(false), 1500);
         } catch {
@@ -1143,28 +1319,100 @@ export function TracksheetGrid() {
     });
   }, [activeRoute?.id, activeRoute?.path, rows]);
 
+  /**
+   * Invalidate already-validated report rows once the active route's
+   * geometry changes (waypoints moved/inserted/deleted/re-threaded) since
+   * they were validated — the weather sampling and 6-hourly breakup rows
+   * were computed against the route as it stood at that moment, and a
+   * since-changed path makes them stale. Clears `isValidated` on the
+   * report row and removes its three associated breakup rows, so the
+   * Tracksheet accurately reflects that this report needs re-validating.
+   *
+   * Deliberately *not* memoized on a narrow dependency: unlike the live
+   * edit path (`activeRoute?.path`), the voyage's saved active route (what
+   * `currentRouteGeometryHash` falls back to whenever no live edit is in
+   * progress) lives in plain `localStorage` with no change subscription, so
+   * this is recomputed on every render instead — cheap enough for a route's
+   * waypoint count, and the effect below only actually *acts* when the
+   * resulting hash string differs from last time.
+   */
+  const routeHash = currentRouteGeometryHash(selectedVoyage?.id, activeRoute?.path);
+  useEffect(() => {
+    if (!routeHash) return;
+    setRows((prev) => {
+      const staleIds = new Set(
+        prev
+          .filter((r) => r.isValidated && r.validatedRouteHash && r.validatedRouteHash !== routeHash)
+          .map((r) => r.id),
+      );
+      if (staleIds.size === 0) return prev;
+      return prev
+        .filter((row) => {
+          // Drop this row's own interpolated 6-hourly breakup rows
+          // (`${reportId}-h6`/`-h12`/`-h18`), now stale alongside it.
+          const ownerId = row.id.match(/^(.+)-h(?:6|12|18)$/)?.[1];
+          return !ownerId || !staleIds.has(ownerId);
+        })
+        .map((row) =>
+          staleIds.has(row.id) ? { ...row, isValidated: false, validatedRouteHash: undefined } : row,
+        );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeHash]);
+
   // Publish tracksheet reports (D/A/N/SC/FC/...) plus validated in-between
   // 6-hour breakup points so the active route map can render them.
   useEffect(() => {
+    // Parsed positions for every row up front, so a row's heading fallback
+    // (when `course` wasn't manually entered) can look at its neighbours'
+    // positions without re-parsing them per row.
+    const positions = rows.map((row) => {
+      const lat = parseCoord(row.lat);
+      const lon = parseCoord(row.lng);
+      return lat != null && lon != null ? ([lat, lon] as [number, number]) : null;
+    });
     const markers = rows
       .map((row, i) => {
-        const lat = parseCoord(row.lat);
-        const lon = parseCoord(row.lng);
-        if (lat == null || lon == null) return null;
+        const pos = positions[i];
+        if (!pos) return null;
         const code = (row.rt || '6H').trim().toUpperCase();
         const isInterpolated = row.rt.trim() === '';
         const epoch = rowEpoch(row.date, row.time);
         const iso = epoch != null ? new Date(epoch).toISOString() : undefined;
+        // Heading for the marker's icon rotation: the manually-entered
+        // course-made-good when present, otherwise the bearing from the
+        // nearest neighbouring report with a known position (previous, or
+        // next if this is the first row) — so the icon always points along
+        // the actual track instead of defaulting to north.
+        let heading = Number.isFinite(row.course) ? (row.course as number) : undefined;
+        if (heading == null) {
+          for (let j = i - 1; j >= 0; j -= 1) {
+            if (positions[j]) {
+              heading = bearingDeg(positions[j]![0], positions[j]![1], pos[0], pos[1]);
+              break;
+            }
+          }
+        }
+        if (heading == null) {
+          for (let j = i + 1; j < positions.length; j += 1) {
+            if (positions[j]) {
+              heading = bearingDeg(pos[0], pos[1], positions[j]![0], positions[j]![1]);
+              break;
+            }
+          }
+        }
         return {
           id: row.id || `track-${i}`,
-          pos: [lat, lon] as [number, number],
+          pos,
           reportCode: code,
-          reportType: isInterpolated ? 'Validated 6-hour position' : RT_LABELS[code] ?? code,
+          reportType: row.isDefault ? 'Planned departure (default position)' : isInterpolated ? 'Validated 6-hour position' : RT_LABELS[code] ?? code,
           dateTimeIso: iso,
           dateTimeText: `${row.date} ${row.time} UTC`,
           speedKts: row.avgSpeedO,
           distanceNm: row.distO ?? row.distR,
+          course: heading,
           isInterpolated,
+          isDefault: !!row.isDefault,
           color: isInterpolated ? '#b8c4d6' : RT_COLORS[code] ?? '#58a6ff',
         };
       })
@@ -1237,13 +1485,16 @@ export function TracksheetGrid() {
     const parsed = trimmed === '' ? null : Number(trimmed);
     if (parsed !== null && Number.isNaN(parsed)) return;
     setRows((prev) =>
-      prev.map((row, i) => (i === rowIndex ? { ...row, [field]: parsed } : row)),
+      prev.map((row, i) => (i === rowIndex ? { ...row, [field]: parsed, isDefault: false } : row)),
     );
   };
 
   const updateStr = (rowIndex: number, field: StrField, raw: string) => {
     setRows((prev) => {
-      const next = prev.map((row, i) => (i === rowIndex ? { ...row, [field]: raw } : row));
+      // Date/time edits keep a default departure row a placeholder (it mirrors the ETD); anything else is real data.
+      const next = prev.map((row, i) => (i === rowIndex
+        ? { ...row, [field]: raw, ...(field === 'date' || field === 'time' ? {} : { isDefault: false }) }
+        : row));
       // The Departure/COSP ("D") report's date+time is the voyage's single
       // shared ETD — also connected to Waypoint details' first waypoint and
       // CP & Leg Details' LEG-1 ETD (see data/voyageOverrides.ts `etdIso`).
@@ -1407,7 +1658,8 @@ export function TracksheetGrid() {
             type="button"
             className="fv-tracksheet__action fv-tracksheet__action--primary"
             onClick={saveSelected}
-            disabled={!someChecked}
+            disabled={!someChecked && !isGridDirty}
+            title={isGridDirty || someChecked ? 'Save the tracksheet' : 'No unsaved changes'}
           >
             <i className={`fas ${savedFlash ? 'fa-check' : 'fa-floppy-disk'}`} aria-hidden="true" />{' '}
             {savedFlash ? 'Saved' : `Save${someChecked ? ` (${checkedIds.length})` : ''}`}
@@ -1487,11 +1739,23 @@ export function TracksheetGrid() {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const titleBits = [
+              goodWeatherByIndex[i] ? 'Good weather day (per CP Good Weather Method)' : null,
+              r.isValidated
+                ? 'Validated — weather sampled against the route as it stood at validation time.'
+                : r.rt.trim() && r.rt !== 'D' && r.validatedRouteHash
+                  ? 'Route changed since this report was validated — validate again to refresh its weather factors.'
+                  : null,
+            ].filter(Boolean);
+            return (
             <tr
               key={r.id}
-              className={goodWeatherByIndex[i] ? 'fv-tracksheet__row--good-weather' : undefined}
-              title={goodWeatherByIndex[i] ? 'Good weather day (per CP Good Weather Method)' : undefined}
+              className={[
+                goodWeatherByIndex[i] ? 'fv-tracksheet__row--good-weather' : '',
+                r.isValidated ? 'fv-tracksheet__row--validated' : '',
+              ].filter(Boolean).join(' ') || undefined}
+              title={titleBits.length > 0 ? titleBits.join(' ') : undefined}
             >
               <td className="fv-tracksheet__check-cell">
                 <input
@@ -1576,7 +1840,8 @@ export function TracksheetGrid() {
                 {r.avgF}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
       </div>

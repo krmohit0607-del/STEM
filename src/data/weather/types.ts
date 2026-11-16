@@ -41,8 +41,8 @@ export const MAX_FORECAST_HOURS = 240;
 /** How many hours into the past the historical date-range viewer can reach
  *  (negative hour = that many hours before now) — one year, so users can
  *  jump to a month- or year-old date via the timeline's date picker. Served
- *  by `backendGridProvider` (the persistent tile cache), not the
- *  live/forecast `openMeteoProvider`. Actual data availability for very old
- *  dates depends on what Open-Meteo's history window still serves and/or
+ *  by `backendGridProvider`'s persistent tile cache, same as every other
+ *  hour (see `liveGrid.ts`). Actual data availability for very old dates
+ *  depends on what the upstream historical archive still serves and/or
  *  what's already been cached in the database. */
 export const MIN_FORECAST_HOURS = -8784;

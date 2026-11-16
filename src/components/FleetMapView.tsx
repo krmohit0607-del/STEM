@@ -3,7 +3,7 @@ import { MapContainer, Marker, Polyline, TileLayer, Tooltip } from 'react-leafle
 import L, { type LatLngBoundsExpression } from 'leaflet';
 
 import { PORT_COORDS } from '../data/fleet';
-import { unwrapRouteCoordinates } from '../data/antimeridian';
+import { needsWorldCopies, offsetPoint, unwrapRouteCoordinates } from '../data/antimeridian';
 import { writeSelectedVoyageId } from '../data/selectedVoyage';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
@@ -140,9 +140,12 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
       }
 
       // Fixed point along the leg, varied per vessel so markers don't
-      // overlap. Replace with the real reported position when available.
+      // overlap. Unwrapped first so a route crossing the dateline (e.g.
+      // 175deg to -170deg) interpolates the short way across it instead of
+      // the long way around the rest of the globe.
       const t = 0.25 + seedFraction(v.id) * 0.5;
-      return { ...v, pos: lerp(from, to, t), from, to, inPort: false };
+      const [uFrom, uTo] = unwrapRouteCoordinates([from, to]) as [[number, number], [number, number]];
+      return { ...v, pos: lerp(uFrom, uTo, t), from, to, inPort: false };
     });
   }, [vessels]);
 
@@ -152,6 +155,9 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
         center={[20, 30]}
         zoom={2}
         minZoom={2}
+        zoomSnap={0.25}
+        zoomDelta={0.5}
+        wheelPxPerZoomLevel={120}
         maxBounds={WORLD_PAN_BOUNDS}
         maxBoundsViscosity={1.0}
         worldCopyJump
@@ -168,63 +174,72 @@ export function FleetMapView({ vessels, theme = 'dark' }: FleetMapViewProps) {
         />
 
         {placed.map((v) =>
-          hoveredId === v.id && v.from && v.to ? (
-            <Polyline
-              key={`passage-${v.id}`}
-              positions={unwrapRouteCoordinates([v.from, v.to])}
-              pathOptions={{
-                color: priorityColor(v.priority),
-                weight: 2,
-                opacity: 0.9,
-                dashArray: '6 6',
-              }}
-            />
-          ) : null,
+          hoveredId === v.id && v.from && v.to
+            ? (() => {
+                const line = unwrapRouteCoordinates([v.from, v.to]);
+                const offsets = needsWorldCopies(line) ? [-360, 0, 360] : [0];
+                return offsets.map((offset) => (
+                  <Polyline
+                    key={`passage-${v.id}-${offset}`}
+                    positions={line.map(([lat, lon]) => [lat, lon + offset] as [number, number])}
+                    pathOptions={{
+                      color: priorityColor(v.priority),
+                      weight: 2,
+                      opacity: 0.9,
+                      dashArray: '6 6',
+                    }}
+                  />
+                ));
+              })()
+            : null,
         )}
 
-        {placed.map((v) => (
-          <Marker
-            key={v.id}
-            position={v.pos}
-            icon={vesselIcon(
-              priorityColor(v.priority),
-              v.inPort,
-              vesselHeading(v.from, v.to),
-            )}
-            eventHandlers={{
-              mouseover: () => {
-                setHoveredId(v.id);
-              },
-              mouseout: () => setHoveredId((cur) => (cur === v.id ? null : cur)),
-              click: () => {
-                writeSelectedVoyageId(v.id);
-                window.open(
-                  `/route-explorer?voyage=${encodeURIComponent(v.id)}`,
-                  '_blank',
-                  'noopener,noreferrer',
-                );
-              },
-            }}
-          >
-            <Tooltip className="fv-fleet-map__tooltip" direction="top" offset={[0, -14]}>
-              <strong>{v.vessel}</strong>
-              <br />
-              {v.client} · {v.service}
-              <br />
-              {v.portFrom} → {v.portTo}
-              <br />
-              {v.inPort ? 'In port' : v.status}
-              <br />
-              ETA {v.eta}
-              {v.aiAlert && v.aiAlert !== 'None' ? (
-                <>
-                  <br />
-                  <span className="fv-fleet-map__alert">⚠ {v.aiAlert}</span>
-                </>
-              ) : null}
-            </Tooltip>
-          </Marker>
-        ))}
+        {placed.flatMap((v) => {
+          const offsets = needsWorldCopies([v.pos]) ? [-360, 0, 360] : [0];
+          return offsets.map((offset) => (
+            <Marker
+              key={`${v.id}-${offset}`}
+              position={offsetPoint(v.pos, offset)}
+              icon={vesselIcon(
+                priorityColor(v.priority),
+                v.inPort,
+                vesselHeading(v.from, v.to),
+              )}
+              eventHandlers={{
+                mouseover: () => {
+                  setHoveredId(v.id);
+                },
+                mouseout: () => setHoveredId((cur) => (cur === v.id ? null : cur)),
+                click: () => {
+                  writeSelectedVoyageId(v.id);
+                  window.open(
+                    `/route-explorer?voyage=${encodeURIComponent(v.id)}`,
+                    '_blank',
+                    'noopener,noreferrer',
+                  );
+                },
+              }}
+            >
+              <Tooltip className="fv-fleet-map__tooltip" direction="top" offset={[0, -14]}>
+                <strong>{v.vessel}</strong>
+                <br />
+                {v.client} · {v.service}
+                <br />
+                {v.portFrom} → {v.portTo}
+                <br />
+                {v.inPort ? 'In port' : v.status}
+                <br />
+                ETA {v.eta}
+                {v.aiAlert && v.aiAlert !== 'None' ? (
+                  <>
+                    <br />
+                    <span className="fv-fleet-map__alert">⚠ {v.aiAlert}</span>
+                  </>
+                ) : null}
+              </Tooltip>
+            </Marker>
+          ));
+        })}
         <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
         {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}
         <WeatherFieldControl position="topright" />

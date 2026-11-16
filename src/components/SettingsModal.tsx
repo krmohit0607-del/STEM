@@ -59,6 +59,7 @@ import {
 import { AreaConstraintsPage } from './AreaConstraintsPage';
 import { loadSavedPassages, loadBundledSavedPassages, mergeSavedPassages, saveSavedPassages, type SavedPassage } from '../data/savedPassages';
 import { CargoMasterPanel } from './CargoMasterPanel';
+import { EtsPolicyPanel } from './EtsPolicyPanel';
 
 /**
  * Settings popup opened from the profile menu (Profile Settings → Settings).
@@ -87,6 +88,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'area-constraints', labelKey: 'areaConstraints', labelFallback: 'Area Constraints', icon: 'fa-draw-polygon' },
   { id: 'saved-passages', labelKey: 'savedPassages', labelFallback: 'Saved Passages', icon: 'fa-route' },
   { id: 'workflow-config', labelKey: 'workflowConfig', labelFallback: 'Company & Workflow', icon: 'fa-building' },
+  { id: 'ets-policy', labelKey: 'etsPolicy', labelFallback: 'Emissions (EU ETS)', icon: 'fa-leaf' },
 ];
 
 export function SettingsModal({
@@ -160,6 +162,7 @@ export function SettingsModal({
       )}
       {active.id === 'saved-passages' && <SavedPassagesPanel />}
       {active.id === 'workflow-config' && <WorkflowConfigPanel />}
+      {active.id === 'ets-policy' && <EtsPolicyPanel />}
     </section>
   );
 

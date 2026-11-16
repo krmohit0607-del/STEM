@@ -8,7 +8,7 @@ import {
   STUB_ROWS,
   getRoutePath,
 } from '../data/fleet';
-import { getAntimeridianAwareBounds, unwrapRouteCoordinates } from '../data/antimeridian';
+import { getAntimeridianAwareBounds, needsWorldCopies, offsetPoint, unwrapRouteCoordinates, wrapPointNear } from '../data/antimeridian';
 import { AreaConstraintsControl } from './AreaConstraintsControl';
 import { WeatherFieldControl } from './WeatherFieldControl';
 import { CycloneLayer } from './CycloneLayer';
@@ -48,6 +48,31 @@ interface VoyageOverviewMapProps {
 /** ms for one full pass of the route polyline. */
 const PLAY_DURATION_MS = 60_000;
 
+/**
+ * Interpolate a point a fraction `t` of the way from `(lat0, lon0)` to
+ * `(lat1, lon1)` along the straight line Leaflet actually draws between
+ * them — a rhumb line on this Mercator map, not a straight line in raw
+ * lat/lon degrees (see the identical helper in RouteSimulatorPanel.tsx for
+ * the full explanation). Keeps the simulated ship marker exactly on the
+ * plotted track instead of cutting visibly inside it on legs spanning real
+ * latitude.
+ */
+function lerpOnRenderedLine(
+  lat0: number,
+  lon0: number,
+  lat1: number,
+  lon1: number,
+  t: number,
+): [number, number] {
+  const toMercatorY = (latDeg: number) => Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
+  const fromMercatorY = (y: number) => (Math.atan(Math.exp(y)) * 360) / Math.PI - 90;
+  const y0 = toMercatorY(lat0);
+  const y1 = toMercatorY(lat1);
+  const lat = fromMercatorY(y0 + (y1 - y0) * t);
+  const lon = lon0 + (lon1 - lon0) * t;
+  return [lat, lon];
+}
+
 function samplePath(
   path: Array<[number, number]>,
   progress: number,
@@ -60,7 +85,7 @@ function samplePath(
   const t = p - i0;
   const [lat0, lon0] = path[i0];
   const [lat1, lon1] = path[i1];
-  return [lat0 * (1 - t) + lat1 * t, lon0 * (1 - t) + lon1 * t];
+  return lerpOnRenderedLine(lat0, lon0, lat1, lon1, t);
 }
 
 function bearingDeg(a: [number, number], b: [number, number]): number {
@@ -211,11 +236,16 @@ function VoyageOverviewInner({ row }: InnerProps) {
       { name: row.interimPort, label: 'Interim' },
       { name: row.arrivalPort, label: 'Arrival' },
     ].filter((p) => p.name && PORT_COORDS[p.name]);
+    const anchor = renderPath[0]?.[1] ?? 0;
     return ports.map((p) => ({
       ...p,
-      coords: PORT_COORDS[p.name],
+      coords: wrapPointNear(PORT_COORDS[p.name], anchor),
     }));
-  }, [row]);
+  }, [row, renderPath]);
+  // `worldCopyJump` lets the user pan into an adjacent copy of the tiled
+  // world; a route near the dateline needs rendering there too, or the line
+  // and its markers simply vanish once the user pans past 180deg.
+  const mapOffsets = needsWorldCopies(renderPath) ? [-360, 0, 360] : [0];
 
   return (
     <div className="fv-voyage-overview">
@@ -307,6 +337,9 @@ function VoyageOverviewInner({ row }: InnerProps) {
           {...(bounds ? { bounds } : { center: [20, 0] as LatLngExpression, zoom: 3 })}
           minZoom={2}
           maxZoom={10}
+          zoomSnap={0.25}
+          zoomDelta={0.5}
+          wheelPxPerZoomLevel={120}
           maxBounds={WORLD_PAN_BOUNDS}
           maxBoundsViscosity={1.0}
           worldCopyJump
@@ -320,48 +353,56 @@ function VoyageOverviewInner({ row }: InnerProps) {
             crossOrigin="anonymous"
           />
 
-          {positions.length >= 2 && (
-            <Polyline
-              positions={positions}
-              pathOptions={{ color: '#58a6ff', weight: 4, opacity: 0.9 }}
-            />
+          {positions.length >= 2 &&
+            mapOffsets.map((offset) => (
+              <Polyline
+                key={`line-${offset}`}
+                positions={(positions as Array<[number, number]>).map(([lat, lon]) => [lat, lon + offset] as LatLngExpression)}
+                pathOptions={{ color: '#58a6ff', weight: 4, opacity: 0.9 }}
+              />
+            ))}
+
+          {mapOffsets.flatMap((offset) =>
+            portMarkers.map((p) => (
+              <Marker
+                key={`port-${p.label}-${offset}`}
+                position={offsetPoint(p.coords, offset)}
+                interactive={offset === 0}
+                icon={L.divIcon({
+                  className: 'fv-voyage-overview__port-wrap',
+                  iconSize: [22, 22],
+                  iconAnchor: [11, 20],
+                  html: '<span class="fv-voyage-overview__port"><i class="fas fa-location-dot" aria-hidden="true"></i></span>',
+                })}
+              >
+                {offset === 0 && (
+                  <Tooltip
+                    direction="top"
+                    offset={[0, -6]}
+                    opacity={1}
+                    className="fv-voyage-overview__port-tooltip"
+                  >
+                    {p.label}: {p.name}
+                  </Tooltip>
+                )}
+              </Marker>
+            )),
           )}
 
-          {portMarkers.map((p) => (
-            <Marker
-              key={`port-${p.label}`}
-              position={p.coords}
-              icon={L.divIcon({
-                className: 'fv-voyage-overview__port-wrap',
-                iconSize: [22, 22],
-                iconAnchor: [11, 20],
-                html: '<span class="fv-voyage-overview__port"><i class="fas fa-location-dot" aria-hidden="true"></i></span>',
-              })}
-            >
-              <Tooltip
-                direction="top"
-                offset={[0, -6]}
-                opacity={1}
-                className="fv-voyage-overview__port-tooltip"
-              >
-                {p.label}: {p.name}
-              </Tooltip>
-            </Marker>
-          ))}
-
-          {path.length > 0 && (
-            <Marker position={shipPos} icon={icon} zIndexOffset={1000}>
-              <Tooltip
-                direction="top"
-                offset={[0, -14]}
-                opacity={1}
-                permanent
-                className="fv-voyage-overview__ship-tooltip"
-              >
-                {row.vesselName} · {formatNumber(row.instSpeed, 1)} kt
-              </Tooltip>
-            </Marker>
-          )}
+          {path.length > 0 &&
+            mapOffsets.map((offset) => (
+              <Marker key={`ship-${offset}`} position={offsetPoint(shipPos, offset)} icon={icon} zIndexOffset={1000}>
+                <Tooltip
+                  direction="top"
+                  offset={[0, -14]}
+                  opacity={1}
+                  permanent
+                  className="fv-voyage-overview__ship-tooltip"
+                >
+                  {row.vesselName} · {formatNumber(row.instSpeed, 1)} kt
+                </Tooltip>
+              </Marker>
+            ))}
 
           <MapLayersControl position="topright" overlayLayers={overlayLayers} onOverlayToggle={setOverlayLayers} />
           {overlayLayers.includes('loadLineZones') && <LoadLineZonesLayer />}

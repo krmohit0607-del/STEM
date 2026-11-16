@@ -9,8 +9,15 @@ export interface RouteReportMarker {
   dateTimeText?: string;
   speedKts?: number | null;
   distanceNm?: number | null;
+  /** Heading (deg true) the marker's icon is rotated to — the report's own
+   *  course-made-good when entered, otherwise a bearing fallback computed
+   *  from the nearest neighbouring report's position, so the icon points
+   *  along the actual track instead of defaulting to north. */
+  course?: number;
   /** True for validated in-between breakup points (e.g. 6-hour rows). */
   isInterpolated?: boolean;
+  /** True for the default planned-departure row (first waypoint at the ETD) that stands in until the actual departure report arrives. */
+  isDefault?: boolean;
   /** Marker colour used on the map. */
   color?: string;
   /** User-selected speed profile for this report marker. */

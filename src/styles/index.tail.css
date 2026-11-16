@@ -916,7 +916,7 @@
 
 /* ---- Voyage AI Assistant panel ---- */
 .fv-ai__overlay { position: fixed; inset: 0; z-index: 1800; background: rgba(0,0,0,0.45); display: flex; justify-content: flex-end; }
-.fv-ai__panel { width: 420px; max-width: 100vw; height: 100%; background: #0e1626; border-left: 1px solid #2a3447; display: flex; flex-direction: column; box-shadow: -8px 0 32px rgba(0,0,0,0.5); animation: fv-ai-slide 0.2s ease; }
+.fv-ai__panel { position: relative; width: 420px; max-width: 100vw; height: 100%; background: #0e1626; border-left: 1px solid #2a3447; display: flex; flex-direction: column; box-shadow: -8px 0 32px rgba(0,0,0,0.5); animation: fv-ai-slide 0.2s ease; }
 @keyframes fv-ai-slide { from { transform: translateX(100%); } to { transform: translateX(0); } }
 .fv-ai__head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #2a3447; background: #0b1220; flex-shrink: 0; }
 .fv-ai__head-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -925,12 +925,46 @@
 .fv-ai__head-sub { font-size: 11px; color: #8b949e; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
 .fv-ai__close { background: transparent; border: none; color: #8b949e; cursor: pointer; font-size: 15px; padding: 4px; border-radius: 4px; }
 .fv-ai__close:hover { color: #fff; }
+.fv-ai__close:disabled { opacity: 0.4; cursor: default; }
+.fv-ai__head-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.fv-ai__head-actions .fv-ai__close[aria-pressed='true'] { color: #58a6ff; }
+.fv-ai__loading { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; background: rgba(14,22,38,0.7); color: #c9d1d9; font-size: 12px; }
+/* Chat history */
+.fv-ai__history { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; background: #0e1626; }
+.fv-ai__history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #2a3447; background: #0b1220; }
+.fv-ai__history-new { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border: 1px solid #1f6feb; border-radius: 6px; background: #1f6feb; color: #fff; font-size: 12px; font-weight: 600; cursor: pointer; }
+.fv-ai__history-new:hover { background: #2d7dff; }
+.fv-ai__history-search { margin: 10px 12px 4px; background: #0b1220; border: 1px solid #2a3447; border-radius: 6px; color: #e6edf3; font-size: 12px; padding: 7px 10px; outline: none; }
+.fv-ai__history-search:focus { border-color: #1f6feb; }
+.fv-ai__history-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 8px; }
+.fv-ai__history-group { padding: 10px 6px 4px; color: #6e7681; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.fv-ai__history-item { display: flex; align-items: center; gap: 4px; border-radius: 6px; border: 1px solid transparent; }
+.fv-ai__history-item:hover { background: #141c2b; }
+.fv-ai__history-item.is-active { background: #12345e; border-color: #1559c4; }
+.fv-ai__history-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 8px; background: transparent; border: 0; color: inherit; text-align: left; cursor: pointer; }
+.fv-ai__history-title { color: #e6edf3; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fv-ai__history-meta { color: #8b949e; font-size: 10px; }
+.fv-ai__history-rename { flex: 1; min-width: 0; margin: 4px; background: #0b1220; border: 1px solid #1f6feb; border-radius: 4px; color: #e6edf3; font-size: 12px; padding: 5px 8px; outline: none; }
+.fv-ai__history-tools { display: flex; gap: 2px; padding-right: 4px; opacity: 0; }
+.fv-ai__history-item:hover .fv-ai__history-tools, .fv-ai__history-item:focus-within .fv-ai__history-tools { opacity: 1; }
+.fv-ai__history-tools button { width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: #8b949e; cursor: pointer; font-size: 11px; }
+.fv-ai__history-tools button:hover { color: #58a6ff; background: #0e1d33; }
+.fv-ai__history-tools button:last-child:hover { color: #f85149; }
+.fv-ai__history-empty { padding: 18px 8px; color: #8b949e; font-size: 12px; text-align: center; }
+.fv-ai__history-error { color: #f85149; }
+.fv-ai__history-foot { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px 12px; border-top: 1px solid #2a3447; color: #8b949e; font-size: 11px; }
+.fv-ai__history-foot button { background: transparent; border: 0; color: #8b949e; font-size: 11px; cursor: pointer; }
+.fv-ai__history-foot button:hover { color: #f85149; }
+.fv-ai__history-foot .fv-ai__history-danger { color: #f85149; font-weight: 700; }
 .fv-ai__body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 .fv-ai__msg { display: flex; gap: 8px; align-items: flex-end; }
 .fv-ai__msg--user { flex-direction: row-reverse; }
 .fv-ai__avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, #1f6feb, #1a7f37); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; flex-shrink: 0; }
 .fv-ai__bubble { max-width: 88%; background: #141c2b; border: 1px solid #2a3447; border-radius: 12px 12px 12px 2px; padding: 8px 12px; position: relative; }
 .fv-ai__msg--user .fv-ai__bubble { background: #12345e; border-color: #1559c4; border-radius: 12px 12px 2px 12px; color: #cde3ff; }
+.fv-ai__action-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.fv-ai__action { display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; padding: 6px 9px; border: 1px solid #315d91; border-radius: 4px; background: #10243d; color: #9ecbff; font-size: 11px; font-weight: 600; cursor: pointer; }
+.fv-ai__action:hover { background: #17365b; border-color: #58a6ff; }
 .fv-ai__ts { font-size: 9px; color: #6e7681; display: block; margin-top: 4px; text-align: right; }
 .fv-ai__text { font-size: 12px; color: #e6edf3; line-height: 1.6; }
 .fv-ai__text strong { color: #58a6ff; font-weight: 700; }
@@ -946,10 +980,19 @@
 .fv-ai__suggestions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-top: 1px solid #1e2a3d; flex-shrink: 0; }
 .fv-ai__chip { background: #141c2b; border: 1px solid #2a3447; border-radius: 16px; color: #8b949e; font-size: 11px; padding: 4px 10px; cursor: pointer; }
 .fv-ai__chip:hover { border-color: #58a6ff; color: #58a6ff; background: #0e1d33; }
+.fv-ai__documents { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 12px 0; }
+.fv-ai__document { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 7px; border: 1px solid #2a3447; border-radius: 4px; background: #141c2b; color: #c9d1d9; font-size: 10px; }
+.fv-ai__document > i { color: #58a6ff; flex-shrink: 0; }
+.fv-ai__document button { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 0; background: transparent; color: #8b949e; cursor: pointer; flex-shrink: 0; }
+.fv-ai__document button:hover { color: #f85149; }
+.fv-ai__document-status { padding: 4px 12px 0; color: #8b949e; font-size: 10px; overflow-wrap: anywhere; }
 /* Input area */
 .fv-ai__footer { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid #2a3447; flex-shrink: 0; }
 .fv-ai__input { flex: 1; background: #0b1220; border: 1px solid #2a3447; border-radius: 20px; color: #e6edf3; font-size: 12px; padding: 8px 14px; outline: none; }
 .fv-ai__input:focus { border-color: #1f6feb; }
+.fv-ai__attach { width: 34px; height: 34px; border-radius: 50%; background: #141c2b; border: 1px solid #2a3447; color: #8b949e; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.fv-ai__attach:hover:not(:disabled) { color: #58a6ff; border-color: #58a6ff; }
+.fv-ai__attach:disabled { opacity: 0.5; cursor: default; }
 .fv-ai__send { width: 34px; height: 34px; border-radius: 50%; background: #1f6feb; border: none; color: #fff; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .fv-ai__send:disabled { background: #2a3447; color: #6e7681; cursor: default; }
 .fv-ai__send:not(:disabled):hover { background: #2d7dff; }
@@ -957,9 +1000,28 @@
 /* light mode */
 .fv-light .fv-ai__panel { background: #fff; border-color: #d4dae8; }
 .fv-light .fv-ai__head { background: #f3f5f9; border-color: #d4dae8; }
+.fv-light .fv-ai__head-title { color: #1b2430; }
+.fv-light .fv-ai__head-sub { color: #64748b; }
 .fv-light .fv-ai__bubble { background: #f3f5f9; border-color: #d4dae8; }
 .fv-light .fv-ai__text { color: #1b2430; }
+.fv-light .fv-ai__ts { color: #64748b; }
+.fv-light .fv-ai__document { background: #f3f5f9; border-color: #d4dae8; color: #334155; }
+.fv-light .fv-ai__document-status { color: #64748b; }
+.fv-light .fv-ai__attach { background: #fff; border-color: #d4dae8; color: #475569; }
+.fv-light .fv-ai__action { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.fv-light .fv-ai__action:hover { background: #dbeafe; border-color: #60a5fa; }
 .fv-light .fv-ai__input { background: #fff; border-color: #d4dae8; color: #1b2430; }
+.fv-light .fv-ai__loading { background: rgba(255,255,255,0.75); color: #334155; }
+.fv-light .fv-ai__history { background: #fff; }
+.fv-light .fv-ai__history-head { background: #f3f5f9; border-color: #d4dae8; }
+.fv-light .fv-ai__history-search, .fv-light .fv-ai__history-rename { background: #fff; border-color: #d4dae8; color: #1b2430; }
+.fv-light .fv-ai__history-item:hover { background: #f3f5f9; }
+.fv-light .fv-ai__history-item.is-active { background: #eff6ff; border-color: #bfdbfe; }
+.fv-light .fv-ai__history-title { color: #1b2430; }
+.fv-light .fv-ai__history-meta, .fv-light .fv-ai__history-group, .fv-light .fv-ai__history-empty, .fv-light .fv-ai__history-foot, .fv-light .fv-ai__history-foot button { color: #64748b; }
+.fv-light .fv-ai__history-foot { border-color: #d4dae8; }
+.fv-light .fv-ai__history-tools button:hover { background: #dbeafe; }
+.fv-light .fv-ai__history-error, .fv-light .fv-ai__history-foot .fv-ai__history-danger { color: #dc2626; }
 
 .fv-topnav__action-button {
   display: inline-flex;
@@ -1894,6 +1956,15 @@
   border-color: #2f5f8f;
   background: #15273b;
 }
+.fv-sim2__routes-btn--danger {
+  color: #f85149;
+  border-color: #5f2f2f;
+}
+.fv-sim2__routes-btn--danger:hover:not(:disabled) {
+  color: #ffffff;
+  border-color: #f85149;
+  background: #3b1515;
+}
 .fv-sim2__routes-note {
   color: var(--sim-muted);
   font-size: 11px;
@@ -2089,6 +2160,64 @@
   font-size: 12px;
   color: #d29922;
 }
+.fv-opt-pop__note--error { color: #f85149; }
+.fv-light .fv-opt-pop__note--error { color: #b42318; }
+
+button.fv-opt-pop__factors-title { padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+
+/* Optimization details pop-up (opened from the routes toolbar); it renders in document.body so it carries its own --sim-* theme variables. */
+.fv-optins__open { position: relative; }
+.fv-optins__dot { position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: #f0883e; }
+.fv-optins-modal__overlay,
+.fv-optins-modal {
+  --sim-surface: #0e1626;
+  --sim-border: #24314a;
+  --sim-line: #1b273d;
+  --sim-text: #e6edf3;
+  --sim-muted: #8b98a5;
+  --sim-accent: #58a6ff;
+}
+.fv-light .fv-optins-modal__overlay,
+.fv-light .fv-optins-modal {
+  --sim-surface: #fff;
+  --sim-border: #d4dae8;
+  --sim-line: #eef2f6;
+  --sim-text: #24313d;
+  --sim-muted: #64748b;
+  --sim-accent: #1f6feb;
+}
+.fv-optins-modal__overlay { position: fixed; inset: 0; z-index: 1900; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,0.5); }
+.fv-optins-modal { display: flex; flex-direction: column; width: min(1100px, 100%); max-height: min(720px, 100%); background: var(--sim-surface); border: 1px solid var(--sim-border); border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.45); color: var(--sim-text); font-size: 12px; }
+.fv-optins-modal__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--sim-border); }
+.fv-optins-modal__title { display: block; font-size: 14px; font-weight: 700; }
+.fv-optins-modal__sub { display: block; margin-top: 2px; color: var(--sim-muted); font-size: 11px; }
+.fv-optins-modal__close { width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--sim-muted); font-size: 15px; cursor: pointer; }
+.fv-optins-modal__close:hover { color: var(--sim-text); }
+.fv-optins-modal__body { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 16px; }
+.fv-optins__tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--sim-line); }
+.fv-optins__tab { padding: 8px 12px; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--sim-muted); font-size: 12px; cursor: pointer; }
+.fv-optins__tab:hover { color: var(--sim-text); }
+.fv-optins__tab--active { color: var(--sim-accent); border-bottom-color: var(--sim-accent); font-weight: 700; }
+.fv-optins__wait td { font-style: italic; color: var(--sim-muted); }
+.fv-optins__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.fv-optins__block h6, .fv-optins__sub { margin: 0 0 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--sim-muted); }
+.fv-optins__block--wide { grid-column: 1 / -1; }
+.fv-optins__row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--sim-line); }
+.fv-optins__label { color: var(--sim-muted); }
+.fv-optins__value { text-align: right; }
+.fv-optins__note { margin: 4px 0; color: var(--sim-muted); line-height: 1.35; }
+.fv-optins__empty { margin: 4px 0; color: var(--sim-muted); }
+.fv-optins__error { margin: 4px 0; color: #f85149; }
+.fv-light .fv-optins__error { color: #b42318; }
+.fv-optins__list { margin: 0; padding-left: 16px; color: var(--sim-muted); }
+.fv-optins__table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.fv-optins__table th { padding: 3px 6px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--sim-muted); text-align: center; border-bottom: 1px solid var(--sim-border); }
+.fv-optins__table td { padding: 3px 6px; text-align: center; border-bottom: 1px solid var(--sim-line); }
+.fv-optins__table td.fv-optins__left { text-align: left; white-space: normal; }
+.fv-optins__actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.fv-optins__btn { padding: 3px 8px; border: 1px solid var(--sim-border); border-radius: 4px; background: var(--sim-surface); color: var(--sim-text); font-size: 11px; cursor: pointer; }
+.fv-optins__btn:hover:not(:disabled) { border-color: var(--sim-accent); color: var(--sim-accent); }
+.fv-optins__btn:disabled { opacity: 0.5; cursor: default; }
 .fv-opt-pop__anchor-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -5707,6 +5836,16 @@
    rules that would otherwise win on specificity). */
 .fv-tracksheet__table tr.fv-tracksheet__row--good-weather td {
   background: rgba(63, 185, 80, 0.16) !important;
+}
+
+/* Validated report row — a subtle left-edge accent on the RT cell so a
+   validated report is distinguishable at a glance without competing with
+   the good-weather row tint above. Cleared automatically (see
+   TracksheetGrid's route-hash invalidation effect) once the active route's
+   geometry changes after validation, so this accent disappearing is itself
+   the "needs re-validating" signal. */
+.fv-tracksheet__table tr.fv-tracksheet__row--validated td:nth-child(2) {
+  box-shadow: inset 3px 0 0 #3fb950;
 }
 
 /* Tracksheet â€” light theme ------------------------------------------- */
@@ -9935,6 +10074,21 @@
   overflow-x: auto;
 }
 
+/* Engine load diagram: spans its whole row and keeps every column readable (scrolls sideways when narrower). */
+.fv-voyage__col--full {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.fv-loaddiagram {
+  min-width: 1100px;
+}
+
+.fv-loaddiagram th,
+.fv-loaddiagram td {
+  text-align: center;
+}
+
 .fv-voyage__dtable {
   width: 100%;
   border-collapse: collapse;
@@ -11074,6 +11228,56 @@ select.fv-voyage__input {
   font-size: 12px;
 }
 
+.fv-route__icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: #1b2434;
+  color: #e6edf3;
+  border: 1px solid #2a3447;
+  border-radius: 3px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fv-route__icon-btn:hover:not(:disabled) {
+  background: #243049;
+  border-color: #58a6ff;
+  color: #fff;
+}
+
+.fv-route__icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Portal target for the Route Simulator panel's route-management toolbar
+ * (bookmark/import/export/merge/split/duplicate-edit/...) — see
+ * `useRoutesToolbarSlot`. Those buttons are styled with `--sim-*` custom
+ * properties normally defined on `.fv-sim2` (the panel's own root, down in
+ * the bottom drawer); redefining the same values here lets them render
+ * correctly once portaled up into this header row instead.
+ */
+.fv-route__routes-toolbar-slot {
+  --sim-surface: #1b2434;
+  --sim-border: #2a3447;
+  --sim-muted: #8b98a5;
+  --sim-accent: #58a6ff;
+  --sim-hover: #243049;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.fv-light .fv-route__routes-toolbar-slot {
+  --sim-surface: #f3f6fb;
+  --sim-border: #d6dde7;
+  --sim-muted: #66717f;
+  --sim-accent: #1f6feb;
+  --sim-hover: #e7edf6;
+}
+
 .fv-route__bulk-count {
   color: #8b949e;
   font-size: 11px;
@@ -11359,6 +11563,26 @@ select.fv-voyage__input {
   flex-basis: 100%;
 }
 
+.fv-route__gen-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-basis: 100%;
+  padding: 8px 10px;
+  border: 1px solid #3d3012;
+  border-radius: 6px;
+  background: rgba(240, 160, 32, 0.08);
+}
+
+.fv-route__gen-warning-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #d9a441;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .fv-route__gen-hint {
   flex-basis: 100%;
   font-size: 11px;
@@ -11623,7 +11847,14 @@ select.fv-voyage__input {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px;
+  /* No top padding: padding on a scrolling container creates a gap between
+   * the scrollport's real edge and a sticky child's "top: 0" — the
+   * sticky `<thead>` below would stick 8px short of the top, leaving a
+   * strip where the row just behind it is still visible, half-hidden
+   * under/above the header as you scroll (a well-known sticky-inside-
+   * padded-overflow quirk). Horizontal and bottom padding don't have a
+   * sticky element to conflict with, so those are kept. */
+  padding: 0 8px 8px;
 }
 
 .fv-route__side-empty {
@@ -11642,6 +11873,7 @@ select.fv-voyage__input {
 .fv-route__side-table thead th {
   position: sticky;
   top: 0;
+  z-index: 1;
   text-align: left;
   font-size: 10px;
   text-transform: uppercase;
@@ -12605,9 +12837,48 @@ select.fv-voyage__input {
   box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.18), 0 1px 2px rgba(15, 23, 42, 0.22);
 }
 
+/* Single-click selection from the Waypoint details list (or a map-marker
+ * click) — a colour change plus the same small, tight "hug the marker"
+ * bold treatment as `--checked` below, so the one selected waypoint is
+ * easy to spot among the many plain dots on a long route, not just a
+ * subtle colour swap that's easy to miss. */
 .fv-route-map__pin--selected {
-  color: #ffd33d;
+  color: #3fb950;
   outline: none;
+}
+.fv-route-map__pin--selected .fv-route-map__dot {
+  width: 13px;
+  height: 13px;
+  border-width: 3px;
+  box-shadow: 0 0 0 1.5px #ffffff;
+}
+.fv-route-map__pin--selected i {
+  font-weight: 900;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1.5px #fff);
+}
+
+/* Checked via the Waypoint details list's per-row checkbox (bulk-action
+ * selection) — the same small, tight highlight as `--selected` above (a
+ * colour change plus a slightly bolder/thicker dot with a thin ring right
+ * against its edge — not a large, loose halo), so waypoints checked for
+ * Insert/Delete/Set speed are identifiable on the map, and take visual
+ * priority over a plain `--selected` on the same marker (this rule comes
+ * after `--selected`'s above, so it wins when both classes are present).
+ * Applied via `color` (not `background`) so it also recolours port/
+ * departure icons (an `<i>` glyph using `currentColor`), not just the
+ * plain dot. */
+.fv-route-map__pin--checked {
+  color: #f85149;
+}
+.fv-route-map__pin--checked .fv-route-map__dot {
+  width: 13px;
+  height: 13px;
+  border-width: 3px;
+  box-shadow: 0 0 0 1.5px #ffffff;
+}
+.fv-route-map__pin--checked i {
+  font-weight: 900;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1.5px #fff);
 }
 
 .fv-route-map__tip {
@@ -12637,7 +12908,7 @@ select.fv-voyage__input {
 }
 
 .leaflet-popup.fv-route-map__report-popup .leaflet-popup-content {
-  margin: 10px;
+  margin: 8px;
 }
 
 .leaflet-popup.fv-route-map__report-popup .leaflet-popup-tip {
@@ -12645,27 +12916,27 @@ select.fv-voyage__input {
 }
 
 .fv-route-map__report-card {
-  min-width: 250px;
+  min-width: 190px;
   display: grid;
-  gap: 9px;
+  gap: 7px;
 }
 
 .fv-route-map__report-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
 }
 
 .fv-route-map__report-meta {
   margin: 0;
-  font-size: 11px;
+  font-size: 10px;
   color: #9fb1c8;
 }
 
 .fv-route-map__report-field {
   display: grid;
-  gap: 5px;
-  font-size: 12px;
+  gap: 4px;
+  font-size: 11px;
 }
 
 .fv-route-map__report-field span {
@@ -12675,18 +12946,19 @@ select.fv-voyage__input {
 
 .fv-route-map__report-field select {
   width: 100%;
-  height: 31px;
+  height: 27px;
   border: 1px solid #3a4961;
   border-radius: 6px;
   background: #111b2a;
   color: #e6edf3;
-  padding: 0 9px;
+  padding: 0 7px;
+  font-size: 11px;
 }
 
 .fv-route-map__report-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 7px;
+  gap: 6px;
 }
 
 .fv-route-map__report-btn {
@@ -12694,11 +12966,16 @@ select.fv-voyage__input {
   background: #202c3f;
   color: #d7e2ef;
   border-radius: 6px;
-  height: 30px;
-  padding: 0 12px;
-  font-size: 12px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.fv-route-map__report-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .fv-route-map__report-btn--primary {
@@ -14512,6 +14789,16 @@ select.fv-voyage__input {
   border-color: #1f6feb;
   color: #fff;
 }
+.fv-light .fv-route__icon-btn {
+  background: #f3f6fb;
+  color: #1b2330;
+  border: 1px solid #d6dde7;
+}
+.fv-light .fv-route__icon-btn:hover:not(:disabled) {
+  background: #e7edf6;
+  border-color: #1f6feb;
+  color: #0b1320;
+}
 .fv-light .fv-route__side-panel {
   background: #f7f9fc;
   border: 1px solid #d6dde7;
@@ -15540,6 +15827,19 @@ select.fv-voyage__input {
   left: 0;
   pointer-events: none;
 }
+.fv-wf-isobar-label {
+  color: #ffffff;
+  background: rgba(8, 12, 22, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+  white-space: nowrap;
+}
 .leaflet-top.leaflet-right .fv-wf-control {
   margin-top: 100px;
 }
@@ -15710,7 +16010,11 @@ select.fv-voyage__input {
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 1000;
+  /* Below the bottom panel (z-index 800) so dialogs/popups rendered inside
+     it (e.g. the Delete route confirmation) are never painted underneath
+     this map overlay — still above every Leaflet pane (markers/tooltips/
+     popups top out at 700). */
+  z-index: 750;
   pointer-events: none;
   display: flex;
   justify-content: center;
@@ -16207,7 +16511,7 @@ select.fv-voyage__input {
   position: absolute;
   top: 10px;
   right: 12px;
-  z-index: 1000;
+  z-index: 750;
   pointer-events: none;
 }
 .fv-wf-live-status__pill {

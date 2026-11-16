@@ -92,6 +92,10 @@ let simWeatherHour: number | null = null;
 // falls within the voyage's ETD-ETA window — the mirror-image bridge of
 // `simWeatherHour` above.
 let weatherScrubHour: number | null = null;
+// One-shot request for the map to zoom to a set of points (e.g. a just-imported route); `nonce` changes on every request.
+let mapFitRequest: { nonce: number; points: Array<[number, number]> } | null = null;
+// One-shot request for the map to recenter on the vessel's current position (keeping the current zoom); `nonce` changes on every request.
+let mapCenterOnVesselRequest: { nonce: number } | null = null;
 
 const listeners = new Set<() => void>();
 
@@ -217,6 +221,51 @@ export function useMapPlannedColor(): string {
 /** The route waypoint vertices to render on the map. */
 export function useMapRouteWaypoints(): SimWaypointDot[] {
   return useSyncExternalStore(subscribe, () => mapRouteWaypoints);
+}
+
+/** Ask the map to zoom to these [lat, lon] points. */
+export function requestMapFit(points: Array<[number, number]>): void {
+  if (points.length === 0) return;
+  mapFitRequest = { nonce: (mapFitRequest?.nonce ?? 0) + 1, points };
+  emit();
+}
+
+/** The latest zoom request, or null until one is made. */
+export function useMapFitRequest(): { nonce: number; points: Array<[number, number]> } | null {
+  return useSyncExternalStore(subscribe, () => mapFitRequest);
+}
+
+/** Ask the map to recenter on the vessel's current position, wherever the view is currently panned to. */
+export function requestMapCenterOnVessel(): void {
+  mapCenterOnVesselRequest = { nonce: (mapCenterOnVesselRequest?.nonce ?? 0) + 1 };
+  emit();
+}
+
+/** The latest "center on vessel" request, or null until one is made. */
+export function useMapCenterOnVesselRequest(): { nonce: number } | null {
+  return useSyncExternalStore(subscribe, () => mapCenterOnVesselRequest);
+}
+
+// --- Routes-toolbar slot bridge ----------------------------------------
+// The Route Simulator panel's route-management buttons (bookmark/import/
+// export/merge/split/duplicate-edit/...) are portaled up into a DOM node
+// the Route Explorer page's own header renders, so they sit in the same row
+// as Save/Discard/Undo/Redo — instead of their own separate row further
+// down, in the bottom drawer — without moving any of their state/handlers
+// out of the panel that owns them.
+let routesToolbarSlot: HTMLDivElement | null = null;
+
+/** The Route Explorer page's header publishes the DOM node it wants the
+ *  routes toolbar portaled into (or `null` once unmounted). */
+export function setRoutesToolbarSlot(el: HTMLDivElement | null): void {
+  routesToolbarSlot = el;
+  emit();
+}
+
+/** The current routes-toolbar portal target, or null until the host page
+ *  has mounted it. */
+export function useRoutesToolbarSlot(): HTMLDivElement | null {
+  return useSyncExternalStore(subscribe, () => routesToolbarSlot);
 }
 
 /** Forecast hour driven by the simulation, or null when it is idle. */

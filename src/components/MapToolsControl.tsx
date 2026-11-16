@@ -10,6 +10,7 @@ import {
 import L, { type ControlPosition } from 'leaflet';
 
 import { useSavedPorts } from '../data/savedPorts';
+import { unwrapRouteCoordinates } from '../data/antimeridian';
 
 /** Renders React children into a real Leaflet control container. */
 function ControlPortal({
@@ -107,10 +108,25 @@ export function PortsControl({
   });
 
   // Only render the ports currently in view, capped for performance.
+  // `bounds` can read past ±180° (e.g. west=180, east=220) once the user
+  // pans into an adjacent world copy via `worldCopyJump` — a plain
+  // `bounds.contains([p.lat, p.lon])` compares that against each port's
+  // canonical ±180 longitude and always misses, so every port in view
+  // would otherwise vanish. Check all three world copies of each port and
+  // render whichever one actually falls in the current viewport.
   const MAX_MARKERS = 600;
   const visible = active
     ? ports
-        .filter((p) => bounds.contains([p.lat, p.lon]))
+        .flatMap((p) => {
+          if (p.lat < bounds.getSouth() || p.lat > bounds.getNorth()) return [];
+          const west = bounds.getWest();
+          const east = bounds.getEast();
+          for (const offset of [0, -360, 360]) {
+            const lon = p.lon + offset;
+            if (lon >= west && lon <= east) return [{ ...p, lon }];
+          }
+          return [];
+        })
         .slice(0, MAX_MARKERS)
     : [];
 
@@ -237,11 +253,11 @@ export function RulerControl({
 
       {points.length > 1 && (
         <Polyline
-          positions={points}
+          positions={unwrapRouteCoordinates(points)}
           pathOptions={{ color: '#39c5cf', weight: 2, dashArray: '6 4' }}
         />
       )}
-      {points.map((pt, i) => (
+      {unwrapRouteCoordinates(points).map((pt, i) => (
         <Marker
           key={i}
           position={pt}
